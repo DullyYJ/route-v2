@@ -2774,7 +2774,7 @@ async function applyLiveWaits(out, stat, env, deadline) {
 }
 __name(applyLiveWaits, "applyLiveWaits");
 
-async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2) {
+async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
   const _tReq = Date.now();
   const p = url.searchParams;
   const SX = parseFloat(p.get("SX")), SY = parseFloat(p.get("SY")), EX = parseFloat(p.get("EX")), EY = parseFloat(p.get("EY"));
@@ -2833,6 +2833,22 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2) {
     }
   }, "pushRows");
 
+  // ★ 2026-09-24 (YJ 지시: D1 추가 최적화 — "완벽하게"): 워커 메모리 캐시(ROWS_CACHE)는
+  //   워커 인스턴스가 켜져 있는 동안만 살아있고 콜드스타트되면 사라진다. 같은 지역을
+  //   다른 사용자가 요청해도(=다른 워커 인스턴스면) 캐시가 안 먹힌다. KV는 인스턴스와
+  //   무관하게 살아남는 2차 캐시라, 인기 지역(강남↔인천 등)은 첫 요청 이후로 여러
+  //   인스턴스/여러 사용자가 계속 재사용할 수 있다. env.ROWS_KV 바인딩이 없거나
+  //   KV 호출이 실패해도(네트워크 등) 절대 요청을 막지 않는다 — 실패하면 그냥
+  //   기존처럼 D1로 간다(기존 기능 보존).
+  let _kvHit = null, _kvErr = null;
+  if (!_cached && env.ROWS_KV) {
+    try {
+      const v = await env.ROWS_KV.get(_ck, "json");
+      if (v && Array.isArray(v)) _kvHit = v;
+    } catch (e) { _kvErr = String((e && e.message) || e).slice(0, 120); }
+  }
+  if (_kvHit) { rows = _kvHit; rowsCacheSet(_ck, _kvHit); }   // L2(KV) 적중 → L1(메모리)에도 채워서 같은 인스턴스 재요청은 더 빨라짐
+
   // ①+②-a 출발·도착 근처를 지나는 노선을 corridor 안에서 통째로.
   //   ★ 2026-09-24 (YJ 실측: D1 콘솔 EXPLAIN QUERY PLAN + 응답시간 vs 쿼리시간 비교):
   //   진짜 병목은 SQL 실행이 아니라 D1 왕복 횟수였다(쿼리 시간은 늘 1ms 미만인데
@@ -2841,7 +2857,7 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2) {
   //   로 최대 8번 왕복했다. 서브쿼리로 합치면 SQLite 옵티마이저가 내부 키 목록을
   //   한 번만 계산(LIST SUBQUERY)해서 재사용(REUSE LIST SUBQUERY)하는 걸 D1 콘솔에서
   //   직접 확인했다 — 결과는 완전히 같고 왕복만 1번으로 준다.
-  if (!_cached) {
+  if (!_cached && !_kvHit) {
     try {
       const q = await env.DB.prepare(
         SQL_COLS + "WHERE brs.route_key IN ("
@@ -2864,7 +2880,7 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2) {
   const _nearRows = rows.length;   // 근처 노선으로 채운 정류장 수(잘리지 않는 부분)
 
   // ②-b 남은 여유로 나머지 corridor
-  const restLimit = _cached ? 0 : Math.max(0, MAX_STOPS - rows.length);
+  const restLimit = (_cached || _kvHit) ? 0 : Math.max(0, MAX_STOPS - rows.length);
   if (restLimit > 0) {
     try {
       const q = await env.DB.prepare(
@@ -2874,12 +2890,22 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2) {
       pushRows((q && q.results) || []);
     } catch (e) { /* 근처 노선만으로도 경로는 나온다 */ }
   }
-  if (_cached) rows = _cached;
-  else rowsCacheSet(_ck, rows);
+  if (_cached) {
+    rows = _cached;
+  } else if (!_kvHit) {
+    // 방금 D1에서 새로 받아온 결과 — L1(메모리) + L2(KV)에 둘 다 채워 둔다.
+    rowsCacheSet(_ck, rows);
+    if (env.ROWS_KV && rows.length) {
+      const _kvPut = env.ROWS_KV.put(_ck, JSON.stringify(rows), { expirationTtl: Math.round(ROWS_TTL_MS / 1000) })
+        .catch(() => {});   // KV 쓰기 실패해도 응답에는 영향 없음(기존 기능 보존)
+      if (ctx && ctx.waitUntil) ctx.waitUntil(_kvPut); else await _kvPut;
+    }
+  }
   const _msD1 = Date.now() - _tD1;
-  const _busDiag = { nearRoutes: _nearKeySet ? _nearKeySet.size : 0, nearRows: _cached ? rows.length : _nearRows,
+  const _busDiag = { nearRoutes: _nearKeySet ? _nearKeySet.size : 0, nearRows: (_cached || _kvHit) ? rows.length : _nearRows,
                      rows: rows.length, capped: rows.length >= MAX_STOPS, nearErr: _nearErr,
-                     cached: !!_cached, d1Ms: _msD1 };
+                     cached: !!(_cached || _kvHit), cacheTier: _cached ? "mem" : (_kvHit ? "kv" : "none"),
+                     kvErr: _kvErr, d1Ms: _msD1 };
   const G = { adj: /* @__PURE__ */ Object.create(null), ST: _G.ST, LN: _G.LN,
               subOff: _G.subOff, subFirst: _G.subFirst,
               _weekend: (() => { const d = new Date(Date.now() + 324e5).getUTCDay(); return d === 0 || d === 6; })() };   // 막차 끊긴 호선 정보를 같이 넘긴다
@@ -3127,11 +3153,11 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2) {
   return new Response(JSON.stringify({ result: out, busStopsInCorridor: Object.keys(busCoord).length, rtwApplied: _rtwApplied, engVer: ENGINE_VERSION, rtwStat: G.rtwStat || null, liveStat: _liveStat, _src: "route-v2" }), { status: 200, headers: CORS });
 }
 __name(handleRouteV2, "handleRouteV2");
-var route_v2_worker_default = { async fetch(request, env) {
+var route_v2_worker_default = { async fetch(request, env, ctx) {
   // ★ 2026-09-05: 어떤 예외도 1101 페이지로 새지 않게 한다.
   //   HTML 오류 페이지는 원인을 감추고, 앱쪽에선 'JSON 아님'로만 보인다.
   try {
-    return await handleFetch(request, env);
+    return await handleFetch(request, env, ctx);
   } catch (e) {
     return new Response(JSON.stringify({
       error: String((e && e.message) || e),
@@ -3139,7 +3165,7 @@ var route_v2_worker_default = { async fetch(request, env) {
     }), { status: 500, headers: CORS_H });
   }
 } };
-async function handleFetch(request, env) {
+async function handleFetch(request, env, ctx) {
   const url = new URL(request.url);
   // ★ 2026-09-05: 앱을 다시 빌드하지 않고 브라우저에서 바로 확인하는 점검 주소.
   //   /live-test?cityCode=23&nodeId=ICB168001440
@@ -3261,7 +3287,7 @@ async function handleFetch(request, env) {
   }
   if ((url.pathname === "/route-v2" || url.pathname === "/route-v2-odsay" || url.pathname === "/route-v2-debug") && request.method === "GET") {
     try {
-      return await handleRouteV2(request, env, url, SUBWAY_BUNDLE);
+      return await handleRouteV2(request, env, url, SUBWAY_BUNDLE, ctx);
     } catch (e) {
       return new Response(JSON.stringify({ error: String(e && e.message || e) }), { status: 500, headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } });
     }
