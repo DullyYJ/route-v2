@@ -1834,13 +1834,214 @@ var LD_TERMINALS = {
   //   먼저 받고 → GetCtyAcctoTrainSttnList?cityCode=X). 이 6개 역 코드는 그 오픈소스 프로젝트의
   //   실측값이고, 부산역(NAT014445)은 별도 출처(team-offway)와도 일치해 신뢰도가 높다.
   //   아직 구간조회(GetStrtpntAlocFndTrainInfo)로 최종 검증 전이니 YJ 실측 후 확정한다.
+  // ★ 2026-09-24 (YJ 전체 연결 지시): 공공데이터포털 "한국철도공사_역 위치 정보_20240401"
+  //   (202개 역, 역명/위도/경도)로 전국 확장. id가 "D1:"로 시작하는 역은 TAGO 실측 id가
+  //   없는 역 — ldFetchTrain()이 D1(train_trains/train_stops)을 먼저 조회하므로 이 id는
+  //   D1에 데이터가 아직 없을 때의 라이브 폴백에서만 쓰이고(그 경우 조용히 빈 결과), 기존
+  //   6개 역(NAT.../NATH...로 시작, YJ 실측 확인됨)의 동작은 완전히 그대로 유지된다.
   train: [
-    { nm: "서울", id: "NAT010000", lat: 37.5547, lng: 126.9707 },
-    { nm: "광명", id: "NATH10219", lat: 37.4204, lng: 126.8837 },
-    { nm: "오송", id: "NAT050044", lat: 36.6197, lng: 127.3260 },
-    { nm: "대전", id: "NAT011668", lat: 36.3325, lng: 127.4344 },
-    { nm: "동대구", id: "NAT013271", lat: 35.8797, lng: 128.6284 },
-    { nm: "부산", id: "NAT014445", lat: 35.1152, lng: 129.0415 }
+    { nm: "서울", id: "NAT010000", lat: 37.55473, lng: 126.9708 },
+    { nm: "용산", id: "D1:용산", lat: 37.52991, lng: 126.9648 },
+    { nm: "수색", id: "D1:수색", lat: 37.5806, lng: 126.8959 },
+    { nm: "행신", id: "D1:행신", lat: 37.3645, lng: 126.4952 },
+    { nm: "도라산", id: "D1:도라산", lat: 37.89877, lng: 126.7098 },
+    { nm: "신망리", id: "D1:신망리", lat: 38.132142, lng: 127.078131 },
+    { nm: "대광리", id: "D1:대광리", lat: 38.184937, lng: 127.108498 },
+    { nm: "신탄리", id: "D1:신탄리", lat: 38.212687, lng: 127.138965 },
+    { nm: "백마고지", id: "D1:백마고지", lat: 38.25763, lng: 127.166169 },
+    { nm: "청량리", id: "D1:청량리", lat: 37.580543, lng: 127.047259 },
+    { nm: "지평", id: "D1:지평", lat: 37.4765, lng: 127.6297 },
+    { nm: "석불", id: "D1:석불", lat: 37.4602, lng: 127.655 },
+    { nm: "일신", id: "D1:일신", lat: 37.44539, lng: 127.6886 },
+    { nm: "매곡", id: "D1:매곡", lat: 37.436095, lng: 127.730439 },
+    { nm: "양동", id: "D1:양동", lat: 37.421914, lng: 127.753314 },
+    { nm: "삼산", id: "D1:삼산", lat: 37.392299, lng: 127.779846 },
+    { nm: "서원주", id: "D1:서원주", lat: 37.349082, lng: 127.839965 },
+    { nm: "원주", id: "D1:원주", lat: 37.315989, lng: 127.921874 },
+    { nm: "광명", id: "NATH10219", lat: 37.416196, lng: 126.884818 },
+    { nm: "영등포", id: "D1:영등포", lat: 37.516118, lng: 126.906942 },
+    { nm: "수원", id: "D1:수원", lat: 37.26608, lng: 126.999231 },
+    { nm: "평택", id: "D1:평택", lat: 36.995815, lng: 127.082538 },
+    { nm: "동백산", id: "D1:동백산", lat: 37.154893, lng: 129.034542 },
+    { nm: "묵호", id: "D1:묵호", lat: 37.546883, lng: 129.107685 },
+    { nm: "정동진", id: "D1:정동진", lat: 37.691459, lng: 129.032672 },
+    { nm: "태백", id: "D1:태백", lat: 37.170948, lng: 129.018526 },
+    { nm: "만종", id: "D1:만종", lat: 37.354501, lng: 127.892557 },
+    { nm: "횡성", id: "D1:횡성", lat: 37.483648, lng: 128.010443 },
+    { nm: "둔내", id: "D1:둔내", lat: 37.510619, lng: 128.222225 },
+    { nm: "평창", id: "D1:평창", lat: 37.562024, lng: 128.429224 },
+    { nm: "진부(오대산)", id: "D1:진부(오대산)", lat: 37.642891, lng: 128.573885 },
+    { nm: "강릉", id: "D1:강릉", lat: 37.764562, lng: 128.899485 },
+    { nm: "삼척해변", id: "D1:삼척해변", lat: 37.46831, lng: 129.166264 },
+    { nm: "신기", id: "D1:신기", lat: 37.345934, lng: 129.084985 },
+    { nm: "천안아산", id: "D1:천안아산", lat: 36.79391, lng: 127.10445 },
+    { nm: "오송", id: "NAT050044", lat: 36.620557, lng: 127.327377 },
+    { nm: "대전", id: "NAT011668", lat: 36.33251, lng: 127.4342 },
+    { nm: "공주", id: "D1:공주", lat: 36.332361, lng: 127.096778 },
+    { nm: "천안", id: "D1:천안", lat: 36.808837, lng: 127.147172 },
+    { nm: "전의", id: "D1:전의", lat: 36.67849, lng: 127.2032 },
+    { nm: "조치원", id: "D1:조치원", lat: 36.60113, lng: 127.2963 },
+    { nm: "신탄진", id: "D1:신탄진", lat: 36.448911, lng: 127.428389 },
+    { nm: "옥천", id: "D1:옥천", lat: 36.2982, lng: 127.5655 },
+    { nm: "이원", id: "D1:이원", lat: 36.24439, lng: 127.6179 },
+    { nm: "지탄", id: "D1:지탄", lat: 36.24206, lng: 127.6759 },
+    { nm: "심천", id: "D1:심천", lat: 36.25513, lng: 127.7115 },
+    { nm: "각계", id: "D1:각계", lat: 36.20836, lng: 127.7255 },
+    { nm: "영동", id: "D1:영동", lat: 36.17241, lng: 127.7862 },
+    { nm: "황간", id: "D1:황간", lat: 36.22465, lng: 127.9112 },
+    { nm: "추풍령", id: "D1:추풍령", lat: 36.22467, lng: 127.9111 },
+    { nm: "서대전", id: "D1:서대전", lat: 36.322641, lng: 127.403318 },
+    { nm: "계룡", id: "D1:계룡", lat: 36.272964, lng: 127.265421 },
+    { nm: "연산", id: "D1:연산", lat: 36.212162, lng: 127.200483 },
+    { nm: "논산", id: "D1:논산", lat: 36.20715, lng: 127.09232 },
+    { nm: "강경", id: "D1:강경", lat: 36.155084, lng: 127.016502 },
+    { nm: "오근장", id: "D1:오근장", lat: 36.70012, lng: 127.478532 },
+    { nm: "청주공항", id: "D1:청주공항", lat: 36.721579, lng: 127.489552 },
+    { nm: "증평", id: "D1:증평", lat: 36.778406, lng: 127.58331 },
+    { nm: "주덕", id: "D1:주덕", lat: 36.973409, lng: 127.802387 },
+    { nm: "충주", id: "D1:충주", lat: 36.976049, lng: 127.909149 },
+    { nm: "가남", id: "D1:가남", lat: 37.197808, lng: 127.535789 },
+    { nm: "감곡장호원", id: "D1:감곡장호원", lat: 37.0727, lng: 127.3803 },
+    { nm: "앙성온천", id: "D1:앙성온천", lat: 37.09222, lng: 127.7871 },
+    { nm: "아산", id: "D1:아산", lat: 36.792172, lng: 127.103872 },
+    { nm: "온양온천", id: "D1:온양온천", lat: 36.781026, lng: 127.001988 },
+    { nm: "도고온천", id: "D1:도고온천", lat: 36.757306, lng: 126.889572 },
+    { nm: "예산", id: "D1:예산", lat: 36.687169, lng: 126.829017 },
+    { nm: "홍성", id: "D1:홍성", lat: 36.583494, lng: 126.681111 },
+    { nm: "광천", id: "D1:광천", lat: 36.501553, lng: 126.622331 },
+    { nm: "청소", id: "D1:청소", lat: 36.446092, lng: 126.590837 },
+    { nm: "대천", id: "D1:대천", lat: 36.341462, lng: 126.586741 },
+    { nm: "웅천", id: "D1:웅천", lat: 36.235584, lng: 126.606692 },
+    { nm: "판교", id: "D1:판교", lat: 36.155541, lng: 126.679461 },
+    { nm: "서천", id: "D1:서천", lat: 36.08233, lng: 126.708133 },
+    { nm: "장항", id: "D1:장항", lat: 36.039633, lng: 126.714975 },
+    { nm: "봉양", id: "D1:봉양", lat: 37.130203, lng: 128.130921 },
+    { nm: "제천", id: "D1:제천", lat: 37.128505, lng: 128.204927 },
+    { nm: "단양", id: "D1:단양", lat: 36.973258, lng: 128.343474 },
+    { nm: "영월", id: "D1:영월", lat: 37.182433, lng: 128.480746 },
+    { nm: "별어곡", id: "D1:별어곡", lat: 37.26932, lng: 128.739779 },
+    { nm: "선평", id: "D1:선평", lat: 37.321318, lng: 128.71218 },
+    { nm: "나전", id: "D1:나전", lat: 37.448695, lng: 128.666275 },
+    { nm: "아우라지", id: "D1:아우라지", lat: 37.472874, lng: 128.722054 },
+    { nm: "정선", id: "D1:정선", lat: 37.388083, lng: 128.671977 },
+    { nm: "삼탄", id: "D1:삼탄", lat: 37.073098, lng: 128.038828 },
+    { nm: "민둥산", id: "D1:민둥산", lat: 37.243708, lng: 128.77365 },
+    { nm: "사북", id: "D1:사북", lat: 37.226242, lng: 128.81698 },
+    { nm: "고한", id: "D1:고한", lat: 37.200866, lng: 128.85298 },
+    { nm: "익산", id: "D1:익산", lat: 35.9394, lng: 126.946773 },
+    { nm: "정읍", id: "D1:정읍", lat: 35.575556, lng: 126.8425 },
+    { nm: "함열", id: "D1:함열", lat: 36.080361, lng: 126.957285 },
+    { nm: "김제", id: "D1:김제", lat: 35.792564, lng: 126.90313 },
+    { nm: "신태인", id: "D1:신태인", lat: 35.6887, lng: 126.884123 },
+    { nm: "군산", id: "D1:군산", lat: 35.999249, lng: 126.759778 },
+    { nm: "대야", id: "D1:대야", lat: 35.944876, lng: 126.824206 },
+    { nm: "삼례", id: "D1:삼례", lat: 35.906664, lng: 127.064256 },
+    { nm: "전주", id: "D1:전주", lat: 35.849772, lng: 127.161845 },
+    { nm: "임실", id: "D1:임실", lat: 35.632905, lng: 127.28991 },
+    { nm: "오수", id: "D1:오수", lat: 35.543012, lng: 127.320531 },
+    { nm: "남원", id: "D1:남원", lat: 35.411284, lng: 127.361398 },
+    { nm: "벌교", id: "D1:벌교", lat: 34.82, lng: 127.34 },
+    { nm: "보성", id: "D1:보성", lat: 34.76, lng: 127.08 },
+    { nm: "능주", id: "D1:능주", lat: 34.99, lng: 126.96 },
+    { nm: "광주송정", id: "D1:광주송정", lat: 35.14, lng: 126.79 },
+    { nm: "백양사", id: "D1:백양사", lat: 35.49, lng: 126.87 },
+    { nm: "장성", id: "D1:장성", lat: 35.3, lng: 126.78 },
+    { nm: "나주", id: "D1:나주", lat: 35.01, lng: 126.18 },
+    { nm: "다시", id: "D1:다시", lat: 35.02, lng: 126.64 },
+    { nm: "함평", id: "D1:함평", lat: 35.02, lng: 126.54 },
+    { nm: "무안", id: "D1:무안", lat: 34.57, lng: 126.31 },
+    { nm: "몽탄", id: "D1:몽탄", lat: 34.93, lng: 126.5 },
+    { nm: "일로", id: "D1:일로", lat: 34.85, lng: 126.48 },
+    { nm: "임성리", id: "D1:임성리", lat: 34.82, lng: 126.43 },
+    { nm: "목포", id: "D1:목포", lat: 34.79, lng: 126.39 },
+    { nm: "진상", id: "D1:진상", lat: 35.02, lng: 127.72 },
+    { nm: "조성", id: "D1:조성", lat: 34.8, lng: 127.24 },
+    { nm: "예당", id: "D1:예당", lat: 34.77, lng: 127.2 },
+    { nm: "득량", id: "D1:득량", lat: 34.76, lng: 127.17 },
+    { nm: "명봉", id: "D1:명봉", lat: 34.82, lng: 127.07 },
+    { nm: "이양", id: "D1:이양", lat: 34.89, lng: 126.99 },
+    { nm: "화순", id: "D1:화순", lat: 35.05, lng: 126.96 },
+    { nm: "효천", id: "D1:효천", lat: 35.1, lng: 126.88 },
+    { nm: "서광주", id: "D1:서광주", lat: 35.13, lng: 126.85 },
+    { nm: "곡성", id: "D1:곡성", lat: 35.28, lng: 127.3 },
+    { nm: "구례구", id: "D1:구례구", lat: 35.0, lng: 127.0 },
+    { nm: "순천", id: "D1:순천", lat: 34.95, lng: 127.5 },
+    { nm: "여천", id: "D1:여천", lat: 34.78, lng: 127.66 },
+    { nm: "여수엑스포", id: "D1:여수엑스포", lat: 34.75, lng: 127.75 },
+    { nm: "극락강", id: "D1:극락강", lat: 35.18, lng: 126.83 },
+    { nm: "광주", id: "D1:광주", lat: 35.17, lng: 126.91 },
+    { nm: "광양", id: "D1:광양", lat: 34.96, lng: 127.59 },
+    { nm: "상주", id: "D1:상주", lat: 36.410288, lng: 128.163738 },
+    { nm: "예천", id: "D1:예천", lat: 36.647817, lng: 128.444376 },
+    { nm: "탑리", id: "D1:탑리", lat: 36.2, lng: 128.6 },
+    { nm: "신녕", id: "D1:신녕", lat: 36.03403, lng: 128.79114 },
+    { nm: "김천(구미)", id: "D1:김천(구미)", lat: 36.113482, lng: 128.180991 },
+    { nm: "동대구", id: "NAT013271", lat: 35.879787, lng: 128.628623 },
+    { nm: "신경주", id: "D1:신경주", lat: 35.798766, lng: 129.138752 },
+    { nm: "김천", id: "D1:김천", lat: 36.12, lng: 128.11 },
+    { nm: "구미", id: "D1:구미", lat: 36.128458, lng: 128.330723 },
+    { nm: "왜관", id: "D1:왜관", lat: 36.047544, lng: 128.363 },
+    { nm: "서대구", id: "D1:서대구", lat: 35.881304, lng: 128.539901 },
+    { nm: "대구", id: "D1:대구", lat: 35.875792, lng: 128.596782 },
+    { nm: "경산", id: "D1:경산", lat: 35.819351, lng: 128.727683 },
+    { nm: "남성현", id: "D1:남성현", lat: 35.704648, lng: 128.716315 },
+    { nm: "청도", id: "D1:청도", lat: 35.640129, lng: 128.746482 },
+    { nm: "서경주", id: "D1:서경주", lat: 35.884739, lng: 129.180324 },
+    { nm: "안강", id: "D1:안강", lat: 35.97066, lng: 129.233057 },
+    { nm: "포항", id: "D1:포항", lat: 36.071865, lng: 129.341983 },
+    { nm: "월포", id: "D1:월포", lat: 36.204284, lng: 129.366728 },
+    { nm: "장사", id: "D1:장사", lat: 36.284421, lng: 129.369508 },
+    { nm: "강구", id: "D1:강구", lat: 36.352655, lng: 129.372288 },
+    { nm: "영덕", id: "D1:영덕", lat: 36.411157, lng: 129.377157 },
+    { nm: "풍기", id: "D1:풍기", lat: 36.888086, lng: 128.539104 },
+    { nm: "영주", id: "D1:영주", lat: 36.81101, lng: 128.625046 },
+    { nm: "안동", id: "D1:안동", lat: 36.574576, lng: 128.674762 },
+    { nm: "의성", id: "D1:의성", lat: 36.353524, lng: 128.6935 },
+    { nm: "화본", id: "D1:화본", lat: 36.127042, lng: 128.694411 },
+    { nm: "북영천", id: "D1:북영천", lat: 35.965753, lng: 128.91765 },
+    { nm: "영천", id: "D1:영천", lat: 35.959483, lng: 128.939163 },
+    { nm: "아화", id: "D1:아화", lat: 35.897856, lng: 129.051588 },
+    { nm: "봉화", id: "D1:봉화", lat: 36.891527, lng: 128.726975 },
+    { nm: "춘양", id: "D1:춘양", lat: 36.937791, lng: 128.919873 },
+    { nm: "임기", id: "D1:임기", lat: 36.903856, lng: 128.999403 },
+    { nm: "현동", id: "D1:현동", lat: 36.936726, lng: 129.012016 },
+    { nm: "분천", id: "D1:분천", lat: 36.932424, lng: 129.058547 },
+    { nm: "승부", id: "D1:승부", lat: 36.993793, lng: 129.08378 },
+    { nm: "옥산", id: "D1:옥산", lat: 36.266702, lng: 128.116093 },
+    { nm: "청리", id: "D1:청리", lat: 36.339231, lng: 128.12898 },
+    { nm: "함창", id: "D1:함창", lat: 36.595544, lng: 128.203297 },
+    { nm: "점촌", id: "D1:점촌", lat: 36.607205, lng: 128.272891 },
+    { nm: "용궁", id: "D1:용궁", lat: 36.627138, lng: 128.329318 },
+    { nm: "개포", id: "D1:개포", lat: 36.715097, lng: 128.506046 },
+    { nm: "하양", id: "D1:하양", lat: 35.910027, lng: 128.818195 },
+    { nm: "울산", id: "D1:울산", lat: 35.551579, lng: 129.138548 },
+    { nm: "부산", id: "NAT014445", lat: 35.114495, lng: 129.03933 },
+    { nm: "상동", id: "D1:상동", lat: 35.555507, lng: 128.760754 },
+    { nm: "밀양", id: "D1:밀양", lat: 35.474446, lng: 128.777147 },
+    { nm: "삼랑진", id: "D1:삼랑진", lat: 35.404847, lng: 128.842628 },
+    { nm: "원동", id: "D1:원동", lat: 35.36294, lng: 128.920375 },
+    { nm: "물금", id: "D1:물금", lat: 35.307183, lng: 128.985349 },
+    { nm: "화명", id: "D1:화명", lat: 35.234472, lng: 129.007581 },
+    { nm: "구포", id: "D1:구포", lat: 35.205441, lng: 128.997108 },
+    { nm: "사상", id: "D1:사상", lat: 35.162619, lng: 128.988722 },
+    { nm: "한림정", id: "D1:한림정", lat: 35.321556, lng: 128.803531 },
+    { nm: "진영", id: "D1:진영", lat: 35.298602, lng: 128.774033 },
+    { nm: "진례", id: "D1:진례", lat: 35.15, lng: 128.45 },
+    { nm: "창원중앙", id: "D1:창원중앙", lat: 35.14, lng: 128.42 },
+    { nm: "창원", id: "D1:창원", lat: 35.15, lng: 128.36 },
+    { nm: "마산", id: "D1:마산", lat: 35.14, lng: 128.34 },
+    { nm: "중리", id: "D1:중리", lat: 35.14, lng: 128.31 },
+    { nm: "함안", id: "D1:함안", lat: 35.14, lng: 128.25 },
+    { nm: "군북", id: "D1:군북", lat: 35.25, lng: 128.35 },
+    { nm: "반성", id: "D1:반성", lat: 35.1, lng: 128.15 },
+    { nm: "진주", id: "D1:진주", lat: 35.15, lng: 128.11 },
+    { nm: "완사", id: "D1:완사", lat: 35.13, lng: 127.97 },
+    { nm: "북천", id: "D1:북천", lat: 35.11, lng: 127.88 },
+    { nm: "횡천", id: "D1:횡천", lat: 35.05, lng: 127.48 },
+    { nm: "하동", id: "D1:하동", lat: 35.06, lng: 127.76 },
+    { nm: "부전", id: "D1:부전", lat: 35.16475, lng: 129.060072 },
+    { nm: "태화강", id: "D1:태화강", lat: 35.538514, lng: 129.353265 },
+    { nm: "북울산", id: "D1:북울산", lat: 35.614817, lng: 129.371957 }
   ],
   expbus: [
     { nm: "서울경부", id: "NAEK010", lat: 37.5045, lng: 127.0044 },
@@ -1873,7 +2074,65 @@ __name(ldNearest, "ldNearest");
 //   30개로는 오후 이후 조회 시 이미 지난 편만 잡히고 미래 편이 통째로 안 잡히는 버그가 있었다
 //   (첫 30개가 전부 그날 이른 시간대 편일 수 있음). ldPickBest 는 어차피 전체를 훑어 최솟값을
 //   고르므로 응답 정렬 순서에 상관없이 안전하다.
-async function ldFetchTrain(depId, arrId, env, stat) {
+// ★ 2026-09-24 (YJ 전체 연결 지시): 오늘 요일(KST)이 train_trains/train_stops 의
+//   day_type(WD=평일 대표/화요일 실측, SAT=토요일, SUN=일요일) 중 어느 것에 해당하는지.
+function ldDayTypeKST() {
+  var d = new Date(Date.now() + 9 * 3600 * 1000);
+  var dow = d.getUTCDay();   // 0=일 ... 6=토 (KST 기준)
+  if (dow === 0) return "SUN";
+  if (dow === 6) return "SAT";
+  return "WD";
+}
+__name(ldDayTypeKST, "ldDayTypeKST");
+
+// gildongmu-train-refresher 가 채워둔 D1(train_trains/train_stops)에서 두 역 이름
+// 사이의 직통(환승 없음) 열차를 찾는다. 라이브 TAGO 조회와 같은 모양의 item
+// (depPlandTime/arrPlandTime/traingradename 등 12자리 절대시각 문자열)으로 돌려줘서
+// ldPickBest/ldGradeOptions 등 기존 판단 로직을 그대로 재사용한다(중복 로직 없음).
+// D1에 아직 그 구간 정차역 시각표가 안 채워졌으면(null 반환) 호출부가 기존처럼
+// 라이브 TAGO로 폴백한다 — 기존 6개 역 동작은 완전히 그대로 유지.
+async function ldFetchTrainD1(depNm, arrNm, env, stat) {
+  if (!env.DB || !depNm || !arrNm) return null;
+  try {
+    var dt = ldDayTypeKST();
+    var q = await env.DB.prepare(
+      "SELECT t1.trn_no AS trn_no, t1.dptre_time AS dep, t2.arvl_time AS arr, tt.train_grade AS grade " +
+      "FROM train_stops t1 " +
+      "JOIN train_stops t2 ON t2.trn_no = t1.trn_no AND t2.day_type = t1.day_type AND t2.seq > t1.seq " +
+      "JOIN train_trains tt ON tt.trn_no = t1.trn_no AND tt.day_type = t1.day_type " +
+      "WHERE t1.stn_nm = ?1 AND t2.stn_nm = ?2 AND t1.day_type = ?3 " +
+      "AND t1.dptre_time IS NOT NULL AND t2.arvl_time IS NOT NULL " +
+      "ORDER BY t1.dptre_time ASC LIMIT 50"
+    ).bind(depNm, arrNm, dt).all();
+    var rows = (q && q.results) || [];
+    if (!rows.length) return null;
+    var ymd = ymdTodayKST();
+    var items = rows.map(function (r) {
+      return {
+        trn_no: r.trn_no,
+        depPlandTime: ymd + String(r.dep || "").padStart(4, "0"),
+        arrPlandTime: ymd + String(r.arr || "").padStart(4, "0"),
+        traingradename: r.grade || null
+      };
+    });
+    if (stat) stat.ldTrainD1Hits = items.length;
+    return items;
+  } catch (e) {
+    if (stat) stat.ldTrainD1Err = String((e && e.message) || e).slice(0, 120);
+    return null;
+  }
+}
+__name(ldFetchTrainD1, "ldFetchTrainD1");
+
+async function ldFetchTrain(depId, arrId, env, stat, depNm, arrNm) {
+  var d1 = await ldFetchTrainD1(depNm, arrNm, env, stat);
+  if (d1 && d1.length) { if (stat) stat.ldTrainVia = "d1"; return d1; }
+  // depId 가 "D1:"로 시작하면(TAGO 실측 id 없음) 라이브 조회는 애초에 성립하지 않으니
+  // 빈 결과로 조용히 끝낸다(기존 기능에 영향 없음 — 예전엔 이 역이 후보에 아예 없었다).
+  if (!depId || !arrId || String(depId).slice(0, 3) === "D1:" || String(arrId).slice(0, 3) === "D1:") {
+    if (stat) stat.ldTrainVia = "d1-empty";
+    return null;
+  }
   var qs = "depPlaceId=" + encodeURIComponent(depId) + "&arrPlaceId=" + encodeURIComponent(arrId) +
     "&depPlandTime=" + ymdTodayKST() + "&numOfRows=300&_type=json";
   var r = await tagoFetchAny(env, LD_BASE + "/TrainInfo/GetStrtpntAlocFndTrainInfo?" + qs);
@@ -2049,7 +2308,7 @@ async function ldFetchLive(SY, SX, EY, EX, env, stat, G, busCoord, busNm) {
   var egrS = arrS ? ldLocalRoute(G, busCoord, busNm, arrS.t.lat, arrS.t.lng, EY, EX) : null;
   if (stat) stat.ldAccessFound = { train: !!accT, expbus: !!accE, subbus: !!accS };
   var jobs = [];
-  if (depT && arrT) jobs.push(ldFetchTrain(depT.t.id, arrT.t.id, env, stat).then(function(items){ return { mode: "train", items: items, dep: depT, arr: arrT, accessRoute: accT, egressRoute: egrT }; }).catch(function(){ return null; }));
+  if (depT && arrT) jobs.push(ldFetchTrain(depT.t.id, arrT.t.id, env, stat, depT.t.nm, arrT.t.nm).then(function(items){ return { mode: "train", items: items, dep: depT, arr: arrT, accessRoute: accT, egressRoute: egrT }; }).catch(function(){ return null; }));
   if (depE && arrE) jobs.push(ldFetchExpBus(depE.t.id, arrE.t.id, env, stat).then(function(items){ return { mode: "expbus", items: items, dep: depE, arr: arrE, accessRoute: accE, egressRoute: egrE }; }).catch(function(){ return null; }));
   if (depS && arrS) jobs.push(ldFetchSubBus(depS.t.id, arrS.t.id, env, stat).then(function(items){ return { mode: "subbus", items: items, dep: depS, arr: arrS, accessRoute: accS, egressRoute: egrS }; }).catch(function(){ return null; }));
   if (!jobs.length) return null;
