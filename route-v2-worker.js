@@ -2818,25 +2818,12 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2) {
   const SQL_COLS = "SELECT brs.route_key,brs.seq,brs.node_id,brs.node_nm,brs.lat,brs.lng,br.route_type,br.route_no,br.start_time,br.end_time,br.itv_wd,br.itv_sat,br.itv_sun "
                  + "FROM bus_route_stops brs JOIN bus_routes br ON brs.route_key=br.route_key ";
 
-  // ① 출발·도착 근처를 지나는 노선 키
-  let keyList = [];
-  try {
-    const kq = await env.DB.prepare(
-      "SELECT DISTINCT route_key FROM bus_route_stops WHERE "
-      + "(lat BETWEEN ?1 AND ?2 AND lng BETWEEN ?3 AND ?4) OR "
-      + "(lat BETWEEN ?5 AND ?6 AND lng BETWEEN ?7 AND ?8) LIMIT 600"
-    ).bind(
-      SY - NEAR_BOX, SY + NEAR_BOX, SX - NEAR_BOX, SX + NEAR_BOX,
-      EY - NEAR_BOX, EY + NEAR_BOX, EX - NEAR_BOX, EX + NEAR_BOX
-    ).all();
-    keyList = ((kq && kq.results) || []).map((r) => r.route_key).filter(Boolean);
-  } catch (e) { keyList = []; }
-
   let rows = [], _nearErr = null;
   const _tD1 = Date.now();
   const _ck = rowsCacheKey(minLat, maxLat, minLng, maxLng);
   const _cached = rowsCacheGet(_ck);
   const seenRow = /* @__PURE__ */ Object.create(null);
+  let _nearKeySet = null;
   const pushRows = /* @__PURE__ */ __name((list) => {
     for (const r of (list || [])) {
       const k = r.route_key + "|" + r.seq;
@@ -2846,32 +2833,32 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2) {
     }
   }, "pushRows");
 
-  // ②-a 근처 노선은 corridor 안에서 통째로
-  //   ★ 2026-09-16: 90개씩 끊어 '순서대로' 물어봤다. 600개면 7번을 줄줄이 기다린 셈이라
-  //     왕복 지연만 1초 넘게 쌓였다. 한꺼번에 던지고 같이 기다린다.
-  if (!_cached && keyList.length) {
-    // ★ D1 은 한 문장에 바인딩 변수 100개까지만 받는다.
-    //   150개씩 묶었더니 매번 실패하고 조용히 넘어가 근처 노선이 0건이었다(nearRows: 0).
-    const CH = 90;
-    const parts = [];
-    for (let i = 0; i < keyList.length; i += CH) parts.push(keyList.slice(i, i + CH));
-    const qs = parts.map((part) => {
-      const ph = part.map((_, j) => "?" + (j + 5)).join(",");
-      return env.DB.prepare(
-        SQL_COLS + "WHERE brs.lat BETWEEN ?1 AND ?2 AND brs.lng BETWEEN ?3 AND ?4 "
-        + "AND brs.route_key IN (" + ph + ")"
-        // ★ 2026-09-24: ORDER BY를 빼도 결과는 완전히 같다 — addBus()가 노선(byRoute)별로
-        //   seq 기준 재정렬을 어차피 자체적으로 한다(위 567번째 줄 부근 .sort 참고).
-        //   반면 SQLite는 이 ORDER BY 때문에 매번 TEMP B-TREE 정렬을 했었다(D1 콘솔
-        //   EXPLAIN QUERY PLAN 실측: 제거 시 쿼리 시간 92ms → 31ms, 약 3배).
-      ).bind(minLat, maxLat, minLng, maxLng, ...part).all()
-        .catch((e) => { _nearErr = String((e && e.message) || e).slice(0, 120); return null; });
-    });
-    const got = await Promise.all(qs);
-    for (const r2 of got) {
-      if (rows.length >= MAX_STOPS) break;
-      pushRows((r2 && r2.results) || []);
-    }
+  // ①+②-a 출발·도착 근처를 지나는 노선을 corridor 안에서 통째로.
+  //   ★ 2026-09-24 (YJ 실측: D1 콘솔 EXPLAIN QUERY PLAN + 응답시간 vs 쿼리시간 비교):
+  //   진짜 병목은 SQL 실행이 아니라 D1 왕복 횟수였다(쿼리 시간은 늘 1ms 미만인데
+  //   응답 시간은 수백ms~1초 이상 — 매 왕복마다 고정 오버헤드가 붙는다).
+  //   예전엔 "근처 노선 키 조회(①, 1왕복)" → "90개씩 끊어 IN절로 재조회(②-a, 최대 7왕복)"
+  //   로 최대 8번 왕복했다. 서브쿼리로 합치면 SQLite 옵티마이저가 내부 키 목록을
+  //   한 번만 계산(LIST SUBQUERY)해서 재사용(REUSE LIST SUBQUERY)하는 걸 D1 콘솔에서
+  //   직접 확인했다 — 결과는 완전히 같고 왕복만 1번으로 준다.
+  if (!_cached) {
+    try {
+      const q = await env.DB.prepare(
+        SQL_COLS + "WHERE brs.route_key IN ("
+        + "SELECT DISTINCT route_key FROM bus_route_stops WHERE "
+        + "(lat BETWEEN ?1 AND ?2 AND lng BETWEEN ?3 AND ?4) OR "
+        + "(lat BETWEEN ?5 AND ?6 AND lng BETWEEN ?7 AND ?8) LIMIT 600"
+        + ") AND brs.lat BETWEEN ?9 AND ?10 AND brs.lng BETWEEN ?11 AND ?12 LIMIT ?13"
+        // ORDER BY 없음 — addBus()가 노선별로 seq 재정렬을 어차피 자체적으로 한다.
+      ).bind(
+        SY - NEAR_BOX, SY + NEAR_BOX, SX - NEAR_BOX, SX + NEAR_BOX,
+        EY - NEAR_BOX, EY + NEAR_BOX, EX - NEAR_BOX, EX + NEAR_BOX,
+        minLat, maxLat, minLng, maxLng, MAX_STOPS
+      ).all();
+      const got = (q && q.results) || [];
+      pushRows(got);
+      _nearKeySet = new Set(got.map((r) => r.route_key));
+    } catch (e) { _nearErr = String((e && e.message) || e).slice(0, 120); }
   }
 
   const _nearRows = rows.length;   // 근처 노선으로 채운 정류장 수(잘리지 않는 부분)
@@ -2890,7 +2877,7 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2) {
   if (_cached) rows = _cached;
   else rowsCacheSet(_ck, rows);
   const _msD1 = Date.now() - _tD1;
-  const _busDiag = { nearRoutes: keyList.length, nearRows: _cached ? rows.length : _nearRows,
+  const _busDiag = { nearRoutes: _nearKeySet ? _nearKeySet.size : 0, nearRows: _cached ? rows.length : _nearRows,
                      rows: rows.length, capped: rows.length >= MAX_STOPS, nearErr: _nearErr,
                      cached: !!_cached, d1Ms: _msD1 };
   const G = { adj: /* @__PURE__ */ Object.create(null), ST: _G.ST, LN: _G.LN,
