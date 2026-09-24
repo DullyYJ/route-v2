@@ -11,4 +11,6 @@ database_id = "c06de2e6-d6bc-401c-be32-25fde0b5f747"
 binding = "BUSAPI"
 service = "gentle-lab-7e47subway-api"
 
-# auto-deploy test
+[[kv_namespaces]]
+binding = "ROWS_KV"
+id = "dc7124fce2d946768165f47fc58d6b7e"
