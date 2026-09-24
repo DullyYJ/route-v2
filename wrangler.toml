@@ -10,3 +10,5 @@ database_id = "c06de2e6-d6bc-401c-be32-25fde0b5f747"
 [[services]]
 binding = "BUSAPI"
 service = "gentle-lab-7e47subway-api"
+
+# auto-deploy test
