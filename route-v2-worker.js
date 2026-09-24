@@ -2859,7 +2859,11 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2) {
       const ph = part.map((_, j) => "?" + (j + 5)).join(",");
       return env.DB.prepare(
         SQL_COLS + "WHERE brs.lat BETWEEN ?1 AND ?2 AND brs.lng BETWEEN ?3 AND ?4 "
-        + "AND brs.route_key IN (" + ph + ") ORDER BY brs.route_key,brs.seq"
+        + "AND brs.route_key IN (" + ph + ")"
+        // ★ 2026-09-24: ORDER BY를 빼도 결과는 완전히 같다 — addBus()가 노선(byRoute)별로
+        //   seq 기준 재정렬을 어차피 자체적으로 한다(위 567번째 줄 부근 .sort 참고).
+        //   반면 SQLite는 이 ORDER BY 때문에 매번 TEMP B-TREE 정렬을 했었다(D1 콘솔
+        //   EXPLAIN QUERY PLAN 실측: 제거 시 쿼리 시간 92ms → 31ms, 약 3배).
       ).bind(minLat, maxLat, minLng, maxLng, ...part).all()
         .catch((e) => { _nearErr = String((e && e.message) || e).slice(0, 120); return null; });
     });
@@ -2878,7 +2882,7 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2) {
     try {
       const q = await env.DB.prepare(
         SQL_COLS + "WHERE brs.lat BETWEEN ?1 AND ?2 AND brs.lng BETWEEN ?3 AND ?4 "
-        + "ORDER BY brs.route_key,brs.seq LIMIT ?5"
+        + "LIMIT ?5"   // ★ 2026-09-24: 위와 같은 이유로 ORDER BY 제거(결과 동일, D1만 빨라짐)
       ).bind(minLat, maxLat, minLng, maxLng, restLimit).all();
       pushRows((q && q.results) || []);
     } catch (e) { /* 근처 노선만으로도 경로는 나온다 */ }
