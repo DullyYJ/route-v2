@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-03az";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-03ba";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -4328,6 +4328,7 @@ function mergeArr(dst, src) {
 __name(mergeArr, "mergeArr");
 
 var SIBLING_HEDGE_MS = 200;
+var LIVE_BRK = { n: 0, until: 0 };   // 02ba: 실시간 조회 연속 시간초과 차단기
 async function fetchStopArrivalsAny(cityCode, nodeId, env, deadline, budget, stat, wantNos, coordOf) {
   // 2026-09-08: id 패턴만 보고 합치면 안 된다.
   //   앱(_busArrFetchMerged)은 60m 이내 + 같은 이름일 때만 인접 등록분으로 인정한다.
@@ -4393,17 +4394,27 @@ async function fetchStopArrivals(cityCode, nodeId, env, deadline, budget) {
   //   resultCode 00 + totalCount 0 — 인천 ICB 는 18/18 응답). 그런데도 요청마다 서울 정류장 몇 곳을 부르느라 실시간 단계가 1.4~1.8초 걸리고
   //   공공API 호출 한도만 썼다. 서울용 실시간 출처(TOPIS 키)가 생기기 전까진 서울은 호출하지 않고 '정보 없음'으로 돌려준다(결과는 원래도 빈 값이었다).
   if (String(cityCode) === "11" && !(env && env.SEOUL_LIVE_TAGO === "1")) return { __names: [], __via: "skip-seoul" };
+  // ★ 02ba (실측 2026-10-03 08시): 경기·인천 도착정보가 연달아 시간초과(1.8초×2단계=약 3.8초 낭비, 결과엔 반영 0건)인 때가 있다.
+  //   isolate 안에서 시간초과가 3번 쌓이면 45초간 실시간 조회를 건너뛰어(가정치 사용 — 원래도 빈 응답과 같은 경로) 응답이 느려지지 않게 한다.
+  if (LIVE_BRK.until > Date.now()) throw new Error("live-breaker");
   if (budget) {
     if (budget.used >= LIVE_MAX_CALLS) throw new Error("\uC870\uD68C \uD69F\uC218 \uC0C1\uD55C");
     budget.used++;
   }
   const qs = "cityCode=" + encodeURIComponent(cityCode)
     + "&nodeId=" + encodeURIComponent(nodeId) + "&numOfRows=60&_type=json";
-  const got = await Promise.race([
-    tagoFetch(env, qs),
-    new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")),
-      Math.max(200, Math.min(LIVE_TIMEOUT_MS, budgetLeft(deadline)))))
-  ]);
+  let got;
+  try {
+    got = await Promise.race([
+      tagoFetch(env, qs),
+      new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")),
+        Math.max(200, Math.min(LIVE_TIMEOUT_MS, budgetLeft(deadline)))))
+    ]);
+  } catch (e) {
+    if (String((e && e.message) || e) === "timeout" && ++LIVE_BRK.n >= 3) { LIVE_BRK.until = Date.now() + 45000; LIVE_BRK.n = 0; }
+    throw e;
+  }
+  LIVE_BRK.n = 0;
   const items = got.items;
   // ★ 2026-09-06: 노선당 다음 차를 여러 대 모은다(첫 차를 못 타는 경우 대비).
   const m = { __via: got.via }, names = [];
