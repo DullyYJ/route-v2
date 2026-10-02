@@ -2,6 +2,11 @@ name = "route-v2"
 main = "route-v2-worker.js"
 compatibility_date = "2024-01-01"
 
+# 2026-10-02: 한국 사용자가 미국(LAX) 엣지로 붙어 D1(서울)·한국 공공 API 왕복마다 태평양을 건넜다(실측).
+# 워커를 서울 근처에서 실행하게 해 D1/KV/외부 API 왕복을 짧게 한다. 되돌리려면 이 블록만 지우면 된다.
+[placement]
+region = "aws:ap-northeast-2"
+
 [triggers]
 crons = ["*/10 17-18 * * *", "5,15,25,35,45,55 17-18 * * *"]
 
