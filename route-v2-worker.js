@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-02am";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-02an";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -4250,6 +4250,10 @@ async function fetchStopArrivalsAny(cityCode, nodeId, env, deadline, budget, sta
 __name(fetchStopArrivalsAny, "fetchStopArrivalsAny");
 
 async function fetchStopArrivals(cityCode, nodeId, env, deadline, budget) {
+  // ★ 02an (실측 2026-10-02): TAGO 도착정보는 서울(cityCode 11) 정류장에 대해 항상 빈 응답이다(SEL 정류장 43곳 중 0곳, /live-test 도 3경로 모두
+  //   resultCode 00 + totalCount 0 — 인천 ICB 는 18/18 응답). 그런데도 요청마다 서울 정류장 몇 곳을 부르느라 실시간 단계가 1.4~1.8초 걸리고
+  //   공공API 호출 한도만 썼다. 서울용 실시간 출처(TOPIS 키)가 생기기 전까진 서울은 호출하지 않고 '정보 없음'으로 돌려준다(결과는 원래도 빈 값이었다).
+  if (String(cityCode) === "11" && !(env && env.SEOUL_LIVE_TAGO === "1")) return { __names: [], __via: "skip-seoul" };
   if (budget) {
     if (budget.used >= LIVE_MAX_CALLS) throw new Error("\uC870\uD68C \uD69F\uC218 \uC0C1\uD55C");
     budget.used++;
