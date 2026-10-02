@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-02aj";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-02ak";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -89,9 +89,20 @@ var MAX_STOPS = 3e4;
 var ROWS_CACHE = new Map();
 var ROWS_TTL_MS = 10 * 60 * 1000;   // 10분
 var ROWS_CACHE_MAX = 6;             // 워커 메모리 보호
+// ★ 02ak: 캐시 키에 "s1:" 를 붙인다 = '정렬된 행' 버전. 예전(정렬 전) 항목은 키가 달라 자연히 안 쓰이고 10분 안에 사라진다.
 function rowsCacheKey(a, b, c, d) {
   const r = (v) => Math.round(v * 200) / 200;   // 0.005도(약 500m) 단위로 묶는다
-  return r(a) + "," + r(b) + "," + r(c) + "," + r(d);
+  return "s1:" + r(a) + "," + r(b) + "," + r(c) + "," + r(d);
+}
+// ★ 02ak (YJ: "속도·정확도 계속"): 같은 정류장 집합인데 D1 이 주는 행 '순서'만 달라도 도시내 결과가 27건 중 12건 달라졌다(02ai 지도 조각 A/B 실측).
+//   엔진(addBus → 인접 목록 → 다익스트라 동률 처리)이 행 순서에 기대고 있다는 뜻이다. 같은 입력이면 항상 같은 답이 나오도록
+//   행을 (노선키, 순번, 정류장 id) 로 정렬해 둔다 — 정렬은 D1/조각에서 새로 받을 때 한 번만 하고 캐시(메모리·KV)에는 정렬된 채로 들어가므로
+//   캐시 적중 요청에는 비용이 없다. 합성 데이터 실험: 순서만 다르게 섞은 3벌의 결과가 정렬 전 240건 중 2건 달랐고, 정렬 후 0건.
+function busRowsSort(rows) {
+  return rows.sort(function (a, b) {
+    return a.route_key < b.route_key ? -1 : a.route_key > b.route_key ? 1
+      : (a.seq - b.seq) || (a.node_id < b.node_id ? -1 : a.node_id > b.node_id ? 1 : 0);
+  });
 }
 function rowsCacheGet(k) {
   const v = ROWS_CACHE.get(k);
@@ -4833,6 +4844,7 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
     try { const _bt = await btAssemble(env, minLat, maxLat, minLng, maxLng, SY, SX, EY, EX, NEAR_BOX, _d1Diag); if (_bt.rows) { _kvHit = _bt.rows; _btTier = "tile"; } else _btMissing = _bt.missing || null; }
     catch (e) { _d1Diag.btErr = String((e && e.message) || e).slice(0, 80); }
   }
+  if (_kvHit && _btTier === "tile") busRowsSort(_kvHit);   // 지도 조각으로 조립한 행은 조각 순서라 정렬이 필요하다(KV 에서 읽은 행은 이미 정렬돼 있다)
   if (_kvHit) { rows = _kvHit; rowsCacheSet(_ck, _kvHit); }   // L2(KV) 적중 → L1(메모리)에도 채워서 같은 인스턴스 재요청은 더 빨라짐
 
   // ①+②-a 출발·도착 근처를 지나는 노선을 corridor 안에서 통째로.
@@ -4887,6 +4899,7 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
     rows = _cached;
   } else if (!_kvHit) {
     // 방금 D1에서 새로 받아온 결과 — L1(메모리) + L2(KV)에 둘 다 채워 둔다.
+    { const _ts = Date.now(); busRowsSort(rows); _d1Diag.sortMs = Date.now() - _ts; }   // ★ 02ak: 결정적 순서(캐시에도 정렬된 채로)
     rowsCacheSet(_ck, rows);
     if (env.ROWS_KV && rows.length) {
       const _kvPut = env.ROWS_KV.put(_ck, JSON.stringify(rows), { expirationTtl: Math.round(ROWS_TTL_MS / 1000) })
