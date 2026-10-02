@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-03ay";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-03az";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -2355,7 +2355,7 @@ function buildAppResponse(result, o) {
   let _fastR = result.minTime;
   try {
     const _L = result.longDistance, _M = result.minTime;
-    if (_L && _L.longDist && typeof _L.totalMin === "number" && (!_M || typeof _M.totalMin !== "number" || _L.totalMin <= _M.totalMin - Math.max(8, _M.totalMin * 0.12))) _fastR = _L;
+    if (_L && _L.longDist && typeof _L.totalMin === "number" && (!_M || typeof _M.totalMin !== "number" || _L.totalMin <= _M.totalMin - Math.max(8, _M.totalMin * 0.08))) _fastR = _L;
   } catch (e) {}
   add(_fastR, 3, "fast");
   add(result.minTransfer, 3, "less");
