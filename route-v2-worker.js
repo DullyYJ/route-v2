@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-02aq";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-02ar";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -2337,6 +2337,7 @@ function routeToAppPath(r, pathType, o, tab) {
             //   후보가 여러 개일 때 앱이 "지금 선택된 것"을 정확히 짚어 표시하고, 다시
             //   고를 때도 ldDepTs 로 그 편을 정확히 요청할 수 있게.
             ldMode: r.mode || null, ldGrade: r.grade || null, ldDepTs: r.depTs != null ? r.depTs : null, ldOptions: r.options || null,
+            ldNoWaitMin: r.noWaitMin != null ? r.noWaitMin : null, ldFastRide: r.fastRide || null,
             trip: buildTripInfo(_sub, o) },
     subPath: _sub
   };
@@ -3662,8 +3663,23 @@ function ldPickBest(items, mode, fareFields, noFields, accessMin, gradeFields, g
   var fareNum = fare != null ? parseInt(String(fare).replace(/[^0-9]/g, ""), 10) : NaN;
   var grade = gradeFields ? ldPickField(best.item, gradeFields) : null;
   grade = grade ? ldNormGrade(String(grade).trim()) : grade;
+  // ★ 02ar (YJ: "진행해"): 카카오는 '다음 열차를 기다리는 시간'을 총 소요에 넣지 않고 가장 빠른 열차를 보여준다
+  //   (서울→부산 KTX 2h18 = 138분, 우리 DB 에도 있음). 우리 기준(가장 일찍 도착)은 그대로 두고, 같은 등급에서
+  //   '탈 수 있는 편 중 이동시간이 가장 짧은 편'을 정보로만 같이 내려준다 → 앱은 한 줄로 보여주기만 한다.
+  var fastRide = null, fastItem = null, fastDep = null, gNow = grade ? ldNormGrade(String(grade).trim()) : null;
+  for (var fi = 0; fi < items.length; fi++) {
+    var fit = items[fi];
+    if (gNow && gradeFields) { var fg = ldPickField(fit, gradeFields); if (ldNormGrade(String(fg || "").trim()) !== gNow) continue; }
+    var fd = ldParseDT(ldPickField(fit, ["depPlandTime", "depplandtime", "departTime", "depTime", "depPlandTm"]));
+    var fa = ldParseDT(ldPickField(fit, ["arrPlandTime", "arrplandtime", "arriveTime", "arrTime", "arrPlandTm"]));
+    if (fd == null || fa == null || fa <= fd || fd < minDepTs) continue;
+    var fr = Math.round((fa - fd) / 6e4);
+    if (fastRide == null || fr < fastRide || (fr === fastRide && fd < fastDep)) { fastRide = fr; fastItem = fit; fastDep = fd; }
+  }
   return { mode: mode, depTs: best.depTs, depLabel: ldHHMMLabel(best.depTs), waitMin: waitMin, rideMin: rideMin,
-    fare: isFinite(fareNum) ? fareNum : null, no: no || null, grade: grade ? String(grade).trim() : null };
+    fare: isFinite(fareNum) ? fareNum : null, no: no || null, grade: grade ? String(grade).trim() : null,
+    fastRideMin: fastRide, fastDepTs: fastDep, fastDepLabel: fastDep != null ? ldHHMMLabel(fastDep) : null,
+    fastNo: fastItem ? (ldPickField(fastItem, noFields) || null) : null };
 }
 __name(ldPickBest, "ldPickBest");
 
@@ -4172,6 +4188,9 @@ function ldToRoute(ld) {
     //   여러 개(다른 시각)로 늘어났으니, 앱이 "어느 것이 지금 선택된 것인지"를 모드만으로
     //   는 구분 못 한다. 이 값과 ldDepTs 파라미터로 정확히 그 편을 다시 짚을 수 있다.
     mode: b.mode, grade: b.grade || null, depTs: b.depTs != null ? b.depTs : null, options: b.options || [],
+    // ★ 02ar: 대기를 뺀 총 소요(카카오·네이버 표기와 같은 기준)와, 같은 등급에서 이동시간이 가장 짧은 편(정보용)
+    noWaitMin: totalMin != null ? totalMin - b.waitMin : null,
+    fastRide: (b.fastRideMin != null && b.fastRideMin < (rideMin != null ? rideMin : 1e9)) ? { depLabel: b.fastDepLabel, depTs: b.fastDepTs, rideMin: b.fastRideMin, no: b.fastNo, noWaitMin: accessTotalMin + b.fastRideMin + egressTotalMin } : null,
     candidates: ld.candidates, distKm: Math.round(ld.distKm) };
 }
 __name(ldToRoute, "ldToRoute");
