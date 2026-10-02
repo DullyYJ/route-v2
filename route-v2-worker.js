@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-02ap";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-02aq";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -1325,8 +1325,8 @@ function dijkstra(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
       //   최소환승 탭도 그 경로를 환승 0회로 알고 있었다.
       const busXfer = e.kind === "bus" && pk[u] === "bus" && pl[u] !== e.line;
       const board = e.kind === "bus" && (pk[u] !== "bus" || busXfer);
-      const bw = board ? busWaitAt(G, e.line, stopIdOf(ub)) : 0; let xw = 0; if (e.kind === "xpress") { const _xw = xpWait(G, e, d); if (_xw == null) continue; xw = Math.max(0, _xw - (e.bw || XP_BASE_WAIT)); }
-      const nd = d + (isW ? e.w * wpen : e.w) + (isX || busXfer ? xpen : 0) + bw + xw;
+      const bw = board ? busWaitAt(G, e.line, stopIdOf(ub)) : 0; let xw = 0, ew = e.w; if (e.kind === "xpress") { const _xw = xpWait(G, e, d); if (_xw == null) continue; ew = XP_LAST_HOP; xw = Math.max(0, _xw - (e.bw || XP_BASE_WAIT)); }
+      const nd = d + (isW ? ew * wpen : ew) + (isX || busXfer ? xpen : 0) + bw + xw;
       const to = enc(e.to, mustS ? ride ? 1 : stOf(u) : 0);
       if (dist[to] === void 0 || nd < dist[to]) {
         dist[to] = nd;
@@ -1353,15 +1353,17 @@ function dijkstra(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
     const a = dec(path[i]), b = dec(path[i + 1]);
     const e = (adj[a] || []).find((x) => x.to === b && x.kind === pk[path[i + 1]]);
     if (e) {
-      real += e.w;
-      if (e.kind === "bus" && pk[path[i]] !== "bus") real += busWaitAt(G, e.line, stopIdOf(a)); if (e.kind === "xpress") { const _xw2 = xpWait(G, e, dist[path[i]]); if (_xw2 != null) real += Math.max(0, _xw2 - (e.bw || XP_BASE_WAIT)); }
+      let _ew = e.w, _xw2 = null; if (e.kind === "xpress") { _xw2 = xpWait(G, e, dist[path[i]]); if (_xw2 != null) _ew = XP_LAST_HOP; }
+      real += _ew;
+      if (e.kind === "bus" && pk[path[i]] !== "bus") real += busWaitAt(G, e.line, stopIdOf(a)); if (_xw2 != null) real += Math.max(0, _xw2 - (e.bw || XP_BASE_WAIT));
     }
   }
   if (gmap[dec(best)] !== void 0) real += gmap[dec(best)];
   const legs = [];
   let cur = null, xf = 0;
-  const edgeW = /* @__PURE__ */ __name((u, v, kind) => {
+  const edgeW = /* @__PURE__ */ __name((u, v, kind, dSec) => {
     const e = (adj[u] || []).find((x) => x.to === v && x.kind === kind);
+    if (e && kind === "xpress" && dSec !== void 0 && xpWait(G, e, dSec) != null) return XP_LAST_HOP;
     return e ? e.w : 0;
   }, "edgeW");
   for (let i = 0; i < path.length; i++) {
@@ -1388,7 +1390,7 @@ function dijkstra(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
       cur.coordList.push(s.y == null ? null : [s.y, s.x]);
       cur.to = s.n;
       {
-        const _dw = edgeW(prev2, n, k); if (k === "xpress") cur.hasExpress = true;
+        const _dw = edgeW(prev2, n, k, prev2 === void 0 ? void 0 : dist[path[i - 1]]); if (k === "xpress") cur.hasExpress = true;
         cur.sec += _dw;
         cur.secList.push((cur.secList.length ? cur.secList[cur.secList.length - 1] : 0) + _dw);
       }
@@ -1574,7 +1576,10 @@ function kricAdj(v, wrap) { return v == null ? null : (wrap && v < 14400 ? v + 8
 function kricMed(a) { a = a.slice().sort(function (x, y) { return x - y; }); return a[Math.floor(a.length / 2)]; }
 function kricHex(deps) { var bits = new Uint8Array(480); for (var i = 0; i < deps.length; i++) { var mm = ((deps[i] % 1440) + 1440) % 1440; bits[Math.floor(mm / 3)] = 1; } var h = ""; for (var j = 0; j < 480; j += 4) h += (bits[j] * 8 + bits[j + 1] * 4 + bits[j + 2] * 2 + bits[j + 3]).toString(16); return h; }
 function xpBits(h) { if (!h || h.length < 120) return null; var b = new Uint8Array(480), any = 0; for (var i = 0; i < 120; i++) { var v = parseInt(h.charAt(i), 16); b[4 * i] = (v >> 3) & 1; b[4 * i + 1] = (v >> 2) & 1; b[4 * i + 2] = (v >> 1) & 1; b[4 * i + 3] = v & 1; any |= v; } return any ? b : null; }
-function xpWait(G, e, dSec) { var hx = (G && G._weekend) ? e.depW : e.dep; if (!hx) return null; var t = new Date(((G && G._baseMs != null) ? G._baseMs : Date.now()) + dSec * 1000 + 324e5); var nm = t.getUTCHours() * 60 + t.getUTCMinutes() + t.getUTCSeconds() / 60; var s0 = Math.floor(nm / 3); for (var k = 0; k <= 20; k++) { var w = (s0 + k) * 3 + 1.5 - nm; if (w < 0) continue; if (hx[(s0 + k) % 480] === 1) return w * 60; } return null; }
+var XP_LAST_HOP = 0;
+function kricHopStr(m) { var o = [], k; for (k in m) o.push([+k, m[k]]); o.sort(function (a, b) { return a[0] - b[0]; }); var h = ""; for (var i = 0; i < o.length; i++) { var sl = o[i][0].toString(36), hp = Math.min(1295, Math.max(1, Math.round(o[i][1] / 10))).toString(36); h += ("0" + sl).slice(-2) + ("0" + hp).slice(-2); } return h; }
+function xpHops(h) { if (!h || h.length < 4) return null; var a = new Uint16Array(480), any = 0; for (var i = 0; i + 4 <= h.length; i += 4) { var sl = parseInt(h.substr(i, 2), 36), hp = parseInt(h.substr(i + 2, 2), 36); if (sl >= 0 && sl < 480 && hp > 0) { a[sl] = hp; any = 1; } } return any ? a : null; }
+function xpWait(G, e, dSec) { var wkd = !!(G && G._weekend); var hx = wkd ? e.depW : e.dep; if (!hx) return null; var hs = wkd ? e.hpW : e.hp; var t = new Date(((G && G._baseMs != null) ? G._baseMs : Date.now()) + dSec * 1000 + 324e5); var nm = t.getUTCHours() * 60 + t.getUTCMinutes() + t.getUTCSeconds() / 60; var s0 = Math.floor(nm / 3); XP_LAST_HOP = e.w; if (!hs) { for (var k = 0; k <= 20; k++) { var w = (s0 + k) * 3 + 1.5 - nm; if (w < 0) continue; if (hx[(s0 + k) % 480] === 1) return w * 60; } return null; } var bestC = 1e12, bestW = null, bestH = e.w; for (var k2 = 0; k2 <= 20; k2++) { var w2 = (s0 + k2) * 3 + 1.5 - nm; if (w2 < 0) continue; if (w2 * 60 >= bestC) break; var hv = hs[(s0 + k2) % 480]; if (!hv) continue; var c = w2 * 60 + hv * 10; if (c < bestC) { bestC = c; bestW = w2 * 60; bestH = hv * 10; } } if (bestW == null) return null; XP_LAST_HOP = bestH; return bestW; }
 function kricDeriveCore(B, L, dayRows) {
   var ST = B.stations, nid = {}, id, key, i, j;
   for (id in ST) if (ST[id].l === L) { nid[kricNN(ST[id].n)] = id; var ia = kricIn(ST[id].n); if (ia && !nid[ia]) nid[ia] = id; }
@@ -1652,22 +1657,22 @@ function kricDeriveCore(B, L, dayRows) {
         if (!lta) lta = ltFrom(SA.id);
         var lt0 = lta[SB.id]; if (lt0 === undefined) continue;
         if (hp > lt0 - Math.max(120, lt0 * 0.1)) continue;
-        var pk2 = SA.id + ">" + SB.id, pe = PX[pk2] || (PX[pk2] = { h: [], "8": [], "9": [] });
-        pe.h.push(hp); pe[tday].push(Math.round(SA.d / 60));
+        var pk2 = SA.id + ">" + SB.id, pe = PX[pk2] || (PX[pk2] = { h: [], "8": [], "9": [], s8: {}, s9: {} });
+        pe.h.push(hp); var dmin = Math.round(SA.d / 60); pe[tday].push(dmin); var dsl = Math.floor((((dmin % 1440) + 1440) % 1440) / 3), sm = pe["s" + tday]; if (sm[dsl] === undefined || hp < sm[dsl]) sm[dsl] = hp;
       }
     }
   }
-  for (key in PX) if (PX[key].h.length >= 3) xp.push([key, kricMed(PX[key].h), PX[key].h.length, kricHex(PX[key]["8"]), kricHex(PX[key]["9"])]);
+  for (key in PX) if (PX[key].h.length >= 3) xp.push([key, kricMed(PX[key].h), PX[key].h.length, kricHex(PX[key]["8"]), kricHex(PX[key]["9"]), kricHopStr(PX[key].s8), kricHopStr(PX[key].s9)]);
   return { seg: seg, xp: xp, unmatched: unmatched, trains: trains.length, express: nEx, kc: kc, ks: ks, tdump: tdump0 };
 }
 async function kricLoad(env, G) {
   var sres = await env.DB.prepare("SELECT line, a, b, sec FROM kric_seg").all();
-  var xres = await env.DB.prepare("SELECT line, a, b, hop, wk, we FROM kric_xp").all();
+  var xres; try { xres = await env.DB.prepare("SELECT line, a, b, hop, wk, we, hk, he FROM kric_xp").all(); } catch (e) { xres = await env.DB.prepare("SELECT line, a, b, hop, wk, we FROM kric_xp").all(); }
   var ns = 0, nx = 0, i, j, r, L;
   var srows = sres.results || [], xrows = xres.results || [];
   for (i = 0; i < srows.length; i++) { r = srows[i]; if (!G.ST[r.a] || !G.ST[r.b]) continue; L = G.adj["S|" + r.a] = G.adj["S|" + r.a] || []; var hit = false; for (j = 0; j < L.length; j++) if (L[j].to === "S|" + r.b && L[j].kind === "ride") { L[j].w = r.sec; hit = true; } if (!hit) L.push({ to: "S|" + r.b, w: r.sec, kind: "ride", line: r.line }); ns++; }
   for (var k in G.adj) { L = G.adj[k]; for (j = L.length - 1; j >= 0; j--) if (L[j].kind === "xpress") L.splice(j, 1); }
-  for (i = 0; i < xrows.length; i++) { r = xrows[i]; if (!G.ST[r.a] || !G.ST[r.b]) continue; (G.adj["S|" + r.a] = G.adj["S|" + r.a] || []).push({ to: "S|" + r.b, w: r.hop, kind: "xpress", line: r.line, dep: xpBits(r.wk), depW: xpBits(r.we), bw: ((G.LN[r.line] && G.LN[r.line].hw) || 420) / 2 }); nx++; }
+  for (i = 0; i < xrows.length; i++) { r = xrows[i]; if (!G.ST[r.a] || !G.ST[r.b]) continue; (G.adj["S|" + r.a] = G.adj["S|" + r.a] || []).push({ to: "S|" + r.b, w: r.hop, kind: "xpress", line: r.line, dep: xpBits(r.wk), depW: xpBits(r.we), hp: xpHops(r.hk), hpW: xpHops(r.he), bw: ((G.LN[r.line] && G.LN[r.line].hw) || 420) / 2 }); nx++; }
   var gm = null; for (var id in G.ST) if (G.ST[id].l === "S01" && G.ST[id].n === "광명") gm = id;
   if (gm) { for (var k0 in G.adj) { L = G.adj[k0]; for (j = L.length - 1; j >= 0; j--) if (L[j].kind === "ride" && (k0 === "S|" + gm ? L[j].to !== "S|" + gm && G.ST[L[j].to.slice(2)] && G.ST[L[j].to.slice(2)].n === "영등포" : L[j].to === "S|" + gm && G.ST[k0.slice(2)] && G.ST[k0.slice(2)].n === "영등포")) L.splice(j, 1); } }
   G.__kricStat = { seg: ns, xp: nx };
@@ -1675,7 +1680,9 @@ async function kricLoad(env, G) {
 
 async function kricDerive(env, B, L) {
   await env.DB.prepare("CREATE TABLE IF NOT EXISTS kric_seg (line TEXT, a TEXT, b TEXT, sec INTEGER, n INTEGER, PRIMARY KEY (line, a, b))").run();
-  await env.DB.prepare("CREATE TABLE IF NOT EXISTS kric_xp (line TEXT, a TEXT, b TEXT, hop INTEGER, n INTEGER, wk TEXT, we TEXT, PRIMARY KEY (line, a, b))").run();
+  await env.DB.prepare("CREATE TABLE IF NOT EXISTS kric_xp (line TEXT, a TEXT, b TEXT, hop INTEGER, n INTEGER, wk TEXT, we TEXT, hk TEXT, he TEXT, PRIMARY KEY (line, a, b))").run();
+  try { await env.DB.prepare("ALTER TABLE kric_xp ADD COLUMN hk TEXT").run(); } catch (e) {}
+  try { await env.DB.prepare("ALTER TABLE kric_xp ADD COLUMN he TEXT").run(); } catch (e) {}
   var dayRows = { "8": [], "9": [] }, pairs = [];
   for (var k in KRIC_LMAP) if (KRIC_LMAP[k] === L) pairs.push(k.split("|"));
   for (var pi = 0; pi < pairs.length; pi++) for (var day in dayRows) {
@@ -1686,7 +1693,7 @@ async function kricDerive(env, B, L) {
   var st = [env.DB.prepare("DELETE FROM kric_seg WHERE line=?").bind(L), env.DB.prepare("DELETE FROM kric_xp WHERE line=?").bind(L)];
   var j;
   for (j = 0; j < out.seg.length; j++) { var q = out.seg[j], ab = q[0].split(">"); st.push(env.DB.prepare("INSERT OR REPLACE INTO kric_seg (line,a,b,sec,n) VALUES (?,?,?,?,?)").bind(L, ab[0], ab[1], q[1], q[2])); }
-  for (j = 0; j < out.xp.length; j++) { var x = out.xp[j], ab2 = x[0].split(">"); st.push(env.DB.prepare("INSERT OR REPLACE INTO kric_xp (line,a,b,hop,n,wk,we) VALUES (?,?,?,?,?,?,?)").bind(L, ab2[0], ab2[1], x[1], x[2], x[3], x[4])); }
+  for (j = 0; j < out.xp.length; j++) { var x = out.xp[j], ab2 = x[0].split(">"); st.push(env.DB.prepare("INSERT OR REPLACE INTO kric_xp (line,a,b,hop,n,wk,we,hk,he) VALUES (?,?,?,?,?,?,?,?,?)").bind(L, ab2[0], ab2[1], x[1], x[2], x[3], x[4], x[5], x[6])); }
   for (j = 0; j < st.length; j += 40) await env.DB.batch(st.slice(j, j + 40));
   return { line: L, rows8: dayRows["8"].length, rows9: dayRows["9"].length, trains: out.trains, express: out.express, seg: out.seg.length, xp: out.xp.length, unmatched: out.unmatched, kc: out.kc, ks: out.ks, tdump: out.tdump };
 }
@@ -1798,7 +1805,7 @@ async function kricStatus(env) {
 // ★ 2026-10-02v: 급행 간선 생성 방식이 바뀌어(위 kricDeriveCore) 저장된 kric_xp 를 한 번 다시 만들어야 한다.
 //   비밀값 없이도 안전하게 돌리려고 '버전이 달라졌을 때만' 한 번에 한 노선씩 계산하는 자기 제한형으로 만들었다.
 //   (이미 최신이면 아무것도 안 한다 → 반복 호출해도 부하·위험 없음. 입력은 D1에 저장된 공식 시각표뿐, 외부 호출 없음.)
-var KRIC_DERIVE_VER = "02w";
+var KRIC_DERIVE_VER = "02x";
 async function kricRederive(env) {
   await kricStateInit(env);
   var cur = await env.DB.prepare("SELECT v FROM kric_state WHERE k='derive_ver'").first();
