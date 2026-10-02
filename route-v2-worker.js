@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-02an";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-02ao";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -4201,6 +4201,7 @@ function mergeArr(dst, src) {
 }
 __name(mergeArr, "mergeArr");
 
+var SIBLING_HEDGE_MS = 200;
 async function fetchStopArrivalsAny(cityCode, nodeId, env, deadline, budget, stat, wantNos, coordOf) {
   // 2026-09-08: id 패턴만 보고 합치면 안 된다.
   //   앱(_busArrFetchMerged)은 60m 이내 + 같은 이름일 때만 인접 등록분으로 인정한다.
@@ -4222,11 +4223,23 @@ async function fetchStopArrivalsAny(cityCode, nodeId, env, deadline, budget, sta
     return true;
   };
   let acc = null, last = null, used = [];
-  for (const id of ids) {
-    if (budgetLeft(deadline) <= 250) break;
-    let m = null;
-    try { m = await fetchStopArrivals(cityCode, id, env, deadline, budget); }
-    catch (e) { last = e; continue; }
+  // ★ 02ao (속도): 예전엔 인접 id 를 하나 끝나야 다음을 불러서 정류장당 최대 3번 왕복이 직렬로 쌓였다(실시간 단계 1~3초).
+  //   이제 첫 호출이 HEDGE_MS 안에 안 끝나면 다음 id 를 미리 출발시킨다(끝났는데 노선이 덜 채워졌을 때도 바로 다음으로 간다).
+  //   합치는 순서·멈추는 조건은 그대로라 결과는 같고, 앞에서 노선이 다 채워지면 미리 보낸 호출만 쓰이지 않는다.
+  const calls = new Array(ids.length);
+  const launch = (i) => {
+    if (i >= ids.length || calls[i]) return;
+    if (budgetLeft(deadline) <= 250) return;
+    calls[i] = fetchStopArrivals(cityCode, ids[i], env, deadline, budget).then((m) => ({ m }), (e) => ({ e }));
+  };
+  for (let i = 0; i < ids.length; i++) {
+    const id = ids[i];
+    launch(i);
+    if (!calls[i]) break;
+    let r = await Promise.race([calls[i], new Promise((res) => setTimeout(() => res(null), SIBLING_HEDGE_MS))]);
+    if (r === null) { launch(i + 1); r = await calls[i]; }
+    if (r.e) { last = r.e; continue; }
+    const m = r.m;
     last = null;
     if (!m) continue;
     if ((m.__names || []).length) {
