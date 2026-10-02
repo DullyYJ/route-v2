@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-03ax";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-03ay";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -2349,7 +2349,15 @@ function buildAppResponse(result, o) {
     const p = routeToAppPath(r, t, o, tab);
     if (p) paths.push(p);
   }, "add");
-  add(result.minTime, 3, "fast");
+  // ★ 02ay (YJ: "합쳐"): 최단시간 탭이 '지하철·버스만' 쓴 길이라, 열차·고속버스가 훨씬 빠른 구간(서울→수원 66분 vs ITX 48분,
+  //   서울→부산 시내 경로 vs KTX)에서 1순위가 느렸다. 장거리 경로가 8분·12% 이상 확실히 빠르면 최단시간 탭에 그 경로를 올린다
+  //   (장거리 탭은 그대로 따로 둔다 — 등급·시각 고르기는 거기서도 된다). 비슷하면 예전 그대로.
+  let _fastR = result.minTime;
+  try {
+    const _L = result.longDistance, _M = result.minTime;
+    if (_L && _L.longDist && typeof _L.totalMin === "number" && (!_M || typeof _M.totalMin !== "number" || _L.totalMin <= _M.totalMin - Math.max(8, _M.totalMin * 0.12))) _fastR = _L;
+  } catch (e) {}
+  add(_fastR, 3, "fast");
   add(result.minTransfer, 3, "less");
   add(result.minWalk, 3, "walk");
   add(result.subway, 1, "sub");
