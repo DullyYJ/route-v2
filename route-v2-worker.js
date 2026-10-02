@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-02as";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-02at";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -2640,6 +2640,9 @@ __name(tagoFetch, "tagoFetch");
 // ============================================================
 var LD_ENABLE = true;
 var LD_MIN_KM = 80;        // 이 이상 직선거리부터 장거리 후보도 같이 찾는다
+// ★ 02at (YJ: "모든 문제를 해결해"): 서울→수원(직선 35km)·서울→천안 같은 구간은 ITX-새마을·무궁화가 30~70분에 가는데(D1 시각표 확인: 서울→수원 30분대),
+//   80km 미만이라 열차를 한 번도 안 봤다(카카오는 41분·91분, 우리는 1호선 급행 59·107분). 30km 이상은 '열차만' 후보로 본다(버스는 80km 이상 그대로).
+var LD_MIN_KM_TRAIN = 30;
 var LD_CATCH_BUFFER_MS = 5 * 60000;   // 터미널 도착 후에도 이만큼은 여유를 둔다(탑승수속 등)
 var LD_BASE = "https://apis.data.go.kr/1613000";
 // ★ 2026-09-25 (YJ 요청: "카카오·네이버처럼") — 편측당 몇 개의 터미널을 후보로
@@ -3850,7 +3853,8 @@ async function ldPairsCron(env, ctx) {
 async function ldFetchLive(SY, SX, EY, EX, env, stat, G, busCoord, busNm, ctx) {
   if (!LD_ENABLE) return null;
   var distKm = hav(SY, SX, EY, EX) / 1000;
-  if (distKm < LD_MIN_KM) return null;
+  if (distKm < LD_MIN_KM_TRAIN) return null;
+  var _trainOnly = distKm < LD_MIN_KM;
   // ★ 2026-09-25 (YJ 요청: "실제 사람이 찾는것(카카오·네이버)처럼") — 예전엔 편측당
   //   "직선거리 최단 터미널" 딱 하나만 보고, 그 두 터미널 사이 직통편이 없으면
   //   장거리 전체가 빈 결과였다. 실측 사례(의정부→목포): 의정부에서 직선최단
@@ -3864,7 +3868,7 @@ async function ldFetchLive(SY, SX, EY, EX, env, stat, G, busCoord, busNm, ctx) {
   var found = { train: false, expbus: false, subbus: false }; var _tfStart = Date.now();
   var baseMs = (G && G._ldBaseMs != null) ? G._ldBaseMs : ((G && G._baseMs != null) ? G._baseMs : null);   // ★ 2026-09-25 (기준시각): 열차·버스 시각표는 이 시각 기준으로 조회
 
-  function _ldT(stat, key, pr) { var t = Date.now(); return pr.then(function (r) { if (stat) { stat[key] = Math.max(stat[key] || 0, Date.now() - t); stat[key + "N"] = (stat[key + "N"] || 0) + 1; } return r; }); } async function tryMode(mode, fetchFn, nSide) { if (stat && stat.ldFast && mode !== "train") { stat.ldModesSkipped = (stat.ldModesSkipped || 0) + 1; return; }
+  function _ldT(stat, key, pr) { var t = Date.now(); return pr.then(function (r) { if (stat) { stat[key] = Math.max(stat[key] || 0, Date.now() - t); stat[key + "N"] = (stat[key + "N"] || 0) + 1; } return r; }); } async function tryMode(mode, fetchFn, nSide) { if (_trainOnly && mode !== "train") return; if (stat && stat.ldFast && mode !== "train") { stat.ldModesSkipped = (stat.ldModesSkipped || 0) + 1; return; }
     var depPool = ldNearestN(SY, SX, LD_TERMINALS[mode], LD_CAND_POOL, LD_CAND_MAX_KM);
     var arrPool = ldNearestN(EY, EX, LD_TERMINALS[mode], LD_CAND_POOL, LD_CAND_MAX_KM);
     if (!depPool.length || !arrPool.length) return;
