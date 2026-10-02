@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-02ah";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-02ai";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -104,6 +104,104 @@ function rowsCacheSet(k, rows) {
     ROWS_CACHE.set(k, { at: Date.now(), rows });
     while (ROWS_CACHE.size > ROWS_CACHE_MAX) ROWS_CACHE.delete(ROWS_CACHE.keys().next().value);
   } catch (e) {}
+}
+
+// ★ 02ai (YJ: "속도 무조건"): 실측(02ag) — 처음 가는 지역의 버스 정류장 D1 읽기는 쿼리 자체 15~60ms 인데 왕복이 230~1100ms(중앙값 약 400ms).
+//   반면 KV 는 같은 양을 5~33ms 에 읽는다. 그래서 정류장을 '지도 조각'(0.04도 ≈ 4km 격자) 단위로 KV 에 두고,
+//   요청 사각형이 덮는 조각이 전부 있으면 그것을 조립해 쓴다(= D1 의 '사각형 안 전체 정류장' 쿼리와 같은 집합).
+//   조각은 D1 에서 읽은 행으로 요청이 지나가며 하나씩 채운다(사각형 안쪽에 통째로 들어온 조각은 공짜, 걸친 조각은 백그라운드로 1쿼리).
+//   하나라도 비어 있거나 조각이 너무 많거나 3만 행 상한에 닿으면 예전 D1 경로를 그대로 쓴다 → 최악이 예전과 같다. ?bt=0 이면 조각을 끈다.
+var BT_T = 0.04, BT_VER = "1", BT_MAX_TILES = 36, BT_TTL_S = 14 * 24 * 3600;
+var BT_MEM = /* @__PURE__ */ new Map();
+function btIx(lng) { return Math.floor(lng / BT_T + 1e-9); }
+function btIy(lat) { return Math.floor(lat / BT_T + 1e-9); }
+function btKey(ix, iy) { return "bt:" + BT_VER + ":" + ix + ":" + iy; }
+function btPack(rows) {
+  var r = {}, s = [];
+  for (var i = 0; i < rows.length; i++) {
+    var x = rows[i];
+    if (!r[x.route_key]) r[x.route_key] = [x.route_type, x.route_no, x.start_time, x.end_time, x.itv_wd, x.itv_sat, x.itv_sun];
+    s.push([x.route_key, x.seq, x.node_id, x.node_nm, x.lat, x.lng]);
+  }
+  return { v: BT_VER, at: Date.now(), r: r, s: s };
+}
+async function btGetTiles(env, keys) {
+  var now = Date.now(), out = new Array(keys.length), need = [];
+  for (var i = 0; i < keys.length; i++) {
+    var m = BT_MEM.get(keys[i]);
+    if (m && now - m.at < 30 * 60 * 1000) out[i] = m.v; else need.push(i);
+  }
+  if (need.length) {
+    var rs = await Promise.all(need.map(function (i) { return env.ROWS_KV.get(keys[i], "json").catch(function () { return null; }); }));
+    for (var j = 0; j < need.length; j++) {
+      var v = rs[j] && rs[j].v === BT_VER && rs[j].s ? rs[j] : null;
+      out[need[j]] = v;
+      if (v) { if (BT_MEM.size > 300) BT_MEM.clear(); BT_MEM.set(keys[need[j]], { at: now, v: v }); }
+    }
+  }
+  return out;
+}
+async function btAssemble(env, minLat, maxLat, minLng, maxLng, SY, SX, EY, EX, NEAR, diag) {
+  var ix0 = btIx(minLng), ix1 = btIx(maxLng), iy0 = btIy(minLat), iy1 = btIy(maxLat);
+  var n = (ix1 - ix0 + 1) * (iy1 - iy0 + 1);
+  if (n > BT_MAX_TILES) { diag.btSkip = "big" + n; return {}; }
+  var keys = [], idx = [];
+  for (var ix = ix0; ix <= ix1; ix++) for (var iy = iy0; iy <= iy1; iy++) { keys.push(btKey(ix, iy)); idx.push([ix, iy]); }
+  var t0 = Date.now(), tiles = await btGetTiles(env, keys);
+  diag.btMs = Date.now() - t0; diag.btTiles = n;
+  var missing = [];
+  for (var k = 0; k < tiles.length; k++) if (!tiles[k]) missing.push(idx[k]);
+  if (missing.length) { diag.btMiss = missing.length; return { missing: missing }; }
+  var near = [], rest = [], nearKeys = {}, nb = [[SY - NEAR, SY + NEAR, SX - NEAR, SX + NEAR], [EY - NEAR, EY + NEAR, EX - NEAR, EX + NEAR]];
+  var all = [];
+  for (var q = 0; q < tiles.length; q++) {
+    var T = tiles[q];
+    for (var i = 0; i < T.s.length; i++) {
+      var a = T.s[i], lat = a[4], lng = a[5];
+      if (lat < minLat || lat > maxLat || lng < minLng || lng > maxLng) continue;
+      var m = T.r[a[0]]; if (!m) continue;
+      all.push({ route_key: a[0], seq: a[1], node_id: a[2], node_nm: a[3], lat: lat, lng: lng, route_type: m[0], route_no: m[1], start_time: m[2], end_time: m[3], itv_wd: m[4], itv_sat: m[5], itv_sun: m[6] });
+      for (var b = 0; b < 2; b++) if (lat >= nb[b][0] && lat <= nb[b][1] && lng >= nb[b][2] && lng <= nb[b][3]) { nearKeys[a[0]] = 1; break; }
+    }
+  }
+  if (all.length >= MAX_STOPS) { diag.btSkip = "capped"; return {}; }
+  for (var z = 0; z < all.length; z++) (nearKeys[all[z].route_key] ? near : rest).push(all[z]);   // 예전 순서(근처 노선 먼저)를 흉내
+  diag.btRows = all.length;
+  return { rows: near.concat(rest) };
+}
+// 이미 D1 에서 받은 '사각형 안 전체' 행으로, 사각형에 통째로 들어간 빈 조각을 채운다(공짜). 나머지 빈 조각은 조각별 1쿼리(최대 6개) 백그라운드.
+var BT_SQL = "SELECT brs.route_key,brs.seq,brs.node_id,brs.node_nm,brs.lat,brs.lng,br.route_type,br.route_no,br.start_time,br.end_time,br.itv_wd,br.itv_sat,br.itv_sun "
+  + "FROM bus_route_stops brs JOIN bus_routes br ON brs.route_key=br.route_key WHERE brs.lat >= ?1 AND brs.lat < ?2 AND brs.lng >= ?3 AND brs.lng < ?4 LIMIT 20000";
+async function btPutTile(env, ix, iy, rows) {
+  var mine = rows.filter(function (x) { return btIx(x.lng) === ix && btIy(x.lat) === iy; });
+  var v = btPack(mine);
+  await env.ROWS_KV.put(btKey(ix, iy), JSON.stringify(v), { expirationTtl: BT_TTL_S });
+  if (BT_MEM.size > 300) BT_MEM.clear(); BT_MEM.set(btKey(ix, iy), { at: Date.now(), v: v });
+  return mine.length;
+}
+async function btFillTile(env, ix, iy) {
+  var q = await env.DB.prepare(BT_SQL).bind(iy * BT_T - 1e-6, (iy + 1) * BT_T + 1e-6, ix * BT_T - 1e-6, (ix + 1) * BT_T + 1e-6).all();
+  var rows = (q && q.results) || [];
+  if (rows.length >= 20000) return -1;   // 너무 빽빽해서 잘렸을 수 있다 → 저장하지 않는다(그 조각은 늘 D1 경로)
+  return btPutTile(env, ix, iy, rows);
+}
+async function btLearn(env, ctx, restRows, missing, minLat, maxLat, minLng, maxLng) {
+  if (!missing || !missing.length) return;
+  var jobs = [], bg = [];
+  var capped = restRows.length >= MAX_STOPS;
+  for (var i = 0; i < missing.length; i++) {
+    var ix = missing[i][0], iy = missing[i][1];
+    var inside = ix * BT_T >= minLng && (ix + 1) * BT_T <= maxLng && iy * BT_T >= minLat && (iy + 1) * BT_T <= maxLat;
+    if (inside && !capped) jobs.push(btPutTile(env, ix, iy, restRows));
+    else if (bg.length < 6) bg.push([ix, iy]);
+  }
+  var run = (async function () {
+    try { await Promise.all(jobs); } catch (e) {}
+    for (var j = 0; j < bg.length; j += 2) {
+      try { await Promise.all(bg.slice(j, j + 2).map(function (t) { return btFillTile(env, t[0], t[1]); })); } catch (e) {}
+    }
+  })();
+  if (ctx && ctx.waitUntil) ctx.waitUntil(run); else await run;
 }
 // ★ 2026-09-03: 최단시간 모드의 도보 가중치를 1 → 1.6
 //   증상: 정류장이 코앞인데 53분을 걸어 지하철역까지 가는 경로가 '최단시간'으로 뽑혔다.
@@ -4728,6 +4826,11 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
       if (v && Array.isArray(v)) _kvHit = v;
     } catch (e) { _kvErr = String((e && e.message) || e).slice(0, 120); }
   }
+  let _btMissing = null, _btTier = null;
+  if (!_cached && !_kvHit && env.ROWS_KV && env.DB && p.get("bt") !== "0") {
+    try { const _bt = await btAssemble(env, minLat, maxLat, minLng, maxLng, SY, SX, EY, EX, NEAR_BOX, _d1Diag); if (_bt.rows) { _kvHit = _bt.rows; _btTier = "tile"; } else _btMissing = _bt.missing || null; }
+    catch (e) { _d1Diag.btErr = String((e && e.message) || e).slice(0, 80); }
+  }
   if (_kvHit) { rows = _kvHit; rowsCacheSet(_ck, _kvHit); }   // L2(KV) 적중 → L1(메모리)에도 채워서 같은 인스턴스 재요청은 더 빨라짐
 
   // ①+②-a 출발·도착 근처를 지나는 노선을 corridor 안에서 통째로.
@@ -4772,6 +4875,7 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
       pushRows(got);
       _nearKeySet = new Set(got.map((r) => r.route_key));
     }
+    if (_btMissing && !_rr.e) { try { await btLearn(env, ctx, (_rr.q && _rr.q.results) || [], _btMissing, minLat, maxLat, minLng, maxLng); } catch (e) { _d1Diag.btLearnErr = String((e && e.message) || e).slice(0, 80); } }
     _nearRowsCnt = rows.length;   // 근처 노선으로 채운 정류장 수(잘리지 않는 부분)
     const restLimit = Math.max(0, MAX_STOPS - rows.length);
     if (restLimit > 0 && !_rr.e) pushRows(((_rr.q && _rr.q.results) || []).slice(0, restLimit));   // 근처 노선만으로도 경로는 나온다
@@ -4791,7 +4895,7 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
   const _msD1 = Date.now() - _tD1;
   const _busDiag = { nearRoutes: _nearKeySet ? _nearKeySet.size : 0, nearRows: (_cached || _kvHit) ? rows.length : _nearRowsCnt,
                      rows: rows.length, capped: rows.length >= MAX_STOPS, nearErr: _nearErr,
-                     cached: !!(_cached || _kvHit), cacheTier: _cached ? "mem" : (_kvHit ? "kv" : "none"),
+                     cached: !!(_cached || _kvHit), cacheTier: _cached ? "mem" : (_kvHit ? (_btTier || "kv") : "none"),
                      kvErr: _kvErr, d1Ms: _msD1, d1Diag: _d1Diag };
   const G = { adj: /* @__PURE__ */ Object.create(null), ST: _G.ST, LN: _G.LN,
               subOff: _G.subOff, subFirst: _G.subFirst,
@@ -5224,6 +5328,26 @@ async function handleFetch(request, env, ctx) {
   //      /tago-probe?svc=ExpBusInfo&op=GetExpBusTrminlList
   //      /tago-probe?svc=SuburbsBusInfo&op=GetSuberbsBusTrminlList
   // ★ 2026-10-02 (항목6): KRIC 역사별 운행시각표(stationTimetable) 시험 조회 — 키는 시크릿 KRIC_KEY. 호출 한도(하루 1회 권장)를 지키려고 isolate 당 40회로 막는다. 데이터를 D1 에 적재한 뒤에는 이 주소를 지울 것.
+if (url.pathname === "/bt-verify" || url.pathname === "/bt-fill") { try {
+  var _gp = function (k) { return parseFloat(url.searchParams.get(k)); };
+  var _korea = function (la, ln) { return la >= 33 && la <= 39 && ln >= 124 && ln <= 132; };   // 한국 밖/엉뚱한 값으로 키·쿼리를 만들지 못하게
+  if (url.pathname === "/bt-fill" ? !_korea(_gp("lat"), _gp("lng")) : (!_korea(_gp("minLat"), _gp("minLng")) || !_korea(_gp("maxLat"), _gp("maxLng")) || _gp("maxLat") - _gp("minLat") > 0.2 || _gp("maxLng") - _gp("minLng") > 0.3)) return new Response(JSON.stringify({ error: "bad-args" }), { status: 400, headers: CORS_H });
+  if (url.pathname === "/bt-fill") {   // /bt-fill?lat=..&lng=..&r=2  : 그 점 주변 (2r+1)^2 조각을 D1 에서 읽어 저장
+    var _r = Math.min(4, parseInt(url.searchParams.get("r") || "1", 10)), _cx = btIx(_gp("lng")), _cy = btIy(_gp("lat")), _res = { filled: 0, rows: 0, dense: 0, skipped: 0 }, _tl = [];
+    for (var _a = -_r; _a <= _r; _a++) for (var _b = -_r; _b <= _r; _b++) _tl.push([_cx + _a, _cy + _b]);
+    var _chk = await btGetTiles(env, _tl.map(function (t) { return btKey(t[0], t[1]); }));
+    var _todo = _tl.filter(function (t, i) { return !_chk[i]; }); _res.skipped = _tl.length - _todo.length;
+    for (var _j = 0; _j < _todo.length; _j += 3) { var _o = await Promise.all(_todo.slice(_j, _j + 3).map(function (t) { return btFillTile(env, t[0], t[1]).catch(function () { return -2; }); })); for (var _q = 0; _q < _o.length; _q++) { if (_o[_q] >= 0) { _res.filled++; _res.rows += _o[_q]; } else _res.dense++; } }
+    return new Response(JSON.stringify(_res), { status: 200, headers: CORS_H });
+  }
+  var _mnLa = _gp("minLat"), _mxLa = _gp("maxLat"), _mnLn = _gp("minLng"), _mxLn = _gp("maxLng"), _dg = {};
+  var _asm = await btAssemble(env, _mnLa, _mxLa, _mnLn, _mxLn, 0, 0, 0, 0, 0.025, _dg);
+  var _q1 = await env.DB.prepare("SELECT brs.route_key,brs.seq FROM bus_route_stops brs WHERE brs.lat BETWEEN ?1 AND ?2 AND brs.lng BETWEEN ?3 AND ?4 LIMIT ?5").bind(_mnLa, _mxLa, _mnLn, _mxLn, MAX_STOPS).all();
+  var _d1r = (_q1 && _q1.results) || [], _ds = {}; for (var _i = 0; _i < _d1r.length; _i++) _ds[_d1r[_i].route_key + "|" + _d1r[_i].seq] = 1;
+  var _out = { diag: _dg, d1: _d1r.length };
+  if (_asm.rows) { var _ts = {}, _onlyT = 0, _onlyD = 0; for (var _k = 0; _k < _asm.rows.length; _k++) { var _kk = _asm.rows[_k].route_key + "|" + _asm.rows[_k].seq; _ts[_kk] = 1; if (!_ds[_kk]) _onlyT++; } for (var _kd in _ds) if (!_ts[_kd]) _onlyD++; _out.tile = _asm.rows.length; _out.onlyTile = _onlyT; _out.onlyD1 = _onlyD; } else _out.missing = (_asm.missing || []).length;
+  return new Response(JSON.stringify(_out), { status: 200, headers: CORS_H });
+} catch (e) { return new Response(JSON.stringify({ error: String(e && e.message || e).slice(0, 200) }), { status: 500, headers: CORS_H }); } }
 if (url.pathname === "/ld-pairs-warm") { try { return new Response(JSON.stringify(await ldPairsWarm(env, ctx, url.searchParams.get("mode"), url.searchParams.get("idx"))), { status: 200, headers: CORS_H }); } catch (e) { return new Response(JSON.stringify({ error: String(e && e.message || e).slice(0, 200) }), { status: 500, headers: CORS_H }); } }
 if (url.pathname === "/kric-rederive") { if (!env.DB) return new Response(JSON.stringify({ error: "no db" }), { status: 500, headers: CORS_H }); try { return new Response(JSON.stringify(await kricRederive(env)), { status: 200, headers: CORS_H }); } catch (re) { return new Response(JSON.stringify({ error: String(re && re.message || re).slice(0, 200) }), { status: 500, headers: CORS_H }); } } if (url.pathname === "/kric-status") { if (!env.DB) return new Response(JSON.stringify({ error: "no db" }), { status: 500, headers: CORS_H }); return new Response(JSON.stringify(await kricStatus(env)), { status: 200, headers: CORS_H }); } if ((url.pathname === "/kric-ingest" || url.pathname === "/kric-probe" || url.pathname === "/kric-derive") && (!env.KRIC_ADMIN || request.headers.get("x-kric-admin") !== env.KRIC_ADMIN)) return new Response(JSON.stringify({ error: "locked" }), { status: 403, headers: CORS_H }); if (url.pathname === "/kric-ingest") { globalThis.__kiN = (globalThis.__kiN || 0) + 1; if (globalThis.__kiN > 4000) return new Response(JSON.stringify({ error: "limit" }), { status: 429, headers: CORS_H }); if (!env.KRIC_KEY || !env.DB) return new Response(JSON.stringify({ error: "no key/db" }), { status: 500, headers: CORS_H }); const qo = url.searchParams.get("opr") || "", ql = url.searchParams.get("ln") || "", qs = url.searchParams.get("st") || "", qd = url.searchParams.get("day") || "", qn = url.searchParams.get("nm") || ""; if (!/^[A-Za-z0-9]{1,4}$/.test(qo) || !/^[A-Za-z0-9]{1,4}$/.test(ql) || !/^[A-Za-z0-9-]{1,12}$/.test(qs) || !/^[789]$/.test(qd) || !/^[A-Za-z0-9가-힣() .-]{0,30}$/.test(qn)) return new Response(JSON.stringify({ error: "bad param" }), { status: 400, headers: CORS_H }); await env.DB.prepare("CREATE TABLE IF NOT EXISTS kric_tt (opr TEXT, ln TEXT, st TEXT, day TEXT, nm TEXT, n INTEGER, data TEXT, ts INTEGER, PRIMARY KEY (opr, ln, st, day))").run(); const ex0 = await env.DB.prepare("SELECT n, nm FROM kric_tt WHERE opr=? AND ln=? AND st=? AND day=?").bind(qo, ql, qs, qd).first(); if (ex0) { let upd = false; if (qn && ex0.nm !== qn) { await env.DB.prepare("UPDATE kric_tt SET nm=? WHERE opr=? AND ln=? AND st=? AND day=?").bind(qn, qo, ql, qs, qd).run(); upd = true; } return new Response(JSON.stringify({ ok: true, skipped: true, n: ex0.n, upd: upd }), { status: 200, headers: CORS_H }); } const kr = await fetch("https://openapi.kric.go.kr/openapi/convenientInfo/stationTimetable?serviceKey=" + encodeURIComponent(env.KRIC_KEY) + "&format=json&railOprIsttCd=" + qo + "&lnCd=" + ql + "&stinCd=" + qs + "&dayCd=" + qd); const kt = await kr.text(); let kj = null; try { kj = JSON.parse(kt); } catch (e) { return new Response(JSON.stringify({ error: "nonjson", status: kr.status, head: kt.slice(0, 120) }), { status: 200, headers: CORS_H }); } const kh = kj && kj.header && kj.header.resultCode; if (kh !== "00") return new Response(JSON.stringify({ error: "hdr", code: kh, msg: kj && kj.header && kj.header.resultMsg }), { status: 200, headers: CORS_H }); const kb = Array.isArray(kj.body) ? kj.body : (kj.body ? [kj.body] : []); const kd = kb.map((x) => [x.trnNo, x.arvTm || "", x.dptTm || "", x.orgStinCd || "", x.tmnStinCd || ""].join(",")).join("\n"); await env.DB.prepare("INSERT OR IGNORE INTO kric_tt (opr, ln, st, day, nm, n, data, ts) VALUES (?,?,?,?,?,?,?,?)").bind(qo, ql, qs, qd, qn, kb.length, kd, Date.now()).run(); return new Response(JSON.stringify({ ok: true, n: kb.length, bytes: kd.length }), { status: 200, headers: CORS_H }); } if (url.pathname === "/kric-derive") { globalThis.__kdN = (globalThis.__kdN || 0) + 1; if (globalThis.__kdN > 300) return new Response(JSON.stringify({ error: "limit" }), { status: 429, headers: CORS_H }); if (!env.DB) return new Response(JSON.stringify({ error: "no db" }), { status: 500, headers: CORS_H }); const dl = url.searchParams.get("line") || ""; if (!/^[A-Z0-9]{2,4}$/.test(dl)) return new Response(JSON.stringify({ error: "bad line" }), { status: 400, headers: CORS_H }); try { const dres = await kricDerive(env, SUBWAY_BUNDLE, dl); return new Response(JSON.stringify(dres), { status: 200, headers: CORS_H }); } catch (de) { return new Response(JSON.stringify({ error: String(de && de.message || de).slice(0, 200) }), { status: 500, headers: CORS_H }); } } if (url.pathname === "/kric-probe") { globalThis.__kricN = (globalThis.__kricN || 0) + 1; if (globalThis.__kricN > 400) return new Response(JSON.stringify({ error: "probe limit" }), { status: 429, headers: CORS_H }); if (!env.KRIC_KEY) return new Response(JSON.stringify({ hasKey: false }), { status: 200, headers: CORS_H }); const kq = new URLSearchParams(); for (const [k, v] of url.searchParams) { if (/^(lnCd|railOprIsttCd|stinCd|dayCd|stinNm|svc|op)$/.test(k) && /^[A-Za-z0-9가-힣]{0,20}$/.test(v)) kq.set(k, v); } const ksvc = kq.get("svc") || "convenientInfo"; const kop = kq.get("op") || "stationTimetable"; kq.delete("svc"); kq.delete("op"); kq.set("format", "json"); const kn = Math.min(60000, parseInt(url.searchParams.get("n") || "3000", 10) || 3000); const kres = await fetch("https://openapi.kric.go.kr/openapi/" + ksvc + "/" + kop + "?serviceKey=" + encodeURIComponent(env.KRIC_KEY) + "&" + kq.toString()); const ktxt = await kres.text(); return new Response(JSON.stringify({ hasKey: true, status: kres.status, len: ktxt.length, head: ktxt.slice(parseInt(url.searchParams.get("off") || "0", 10) || 0, (parseInt(url.searchParams.get("off") || "0", 10) || 0) + kn) }, null, 1), { status: 200, headers: CORS_H }); }
 if (url.pathname === "/tago-probe") {
