@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-02ad";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-02ae";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -3584,6 +3584,110 @@ function ldLocalRoute(G, busCoord, busNm, aLat, aLng, bLat, bLng, opt) {
 }
 __name(ldLocalRoute, "ldLocalRoute");
 
+
+// ★ 02ae (YJ: "속도 무조건 끌어올려" — 도시간 CPU 의 90% 가 시외·고속버스 터미널 후보 순위였다): 터미널 쌍에 운행편이 있는지를
+//   미리 알아 두면(서비스 지도) 편이 없는 터미널은 순위를 안 매기고 TAGO 도 안 부른다. 서울→강릉 같은 구간은 후보가 수십 곳에서 한두 곳으로 준다.
+//   지도는 터미널마다 KV 한 항목(ldp:<모드>:<출발터미널>) — {at, ver, a:[편 있는 도착터미널], u:[조회 실패라 모르는 곳]}.
+//   채우기: /ld-pairs-warm?mode=expbus&idx=N (터미널 하나당 약 60쌍×최대 2일자 조회, 이미 최근에 했으면 아무것도 안 함 → 반복 호출해도 쿼터 안전).
+//   편 없음 판정은 서로 다른 두 날(다음 수요일·토요일) 모두 '정상 응답인데 비어 있음'일 때만 — TAGO 가 가끔 빈 응답을 주는 문제 대비.
+//   지도에 없거나(모름) 20km 안쪽 쌍은 예전처럼 '있다'고 보고 처리한다 → 지도가 틀려도 기존보다 나빠지지 않는다.
+var LD_PAIRS_VER = "1", LD_PAIRS_FRESH_MS = 6 * 24 * 3600 * 1000, LD_PAIRS_MAXAGE_MS = 30 * 24 * 3600 * 1000, LD_PAIRS_MIN_M = 20000;
+var LD_PAIRS_MEM = /* @__PURE__ */ new Map();
+async function ldPairsLoad(mode, depIds, env) {
+  var out = {}, need = [], now = Date.now();
+  for (var i = 0; i < depIds.length; i++) {
+    var m = LD_PAIRS_MEM.get(mode + ":" + depIds[i]);
+    if (m && now - m.at < 30 * 60 * 1000) out[depIds[i]] = m.rec; else need.push(depIds[i]);
+  }
+  if (need.length && env && env.ROWS_KV) {
+    var rs = await Promise.all(need.map(function (id) { return env.ROWS_KV.get("ldp:" + mode + ":" + id, "json").catch(function () { return null; }); }));
+    for (var j = 0; j < need.length; j++) {
+      var rec = rs[j]; if (rec && (!rec.a || now - rec.at > LD_PAIRS_MAXAGE_MS)) rec = null;
+      if (LD_PAIRS_MEM.size > 400) LD_PAIRS_MEM.clear();
+      LD_PAIRS_MEM.set(mode + ":" + need[j], { at: now, rec: rec || null });
+      out[need[j]] = rec || null;
+    }
+  } else { for (var k = 0; k < need.length; k++) out[need[k]] = null; }
+  return out;
+}
+function ldPairsServedFn(recs) {
+  return function (dT, aT) {
+    var rec = recs[dT.id]; if (!rec) return true;                     // 모름 → 있다고 본다
+    if (hav(dT.lat, dT.lng, aT.lat, aT.lng) < LD_PAIRS_MIN_M) return true;
+    if (rec.a.indexOf(aT.id) >= 0) return true;
+    if (rec.u && rec.u.indexOf(aT.id) >= 0) return true;
+    return false;
+  };
+}
+async function ldPairsFilter(mode, depPool, arrPool, env, stat) {
+  var recs = await ldPairsLoad(mode, depPool.map(function (c) { return c.t.id; }), env);
+  var have = 0; for (var id in recs) if (recs[id]) have++;
+  if (!have) return { dep: depPool, arr: arrPool, ok: null };
+  var ok = ldPairsServedFn(recs);
+  var dep = depPool.filter(function (d) { return arrPool.some(function (a) { return ok(d.t, a.t); }); });
+  var arr = arrPool.filter(function (a) { return dep.some(function (d) { return ok(d.t, a.t); }); });
+  if (stat) { stat["ldPairs_" + mode] = depPool.length + "x" + arrPool.length + "->" + dep.length + "x" + arr.length; }
+  return { dep: dep, arr: arr, ok: ok };
+}
+function ldNextYmdByDow(dow, fromMs) {   // KST 기준 오늘 포함 다음 dow(0=일..6=토) 날짜 yyyymmdd
+  for (var i = 0; i < 8; i++) {
+    var d = new Date(fromMs + i * 864e5 + 9 * 3600 * 1000);
+    if (d.getUTCDay() === dow) return d.getUTCFullYear() + String(d.getUTCMonth() + 1).padStart(2, "0") + String(d.getUTCDate()).padStart(2, "0");
+  }
+  return ymdTodayKST(fromMs);
+}
+async function ldPairsWarm(env, ctx, mode, idx) {
+  var T = LD_TERMINALS[mode];
+  if (!T || (mode !== "expbus" && mode !== "subbus")) return { error: "bad mode" };
+  if (!env || !env.ROWS_KV) return { error: "no kv" };
+  idx = parseInt(idx, 10);
+  if (!(idx >= 0 && idx < T.length)) return { done: true, n: T.length };
+  var dep = T[idx];
+  if (!dep.id) return { idx: idx, skipped: "no id" };
+  var cur = null; try { cur = await env.ROWS_KV.get("ldp:" + mode + ":" + dep.id, "json"); } catch (e) {}
+  if (cur && cur.ver === LD_PAIRS_VER && Date.now() - cur.at < LD_PAIRS_FRESH_MS) return { idx: idx, dep: dep.nm, skipped: "fresh", served: cur.a.length, unknown: (cur.u || []).length };
+  var t0 = Date.now(), now = Date.now();
+  var dates = [ldNextYmdByDow(3, now), ldNextYmdByDow(6, now)];
+  var svcPath = mode === "expbus" ? "/ExpBusInfo/GetStrtpntAlocFndExpbusInfo" : "/SuburbsBusInfo/GetStrtpntAlocFndSuberbsBusInfo";
+  var arrs = T.filter(function (t, j) { return j !== idx && t.id && hav(dep.lat, dep.lng, t.lat, t.lng) >= LD_PAIRS_MIN_M; });
+  var served = [], unknown = [], neg = 0, calls = 0;
+  async function q(a, ymd) {
+    var qs = "depTerminalId=" + encodeURIComponent(dep.id) + "&arrTerminalId=" + encodeURIComponent(a.id) + "&depPlandTime=" + ymd + "&numOfRows=300&_type=json";
+    calls++;
+    var r = await tagoFetchAny(env, LD_BASE + svcPath + "?" + qs);
+    return r;
+  }
+  async function one(a) {
+    var res = [];
+    for (var di = 0; di < dates.length; di++) {
+      var r = await q(a, dates[di]);
+      if (r.items && r.items.length) { ldDtPut(ldDtKey(mode, dep.id, a.id, dates[di]), dates[di], r.items, env, ctx); return "svc"; }
+      res.push(r.items ? "empty" : "err");   // items null/undefined = 오류
+    }
+    return res.every(function (x) { return x === "empty"; }) ? "neg" : "unk";
+  }
+  for (var i = 0; i < arrs.length; i += 6) {
+    var chunk = arrs.slice(i, i + 6);
+    var rs = await Promise.all(chunk.map(function (a) { return one(a).catch(function () { return "unk"; }); }));
+    for (var k = 0; k < chunk.length; k++) { if (rs[k] === "svc") served.push(chunk[k].id); else if (rs[k] === "unk") unknown.push(chunk[k].id); else neg++; }
+  }
+  await env.ROWS_KV.put("ldp:" + mode + ":" + dep.id, JSON.stringify({ at: Date.now(), ver: LD_PAIRS_VER, p: dates, a: served, u: unknown }), { expirationTtl: 40 * 24 * 3600 });
+  LD_PAIRS_MEM.delete(mode + ":" + dep.id);
+  return { idx: idx, dep: dep.nm, pairs: arrs.length, served: served.length, neg: neg, unknown: unknown.length, calls: calls, ms: Date.now() - t0 };
+}
+
+// ★ 02ae: 새벽 cron 틱마다 서비스 지도를 한 터미널씩 갱신한다(6일 넘은 것만 실제 조회). 커서를 KV 에 두고 이미 최신인 터미널은 건너뛴다.
+async function ldPairsCron(env, ctx) {
+  if (!env || !env.ROWS_KV) return;
+  var order = []; ["expbus", "subbus"].forEach(function (m) { for (var i = 0; i < LD_TERMINALS[m].length; i++) order.push([m, i]); });
+  var cur = 0; try { cur = parseInt(await env.ROWS_KV.get("ldp:cursor"), 10) || 0; } catch (e) {}
+  for (var step = 0; step < 40; step++) {
+    var it = order[cur % order.length]; cur = (cur + 1) % order.length;
+    var r = await ldPairsWarm(env, ctx, it[0], it[1]);
+    if (!r || !r.skipped) break;
+  }
+  try { await env.ROWS_KV.put("ldp:cursor", String(cur), { expirationTtl: 60 * 24 * 3600 }); } catch (e) {}
+}
 async function ldFetchLive(SY, SX, EY, EX, env, stat, G, busCoord, busNm, ctx) {
   if (!LD_ENABLE) return null;
   var distKm = hav(SY, SX, EY, EX) / 1000;
@@ -3605,6 +3709,11 @@ async function ldFetchLive(SY, SX, EY, EX, env, stat, G, busCoord, busNm, ctx) {
     var depPool = ldNearestN(SY, SX, LD_TERMINALS[mode], LD_CAND_POOL, LD_CAND_MAX_KM);
     var arrPool = ldNearestN(EY, EX, LD_TERMINALS[mode], LD_CAND_POOL, LD_CAND_MAX_KM);
     if (!depPool.length || !arrPool.length) return;
+    var _pairOk = null;
+    if (mode === "expbus" || mode === "subbus") {   // ★ 02ae: 편이 있는 터미널 쌍만 남긴다(서비스 지도가 있을 때)
+      try { var _pf = await ldPairsFilter(mode, depPool, arrPool, env, stat); depPool = _pf.dep; arrPool = _pf.arr; _pairOk = _pf.ok; } catch (e) {}
+      if (!depPool.length || !arrPool.length) { if (stat) stat["ldPairsSkip_" + mode] = 1; return; }
+    }
     // ★ 실제 접근/이탈 경로(다익스트라)는 네트워크가 아니라 순수 계산이라 fetch 전에 바로 구한다.
     var _tr0 = Date.now(), _dj0 = DJ_STAT.pops, _dc0 = DJ_STAT.calls; var depR = ldRankByAccess(depPool, G, busCoord, busNm, SY, SX, true, nSide).slice(0, nSide);
     var arrR = ldRankByAccess(arrPool, G, busCoord, busNm, EY, EX, false, nSide).slice(0, nSide); if (stat) { stat["ldRankMs_" + mode] = Date.now() - _tr0; stat["djRank_" + mode] = (DJ_STAT.calls - _dc0) + "c/" + (DJ_STAT.pops - _dj0) + "p"; }
@@ -3614,6 +3723,7 @@ async function ldFetchLive(SY, SX, EY, EX, env, stat, G, busCoord, busNm, ctx) {
       for (var j = 0; j < arrR.length; j++)
         combos.push({ d: depR[i], a: arrR[j], rank: depR[i].min + arrR[j].min });
     combos.sort(function (a, b) { return a.rank - b.rank; });   // 접근+이탈 합이 짧은 조합부터
+    if (_pairOk) { combos = combos.filter(function (c) { return _pairOk(c.d.t, c.a.t); }); if (!combos.length) return; }
     if (mode === "train") { try { await ldTrainD1Prefetch(combos.map(function (c) { return [c.d.t.nm, c.a.t.nm]; }), env, stat, baseMs); } catch (e) { if (stat) stat.ldTrainD1BatchErr = String((e && e.message) || e).slice(0, 80); } }
     await Promise.all(combos.map(function (c) {
       return fetchFn(c.d.t, c.a.t)
@@ -4938,7 +5048,7 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
   return new Response(JSON.stringify({ result: out, busStopsInCorridor: Object.keys(busCoord).length, rtwApplied: _rtwApplied, engVer: ENGINE_VERSION, rtwStat: G.rtwStat || null, liveStat: _liveStat, _src: "route-v2" }), { status: 200, headers: CORS });
 }
 __name(handleRouteV2, "handleRouteV2");
-var route_v2_worker_default = { async scheduled(event, env, ctx) { ctx.waitUntil(kricCron(event, env)); ctx.waitUntil(ldTTWarm(env).catch(function () {})); }, async fetch(request, env, ctx) {
+var route_v2_worker_default = { async scheduled(event, env, ctx) { ctx.waitUntil(kricCron(event, env)); ctx.waitUntil(ldTTWarm(env).catch(function () {})); ctx.waitUntil(ldPairsCron(env, ctx).catch(function () {})); }, async fetch(request, env, ctx) {
   // ★ 2026-09-05: 어떤 예외도 1101 페이지로 새지 않게 한다.
   //   HTML 오류 페이지는 원인을 감추고, 앱쪽에선 'JSON 아님'로만 보인다.
   try {
@@ -5089,6 +5199,7 @@ async function handleFetch(request, env, ctx) {
   //      /tago-probe?svc=ExpBusInfo&op=GetExpBusTrminlList
   //      /tago-probe?svc=SuburbsBusInfo&op=GetSuberbsBusTrminlList
   // ★ 2026-10-02 (항목6): KRIC 역사별 운행시각표(stationTimetable) 시험 조회 — 키는 시크릿 KRIC_KEY. 호출 한도(하루 1회 권장)를 지키려고 isolate 당 40회로 막는다. 데이터를 D1 에 적재한 뒤에는 이 주소를 지울 것.
+if (url.pathname === "/ld-pairs-warm") { try { return new Response(JSON.stringify(await ldPairsWarm(env, ctx, url.searchParams.get("mode"), url.searchParams.get("idx"))), { status: 200, headers: CORS_H }); } catch (e) { return new Response(JSON.stringify({ error: String(e && e.message || e).slice(0, 200) }), { status: 500, headers: CORS_H }); } }
 if (url.pathname === "/kric-rederive") { if (!env.DB) return new Response(JSON.stringify({ error: "no db" }), { status: 500, headers: CORS_H }); try { return new Response(JSON.stringify(await kricRederive(env)), { status: 200, headers: CORS_H }); } catch (re) { return new Response(JSON.stringify({ error: String(re && re.message || re).slice(0, 200) }), { status: 500, headers: CORS_H }); } } if (url.pathname === "/kric-status") { if (!env.DB) return new Response(JSON.stringify({ error: "no db" }), { status: 500, headers: CORS_H }); return new Response(JSON.stringify(await kricStatus(env)), { status: 200, headers: CORS_H }); } if ((url.pathname === "/kric-ingest" || url.pathname === "/kric-probe" || url.pathname === "/kric-derive") && (!env.KRIC_ADMIN || request.headers.get("x-kric-admin") !== env.KRIC_ADMIN)) return new Response(JSON.stringify({ error: "locked" }), { status: 403, headers: CORS_H }); if (url.pathname === "/kric-ingest") { globalThis.__kiN = (globalThis.__kiN || 0) + 1; if (globalThis.__kiN > 4000) return new Response(JSON.stringify({ error: "limit" }), { status: 429, headers: CORS_H }); if (!env.KRIC_KEY || !env.DB) return new Response(JSON.stringify({ error: "no key/db" }), { status: 500, headers: CORS_H }); const qo = url.searchParams.get("opr") || "", ql = url.searchParams.get("ln") || "", qs = url.searchParams.get("st") || "", qd = url.searchParams.get("day") || "", qn = url.searchParams.get("nm") || ""; if (!/^[A-Za-z0-9]{1,4}$/.test(qo) || !/^[A-Za-z0-9]{1,4}$/.test(ql) || !/^[A-Za-z0-9-]{1,12}$/.test(qs) || !/^[789]$/.test(qd) || !/^[A-Za-z0-9가-힣() .-]{0,30}$/.test(qn)) return new Response(JSON.stringify({ error: "bad param" }), { status: 400, headers: CORS_H }); await env.DB.prepare("CREATE TABLE IF NOT EXISTS kric_tt (opr TEXT, ln TEXT, st TEXT, day TEXT, nm TEXT, n INTEGER, data TEXT, ts INTEGER, PRIMARY KEY (opr, ln, st, day))").run(); const ex0 = await env.DB.prepare("SELECT n, nm FROM kric_tt WHERE opr=? AND ln=? AND st=? AND day=?").bind(qo, ql, qs, qd).first(); if (ex0) { let upd = false; if (qn && ex0.nm !== qn) { await env.DB.prepare("UPDATE kric_tt SET nm=? WHERE opr=? AND ln=? AND st=? AND day=?").bind(qn, qo, ql, qs, qd).run(); upd = true; } return new Response(JSON.stringify({ ok: true, skipped: true, n: ex0.n, upd: upd }), { status: 200, headers: CORS_H }); } const kr = await fetch("https://openapi.kric.go.kr/openapi/convenientInfo/stationTimetable?serviceKey=" + encodeURIComponent(env.KRIC_KEY) + "&format=json&railOprIsttCd=" + qo + "&lnCd=" + ql + "&stinCd=" + qs + "&dayCd=" + qd); const kt = await kr.text(); let kj = null; try { kj = JSON.parse(kt); } catch (e) { return new Response(JSON.stringify({ error: "nonjson", status: kr.status, head: kt.slice(0, 120) }), { status: 200, headers: CORS_H }); } const kh = kj && kj.header && kj.header.resultCode; if (kh !== "00") return new Response(JSON.stringify({ error: "hdr", code: kh, msg: kj && kj.header && kj.header.resultMsg }), { status: 200, headers: CORS_H }); const kb = Array.isArray(kj.body) ? kj.body : (kj.body ? [kj.body] : []); const kd = kb.map((x) => [x.trnNo, x.arvTm || "", x.dptTm || "", x.orgStinCd || "", x.tmnStinCd || ""].join(",")).join("\n"); await env.DB.prepare("INSERT OR IGNORE INTO kric_tt (opr, ln, st, day, nm, n, data, ts) VALUES (?,?,?,?,?,?,?,?)").bind(qo, ql, qs, qd, qn, kb.length, kd, Date.now()).run(); return new Response(JSON.stringify({ ok: true, n: kb.length, bytes: kd.length }), { status: 200, headers: CORS_H }); } if (url.pathname === "/kric-derive") { globalThis.__kdN = (globalThis.__kdN || 0) + 1; if (globalThis.__kdN > 300) return new Response(JSON.stringify({ error: "limit" }), { status: 429, headers: CORS_H }); if (!env.DB) return new Response(JSON.stringify({ error: "no db" }), { status: 500, headers: CORS_H }); const dl = url.searchParams.get("line") || ""; if (!/^[A-Z0-9]{2,4}$/.test(dl)) return new Response(JSON.stringify({ error: "bad line" }), { status: 400, headers: CORS_H }); try { const dres = await kricDerive(env, SUBWAY_BUNDLE, dl); return new Response(JSON.stringify(dres), { status: 200, headers: CORS_H }); } catch (de) { return new Response(JSON.stringify({ error: String(de && de.message || de).slice(0, 200) }), { status: 500, headers: CORS_H }); } } if (url.pathname === "/kric-probe") { globalThis.__kricN = (globalThis.__kricN || 0) + 1; if (globalThis.__kricN > 400) return new Response(JSON.stringify({ error: "probe limit" }), { status: 429, headers: CORS_H }); if (!env.KRIC_KEY) return new Response(JSON.stringify({ hasKey: false }), { status: 200, headers: CORS_H }); const kq = new URLSearchParams(); for (const [k, v] of url.searchParams) { if (/^(lnCd|railOprIsttCd|stinCd|dayCd|stinNm|svc|op)$/.test(k) && /^[A-Za-z0-9가-힣]{0,20}$/.test(v)) kq.set(k, v); } const ksvc = kq.get("svc") || "convenientInfo"; const kop = kq.get("op") || "stationTimetable"; kq.delete("svc"); kq.delete("op"); kq.set("format", "json"); const kn = Math.min(60000, parseInt(url.searchParams.get("n") || "3000", 10) || 3000); const kres = await fetch("https://openapi.kric.go.kr/openapi/" + ksvc + "/" + kop + "?serviceKey=" + encodeURIComponent(env.KRIC_KEY) + "&" + kq.toString()); const ktxt = await kres.text(); return new Response(JSON.stringify({ hasKey: true, status: kres.status, len: ktxt.length, head: ktxt.slice(parseInt(url.searchParams.get("off") || "0", 10) || 0, (parseInt(url.searchParams.get("off") || "0", 10) || 0) + kn) }, null, 1), { status: 200, headers: CORS_H }); }
 if (url.pathname === "/tago-probe") {
     const svc = url.searchParams.get("svc") || "";
