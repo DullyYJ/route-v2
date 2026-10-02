@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-02al";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-02am";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -4833,7 +4833,8 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
   let rows = [], _nearErr = null, _nearRowsCnt = 0;
   const _tD1 = Date.now();
   const _ck = rowsCacheKey(minLat, maxLat, minLng, maxLng);
-  const _cached = rowsCacheGet(_ck);
+  const _noRC = p.get("rc") === "0";   // ★ 02am: 진단용 — 행 캐시(메모리·KV)를 읽지 않고 D1/지도조각에서 새로 받는다(A/B 비교·콜드 측정용)
+  const _cached = _noRC ? null : rowsCacheGet(_ck);
   const seenRow = /* @__PURE__ */ Object.create(null);
   let _nearKeySet = null;
   const pushRows = /* @__PURE__ */ __name((list) => {
@@ -4854,7 +4855,7 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
   //   기존처럼 D1로 간다(기존 기능 보존).
   const _d1Diag = {};
   let _kvHit = null, _kvErr = null;
-  if (!_cached && env.ROWS_KV) {
+  if (!_cached && !_noRC && env.ROWS_KV) {
     try {
       const v = await env.ROWS_KV.get(_ck, "json");
       if (v && Array.isArray(v)) _kvHit = v;
