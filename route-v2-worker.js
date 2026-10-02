@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-02x";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-02y";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -3085,6 +3085,62 @@ __name(ldTrainGradeByNo, "ldTrainGradeByNo");
 // ldPickBest/ldGradeOptions 등 기존 판단 로직을 그대로 재사용한다(중복 로직 없음).
 // D1에 아직 그 구간 정차역 시각표가 안 채워졌으면(null 반환) 호출부가 기존처럼
 // 라이브 TAGO로 폴백한다 — 기존 6개 역 동작은 완전히 그대로 유지.
+
+// ★ 2026-10-02y (YJ: "속도 무조건 끌어올려"): 실측 — 도시간 한 건에서 열차 후보 조합(최대 5×5=25쌍)을 D1 에서 쌍마다 셀프조인으로 읽는데
+//   (train_stops 에 역이름 인덱스가 없어 매번 3만 행 전체 스캔 → 인덱스를 만든 뒤에도 25문 배치가 1~4 초) 이 한 단계가 요청 전체 시간을 좌우했다.
+//   열차 시간표는 요일유형(WD/SAT/SUN)당 정차 약 1만 행·열차 약 940편으로 작고 거의 안 바뀐다 → 요일유형별로 통째로 한 번만 읽어
+//   메모리(L1, 20분)와 KV(L2, 30분)에 두고, 쌍 조회는 메모리에서 계산한다(수 ms 이하). D1 쿼리 결과와 행 모양·정렬·한도가 같다.
+var LD_TT = {}, LD_TT_P = {}, LD_TT_TTL_MS = 20 * 60 * 1000, LD_TT_KV_MS = 30 * 60 * 1000;
+function ldTTBuild(stops, meta) {
+  var byStn = {};
+  for (var i = 0; i < stops.length; i++) { var r = stops[i]; var nm = r[2]; if (nm == null) continue; (byStn[nm] || (byStn[nm] = [])).push([r[0], r[1], r[3], r[4]]); }
+  return { byStn: byStn, meta: meta };
+}
+async function ldTTGet(env, dt, stat) {
+  var hit = LD_TT[dt]; if (hit && Date.now() - hit.at < LD_TT_TTL_MS) { if (stat) stat.ldTT = "mem"; return hit; }
+  if (LD_TT_P[dt]) return LD_TT_P[dt];
+  var pr = (async function () {
+    var t0 = Date.now(), via = "d1", stops = null, meta = null, kvAt = 0;
+    if (env && env.ROWS_KV) {
+      try {
+        var kv = await env.ROWS_KV.get("ldtt:" + dt, "json");
+        if (kv && kv.s && kv.m && Date.now() - kv.at < LD_TT_KV_MS) { stops = kv.s; meta = kv.m; kvAt = kv.at; via = "kv"; }
+      } catch (e) {}
+    }
+    if (!stops) {
+      if (!env || !env.DB) return null;
+      var res = await env.DB.batch([
+        env.DB.prepare("SELECT trn_no, seq, stn_nm, arvl_time, dptre_time FROM train_stops WHERE day_type = ?1").bind(dt),
+        env.DB.prepare("SELECT trn_no, train_grade, dptre_stn_nm, arvl_stn_nm FROM train_trains WHERE day_type = ?1").bind(dt)
+      ]);
+      var sr = (res && res[0] && res[0].results) || [], tr = (res && res[1] && res[1].results) || [];
+      if (!sr.length || !tr.length) return null;
+      stops = sr.map(function (r) { return [r.trn_no, r.seq, r.stn_nm, r.arvl_time, r.dptre_time]; });
+      meta = {}; for (var i = 0; i < tr.length; i++) meta[tr[i].trn_no] = [tr[i].train_grade, tr[i].dptre_stn_nm, tr[i].arvl_stn_nm];
+      if (env.ROWS_KV) { try { env.ROWS_KV.put("ldtt:" + dt, JSON.stringify({ at: Date.now(), s: stops, m: meta }), { expirationTtl: 3600 }).catch(function () {}); } catch (e) {} }
+    }
+    var tt = ldTTBuild(stops, meta); tt.at = kvAt || Date.now(); if (via === "kv") tt.at = Date.now();
+    LD_TT[dt] = tt;
+    if (stat) { stat.ldTT = via; stat.ldTTMs = Date.now() - t0; stat.ldTTRows = stops.length; }
+    return tt;
+  })();
+  LD_TT_P[dt] = pr;
+  try { return await pr; } finally { delete LD_TT_P[dt]; }
+}
+function ldTTPair(tt, dn, an) {
+  var A = tt.byStn[dn], B = tt.byStn[an]; if (!A || !B) return [];
+  var bm = {};
+  for (var i = 0; i < B.length; i++) { if (B[i][2] == null) continue; (bm[B[i][0]] || (bm[B[i][0]] = [])).push(B[i]); }
+  var out = [];
+  for (var j = 0; j < A.length; j++) {
+    var a = A[j]; if (a[3] == null) continue;
+    var bl = bm[a[0]]; if (!bl) continue;
+    var m = tt.meta[a[0]]; if (!m) continue;
+    for (var k = 0; k < bl.length; k++) if (bl[k][1] > a[1]) out.push({ trn_no: a[0], dep: a[3], arr: bl[k][2], grade: m[0], dnm: m[1], anm: m[2] });
+  }
+  out.sort(function (x, y) { return x.dep < y.dep ? -1 : x.dep > y.dep ? 1 : 0; });
+  return out.length > 400 ? out.slice(0, 400) : out;
+}
 var LD_TRAIN_D1_SQL = "SELECT t1.trn_no AS trn_no, t1.dptre_time AS dep, t2.arvl_time AS arr, tt.train_grade AS grade, tt.dptre_stn_nm AS dnm, tt.arvl_stn_nm AS anm " +
   "FROM train_stops t1 " +
   "JOIN train_stops t2 ON t2.trn_no = t1.trn_no AND t2.day_type = t1.day_type AND t2.seq > t1.seq " +
@@ -3102,6 +3158,11 @@ async function ldTrainD1Prefetch(pairs, env, stat, baseMs) {
     var dn = pairs[i][0], an = pairs[i][1]; if (!dn || !an) continue;
     var k = dt + "|" + dn + "|" + an; if (seen[k] || ldTrainD1CacheGet(k)) continue; seen[k] = 1; todo.push([k, dn, an]);
   }
+  if (!todo.length) return;
+  try {
+    var _tt = await ldTTGet(env, dt, stat);
+    if (_tt) { for (var _q = 0; _q < todo.length; _q++) ldTrainD1CacheSet(todo[_q][0], ldTTPair(_tt, todo[_q][1], todo[_q][2])); if (stat) stat.ldTrainD1Mem = todo.length; return; }
+  } catch (e) { if (stat) stat.ldTTErr = String((e && e.message) || e).slice(0, 80); }
   if (todo.length < 2) return;
   var t0 = Date.now();
   var res = await env.DB.batch(todo.map(function (t) { return env.DB.prepare(LD_TRAIN_D1_SQL).bind(t[1], t[2], dt); }));
@@ -3112,7 +3173,9 @@ var LD_D1_CACHE = new Map(); function ldTrainD1CacheGet(k) { var v = LD_D1_CACHE
   if (!env.DB || !depNm || !arrNm) return null;
   try {
     var dt = ldDayTypeKST(baseMs); var _ck = dt + "|" + depNm + "|" + arrNm; var _hit = ldTrainD1CacheGet(_ck); if (_hit && stat) stat.ldTrainD1Cached = (stat.ldTrainD1Cached || 0) + 1;   // ★ 2026-09-25 (기준시각): 앱이 고른 날짜의 요일로 조회
-    var q = _hit ? { results: _hit } : await env.DB.prepare(LD_TRAIN_D1_SQL).bind(depNm, arrNm, dt).all();
+    var q = null;
+    if (_hit) q = { results: _hit };
+    else { try { var _tt1 = await ldTTGet(env, dt, stat); if (_tt1) q = { results: ldTTPair(_tt1, depNm, arrNm) }; } catch (e) {} if (!q) q = await env.DB.prepare(LD_TRAIN_D1_SQL).bind(depNm, arrNm, dt).all(); }
     var rows = (q && q.results) || []; if (!_hit && q && q.results) ldTrainD1CacheSet(_ck, rows);
     if (!rows.length) return null;
     var ymd = ymdTodayKST(baseMs);
