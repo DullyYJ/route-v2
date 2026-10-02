@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-02af";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-02ag";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -4720,6 +4720,7 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
   //   인스턴스/여러 사용자가 계속 재사용할 수 있다. env.ROWS_KV 바인딩이 없거나
   //   KV 호출이 실패해도(네트워크 등) 절대 요청을 막지 않는다 — 실패하면 그냥
   //   기존처럼 D1로 간다(기존 기능 보존).
+  const _d1Diag = {};
   let _kvHit = null, _kvErr = null;
   if (!_cached && env.ROWS_KV) {
     try {
@@ -4758,7 +4759,9 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
         SQL_COLS + "WHERE brs.lat BETWEEN ?1 AND ?2 AND brs.lng BETWEEN ?3 AND ?4 "
         + "LIMIT ?5"   // ★ 2026-09-24: ORDER BY 제거(결과 동일, D1만 빨라짐)
       ).bind(minLat, maxLat, minLng, maxLng, MAX_STOPS).all().then((q) => ({ q }), (e) => ({ e }));
+    const _t1 = Date.now(); _nearP.then(function () { _d1Diag.nearMs = Date.now() - _t1; }); _restP.then(function () { _d1Diag.restMs = Date.now() - _t1; });
     const [_nr, _rr] = await Promise.all([_nearP, _restP]);
+    try { var _mn = _nr.q && _nr.q.meta, _mr = _rr.q && _rr.q.meta; _d1Diag.near = _mn ? { d: _mn.duration, rr: _mn.rows_read, n: (_nr.q.results || []).length, reg: _mn.served_by_region, pri: _mn.served_by_primary } : null; _d1Diag.rest = _mr ? { d: _mr.duration, rr: _mr.rows_read, n: (_rr.q.results || []).length } : null; } catch (e) {}
     if (_nr.e) { _nearErr = String((_nr.e && _nr.e.message) || _nr.e).slice(0, 120); }
     else {
       const got = (_nr.q && _nr.q.results) || [];
@@ -4785,7 +4788,7 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
   const _busDiag = { nearRoutes: _nearKeySet ? _nearKeySet.size : 0, nearRows: (_cached || _kvHit) ? rows.length : _nearRowsCnt,
                      rows: rows.length, capped: rows.length >= MAX_STOPS, nearErr: _nearErr,
                      cached: !!(_cached || _kvHit), cacheTier: _cached ? "mem" : (_kvHit ? "kv" : "none"),
-                     kvErr: _kvErr, d1Ms: _msD1 };
+                     kvErr: _kvErr, d1Ms: _msD1, d1Diag: _d1Diag };
   const G = { adj: /* @__PURE__ */ Object.create(null), ST: _G.ST, LN: _G.LN,
               subOff: _G.subOff, subFirst: _G.subFirst,
               _weekend: _we,                    // ★ 2026-09-25: 위에서 이미 baseMs 기준으로 계산해 둔 값을 그대로 재사용(중복 계산 제거)
@@ -4940,7 +4943,7 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
     //   있어서 내 객체를 덮어썼고, 진단에 'undefinedms' 로 찍혔다. 다른 이름을 쓴다.
     _liveStat.msBreak = { d1: _busDiag.d1Ms, graph: _msGraph, live: _msLive,
                           search: (typeof _msSearch !== "undefined" ? _msSearch : null),
-                          total: Date.now() - _tReq, cached: !!_busDiag.cached, djCalls: DJ_STAT.calls - _djC0, djPops: DJ_STAT.pops - _djP0 };
+                          total: Date.now() - _tReq, d1Diag: _busDiag.d1Diag, cached: !!_busDiag.cached, djCalls: DJ_STAT.calls - _djC0, djPops: DJ_STAT.pops - _djP0 };
     const _lab = { minTime: "최단", minTransfer: "최소환승", subway: "지하철", bus: "버스", direct: "직행" };
     _liveStat.tabs = Object.keys(_lab).filter((k) => out[k]).map((k) => {
       const r = out[k];
