@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-02ak";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-02al";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -87,12 +87,15 @@ var MAX_STOPS = 3e4;
 //   → corridor(사각형)를 키로 조회 결과를 워커 메모리에 잠시 둔다.
 //     엔진을 늘려 병렬로 돌리는 것보다 이게 먼저다 — 늘리면 같은 일을 N배 한다.
 var ROWS_CACHE = new Map();
-var ROWS_TTL_MS = 10 * 60 * 1000;   // 10분
+var ROWS_TTL_MS = 60 * 60 * 1000;   // 메모리(L1) 1시간 (★ 02al: 10분→1시간 — 키에 '날짜 칸'이 들어가서 새벽 갱신 뒤엔 자동으로 다른 키)
+var ROWS_KV_TTL_S = 26 * 3600;      // KV(L2) 26시간 (★ 02al: 10분→26시간 — 매일 같은 길 다니는 사용자가 D1 대신 KV 를 타게)
 var ROWS_CACHE_MAX = 6;             // 워커 메모리 보호
 // ★ 02ak: 캐시 키에 "s1:" 를 붙인다 = '정렬된 행' 버전. 예전(정렬 전) 항목은 키가 달라 자연히 안 쓰이고 10분 안에 사라진다.
 function rowsCacheKey(a, b, c, d) {
   const r = (v) => Math.round(v * 200) / 200;   // 0.005도(약 500m) 단위로 묶는다
-  return "s1:" + r(a) + "," + r(b) + "," + r(c) + "," + r(d);
+  // ★ 02al: 버스 자료는 하루 한 번 새벽에만 바뀐다(위 주석) → 키에 '날짜 칸'(한국시간 05:00 에 바뀜)을 넣어 오래 캐시해도 낡은 자료를 못 쓰게 한다.
+  const day = Math.floor((Date.now() + 4 * 3600 * 1000) / 86400000);   // UTC+4 기준 자정 = 한국시간 05:00 에 날짜가 바뀐다
+  return "s2:" + day + ":" + r(a) + "," + r(b) + "," + r(c) + "," + r(d);
 }
 // ★ 02ak (YJ: "속도·정확도 계속"): 같은 정류장 집합인데 D1 이 주는 행 '순서'만 달라도 도시내 결과가 27건 중 12건 달라졌다(02ai 지도 조각 A/B 실측).
 //   엔진(addBus → 인접 목록 → 다익스트라 동률 처리)이 행 순서에 기대고 있다는 뜻이다. 같은 입력이면 항상 같은 답이 나오도록
@@ -902,76 +905,96 @@ function addBus(G, rows, B) {
   G.noStop = noStop; // 2026-09-14: 미정차 통과 지점(승하차·환승 금지)
 
   G.stopCity = stopCity;   // \u2605 \uC9C1\uD589 \uB178\uC120 \uD0D0\uC0C9\uC5D0 \uC4F4\uB2E4(seq \uC815\uB82C\uB428)
+  // ★ 2026-10-02 (속도): 아래 세 루프는 결과(엣지 순서·값)가 이전과 완전히 같도록 두고
+  //   문자열 격자키·구조분해·전수 hav 대신 숫자키 Map + 싼 거리 사전컷으로 바꿨다.
+  //   (xp/prof 하니스로 이전 구현과 adj 전체 JSON 동일함을 검증)
   const CELL = 3e-3;
-  const gkey = /* @__PURE__ */ __name((lat, lng) => Math.floor(lat / CELL) + ":" + Math.floor(lng / CELL), "gkey");
-  const grid = {};
-  for (const bid in busCoord) {
-    const [la, ln] = busCoord[bid];
-    (grid[gkey(la, ln)] = grid[gkey(la, ln)] || []).push(bid);
+  const RAD = Math.PI / 180, RM = 6371e3 * RAD;      // 1도(라디안 환산) 당 미터
+  const GK = 1e6;                                     // 격자키 = ci*GK + cj (cj < 1e6)
+  const bids = Object.keys(busCoord);                 // for…in 과 같은 순서
+  const nB = bids.length;
+  const bLa = new Float64Array(nB), bLn = new Float64Array(nB), bCos = new Float64Array(nB);
+  const bStop = new Uint8Array(nB), bKey = new Array(nB);
+  const grid = new Map();
+  for (let i = 0; i < nB; i++) {
+    const bid = bids[i], c = busCoord[bid];
+    bLa[i] = c[0]; bLn[i] = c[1]; bCos[i] = Math.cos(c[0] * RAD);
+    bStop[i] = noStop[bid] ? 1 : 0;
+    bKey[i] = "B|" + bid;
+    const k = Math.floor(c[0] / CELL) * GK + Math.floor(c[1] / CELL);
+    const g = grid.get(k);
+    if (g) g.push(i); else grid.set(k, [i]);
   }
-  function nearBus(la, ln) {
-    const ci = Math.floor(la / CELL), cj = Math.floor(ln / CELL);
-    const out = [];
-    for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) {
-      const c = grid[ci + i + ":" + (cj + j)];
-      if (c) for (const b of c) out.push(b);
-    }
-    return out;
-  }
-  __name(nearBus, "nearBus");
-  const sgrid = {};
   const ST = G.ST;
+  const sgrid = new Map();
+  const sids = [], sLa = [], sLn = [], sCos = [], sKey = [];
   for (const id in ST) {
     const s = ST[id];
     if (s.y == null) continue;
-    (sgrid[gkey(s.y, s.x)] = sgrid[gkey(s.y, s.x)] || []).push([id, s.y, s.x]);
+    const j = sids.length;
+    sids.push(id); sLa.push(s.y); sLn.push(s.x); sCos.push(Math.cos(s.y * RAD)); sKey.push("S|" + id);
+    const k = Math.floor(s.y / CELL) * GK + Math.floor(s.x / CELL);
+    const g = sgrid.get(k);
+    if (g) g.push(j); else sgrid.set(k, [j]);
   }
-  function nearSub(la, ln) {
-    const ci = Math.floor(la / CELL), cj = Math.floor(ln / CELL);
-    const out = [];
-    for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) {
-      const c = sgrid[ci + i + ":" + (cj + j)];
-      if (c) for (const s of c) out.push(s);
-    }
-    return out;
-  }
-  __name(nearSub, "nearSub");
-  for (const bid in busCoord) {
-    if (noStop[bid]) continue;             // 통과 지점에서는 내려서 걸을 수 없다
-    const [bl, bg] = busCoord[bid];
-    for (const [sid, sl, sg] of nearSub(bl, bg)) {
-      const d = hav(bl, bg, sl, sg);
-      if (d <= B2S_WALK) {
-        const wt = d / WALK_MPS + 60;
-        A("B|" + bid, "S|" + sid, wt, "walk");
-        A("S|" + sid, "B|" + bid, wt, "walk");
+  // hav() 와 같은 식(같은 부동소수 결과): cos 만 미리 계산해 둔 값을 쓴다.
+  const havC = (a, b, ca, c, d, cc) => {
+    const dLat = (c - a) * RAD, dLng = (d - b) * RAD;
+    const s = Math.sin(dLat / 2) ** 2 + ca * cc * Math.sin(dLng / 2) ** 2;
+    return 2 * 6371e3 * Math.asin(Math.sqrt(s));
+  };
+  for (let i = 0; i < nB; i++) {
+    if (bStop[i]) continue;                // 통과 지점에서는 내려서 걸을 수 없다
+    const bl = bLa[i], bg = bLn[i], bc = bCos[i];
+    const ci = Math.floor(bl / CELL), cj = Math.floor(bg / CELL);
+    const lim = B2S_WALK * 1.02;
+    for (let di = -1; di <= 1; di++) for (let dj = -1; dj <= 1; dj++) {
+      const c = sgrid.get((ci + di) * GK + (cj + dj));
+      if (!c) continue;
+      for (let q = 0; q < c.length; q++) {
+        const j = c[q];
+        if (Math.abs(sLa[j] - bl) * RM > lim) continue;
+        const d = havC(bl, bg, bc, sLa[j], sLn[j], sCos[j]);
+        if (d <= B2S_WALK) {
+          const wt = d / WALK_MPS + 60;
+          A(bKey[i], sKey[j], wt, "walk");
+          A(sKey[j], bKey[i], wt, "walk");
+        }
       }
     }
   }
   const B2B_MAX = 3;
-  for (const bid in busCoord) {
-    if (noStop[bid]) continue;             // 통과 지점에서 갈아탈 수 없다
-    const [bl, bg] = busCoord[bid];
+  const limB = B2B_WALK * 1.02;
+  const cd = [0, 0, 0], cq = [0, 0, 0];
+  for (let i = 0; i < nB; i++) {
+    if (bStop[i]) continue;                // 통과 지점에서 갈아탈 수 없다
+    const bid = bids[i];
+    const bl = bLa[i], bg = bLn[i], bc = bCos[i];
     const rp = stopRoutes[bid];
-    const cand = [];
-    for (const q of nearBus(bl, bg)) {
-      if (q === bid || noStop[q]) continue;
-      const rq = stopRoutes[q];
-      let diff = false;
-      for (const x of rq) if (!rp.has(x)) {
-        diff = true;
-        break;
+    const ci = Math.floor(bl / CELL), cj = Math.floor(bg / CELL);
+    let nc = 0;                            // 가까운 순 상위 3개(동률은 먼저 본 쪽 우선 = 안정 정렬과 동일)
+    for (let di = -1; di <= 1; di++) for (let dj = -1; dj <= 1; dj++) {
+      const c = grid.get((ci + di) * GK + (cj + dj));
+      if (!c) continue;
+      for (let t = 0; t < c.length; t++) {
+        const k = c[t];
+        if (k === i || bStop[k]) continue;
+        if (Math.abs(bLa[k] - bl) * RM > limB) continue;
+        if (Math.abs(bLn[k] - bg) * RM * Math.sqrt(bc * bCos[k]) * 0.98 > limB) continue;
+        let diff = false;
+        for (const x of stopRoutes[bids[k]]) if (!rp.has(x)) { diff = true; break; }
+        if (!diff) continue;
+        const d = havC(bl, bg, bc, bLa[k], bLn[k], bCos[k]);
+        if (!(d > 0 && d <= B2B_WALK)) continue;
+        if (nc === B2B_MAX && !(d < cd[B2B_MAX - 1])) continue;
+        let p = nc < B2B_MAX ? nc : B2B_MAX - 1;
+        while (p > 0 && cd[p - 1] > d) { cd[p] = cd[p - 1]; cq[p] = cq[p - 1]; p--; }
+        cd[p] = d; cq[p] = k;
+        if (nc < B2B_MAX) nc++;
       }
-      if (!diff) continue;
-      const [ql, qg] = busCoord[q];
-      const d = hav(bl, bg, ql, qg);
-      if (d > 0 && d <= B2B_WALK) cand.push([d, q]);
     }
-    cand.sort((a, b) => a[0] - b[0]);
-    for (let i = 0; i < Math.min(B2B_MAX, cand.length); i++) {
-      const [d, q] = cand[i];
-      const wt = d / WALK_MPS + 30;
-      A("B|" + bid, "B|" + q, wt, "walk");
+    for (let t = 0; t < nc; t++) {
+      A(bKey[i], bKey[cq[t]], cd[t] / WALK_MPS + 30, "walk");
     }
   }
   return { busCoord, busNm };
@@ -4902,7 +4925,7 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
     { const _ts = Date.now(); busRowsSort(rows); _d1Diag.sortMs = Date.now() - _ts; }   // ★ 02ak: 결정적 순서(캐시에도 정렬된 채로)
     rowsCacheSet(_ck, rows);
     if (env.ROWS_KV && rows.length) {
-      const _kvPut = env.ROWS_KV.put(_ck, JSON.stringify(rows), { expirationTtl: Math.round(ROWS_TTL_MS / 1000) })
+      const _kvPut = env.ROWS_KV.put(_ck, JSON.stringify(rows), { expirationTtl: ROWS_KV_TTL_S })
         .catch(() => {});   // KV 쓰기 실패해도 응답에는 영향 없음(기존 기능 보존)
       if (ctx && ctx.waitUntil) ctx.waitUntil(_kvPut); else await _kvPut;
     }
