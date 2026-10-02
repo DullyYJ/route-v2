@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-02av";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-02aw";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -3895,7 +3895,7 @@ async function ldFetchLive(SY, SX, EY, EX, env, stat, G, busCoord, busNm, ctx) {
   var found = { train: false, expbus: false, subbus: false }; var _tfStart = Date.now();
   var baseMs = (G && G._ldBaseMs != null) ? G._ldBaseMs : ((G && G._baseMs != null) ? G._baseMs : null);   // ★ 2026-09-25 (기준시각): 열차·버스 시각표는 이 시각 기준으로 조회
 
-  function _ldT(stat, key, pr) { var t = Date.now(); return pr.then(function (r) { if (stat) { stat[key] = Math.max(stat[key] || 0, Date.now() - t); stat[key + "N"] = (stat[key + "N"] || 0) + 1; } return r; }); } async function tryMode(mode, fetchFn, nSide) { if (_trainOnly && mode !== "train") return; if (_trainOnly) nSide = Math.min(nSide, 2);   /* ★ 02av: 30~80km 열차만 볼 때는 편측 후보 2곳만 — 접근 경로 계산(다익스트라)이 요청 시간의 대부분이라 */ if (stat && stat.ldFast && mode !== "train") { stat.ldModesSkipped = (stat.ldModesSkipped || 0) + 1; return; }
+  function _ldT(stat, key, pr) { var t = Date.now(); return pr.then(function (r) { if (stat) { stat[key] = Math.max(stat[key] || 0, Date.now() - t); stat[key + "N"] = (stat[key + "N"] || 0) + 1; } return r; }); } async function tryMode(mode, fetchFn, nSide) { if (_trainOnly && mode !== "train") return; if (_trainOnly) nSide = Math.min(nSide, 3);   /* ★ 02av: 30~80km 열차만 볼 때는 편측 후보 3곳만 — 접근 경로 계산(다익스트라)이 요청 시간의 대부분이라 */ if (stat && stat.ldFast && mode !== "train") { stat.ldModesSkipped = (stat.ldModesSkipped || 0) + 1; return; }
     var depPool = ldNearestN(SY, SX, LD_TERMINALS[mode], LD_CAND_POOL, LD_CAND_MAX_KM);
     var arrPool = ldNearestN(EY, EX, LD_TERMINALS[mode], LD_CAND_POOL, LD_CAND_MAX_KM);
     if (!depPool.length || !arrPool.length) return;
