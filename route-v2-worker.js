@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-02ai";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-02aj";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -4827,7 +4827,9 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
     } catch (e) { _kvErr = String((e && e.message) || e).slice(0, 120); }
   }
   let _btMissing = null, _btTier = null;
-  if (!_cached && !_kvHit && env.ROWS_KV && env.DB && p.get("bt") !== "0") {
+  // ★ 02aj: 지도 조각은 '기본 꺼짐'(?bt=1 로만 켠다). 실측 — 같은 정류장 집합(행 수 완전 일치)인데 행 '순서'만 달라도 도시내 결과가 27건 중 12건 달라졌다
+  //   (엔진 결과가 D1 이 우연히 주는 행 순서에 의존한다는 뜻 — 동률 처리 문제로 추정). 이득은 약 0.2초뿐이라, 순서 의존을 먼저 해결하기 전엔 켜지 않는다.
+  if (!_cached && !_kvHit && env.ROWS_KV && env.DB && p.get("bt") === "1") {
     try { const _bt = await btAssemble(env, minLat, maxLat, minLng, maxLng, SY, SX, EY, EX, NEAR_BOX, _d1Diag); if (_bt.rows) { _kvHit = _bt.rows; _btTier = "tile"; } else _btMissing = _bt.missing || null; }
     catch (e) { _d1Diag.btErr = String((e && e.message) || e).slice(0, 80); }
   }
@@ -4875,7 +4877,7 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
       pushRows(got);
       _nearKeySet = new Set(got.map((r) => r.route_key));
     }
-    if (_btMissing && !_rr.e) { try { await btLearn(env, ctx, (_rr.q && _rr.q.results) || [], _btMissing, minLat, maxLat, minLng, maxLng); } catch (e) { _d1Diag.btLearnErr = String((e && e.message) || e).slice(0, 80); } }
+    if (_btMissing && p.get("bt") === "1" && !_rr.e) { try { await btLearn(env, ctx, (_rr.q && _rr.q.results) || [], _btMissing, minLat, maxLat, minLng, maxLng); } catch (e) { _d1Diag.btLearnErr = String((e && e.message) || e).slice(0, 80); } }
     _nearRowsCnt = rows.length;   // 근처 노선으로 채운 정류장 수(잘리지 않는 부분)
     const restLimit = Math.max(0, MAX_STOPS - rows.length);
     if (restLimit > 0 && !_rr.e) pushRows(((_rr.q && _rr.q.results) || []).slice(0, restLimit));   // 근처 노선만으로도 경로는 나온다
