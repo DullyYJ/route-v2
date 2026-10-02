@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-02v";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-02w";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -1646,7 +1646,7 @@ async function kricStatus(env) {
 // ★ 2026-10-02v: 급행 간선 생성 방식이 바뀌어(위 kricDeriveCore) 저장된 kric_xp 를 한 번 다시 만들어야 한다.
 //   비밀값 없이도 안전하게 돌리려고 '버전이 달라졌을 때만' 한 번에 한 노선씩 계산하는 자기 제한형으로 만들었다.
 //   (이미 최신이면 아무것도 안 한다 → 반복 호출해도 부하·위험 없음. 입력은 D1에 저장된 공식 시각표뿐, 외부 호출 없음.)
-var KRIC_DERIVE_VER = "02v";
+var KRIC_DERIVE_VER = "02w";
 async function kricRederive(env) {
   await kricStateInit(env);
   var cur = await env.DB.prepare("SELECT v FROM kric_state WHERE k='derive_ver'").first();
@@ -1658,7 +1658,7 @@ async function kricRederive(env) {
   if (!todo.length) { await kricStateSet(env, "derive_ver", KRIC_DERIVE_VER); return { done: true, ver: KRIC_DERIVE_VER }; }
   var L = todo[0], t0 = Date.now(), res;
   try { res = await kricDerive(env, SUBWAY_BUNDLE, L); } catch (e) { return { done: false, line: L, error: String(e && e.message || e).slice(0, 160), remaining: todo.length }; }
-  await kricStateSet(env, "rd:" + KRIC_DERIVE_VER + ":" + L, JSON.stringify({ t: Date.now(), seg: res.seg || 0, xp: res.xp || 0, skipped: res.skipped || "" }));
+  await kricStateSet(env, "rd:" + KRIC_DERIVE_VER + ":" + L, JSON.stringify({ t: Date.now(), seg: res.seg || 0, xp: res.xp || 0, skipped: res.skipped || "", rows8: res.rows8 || 0, rows9: res.rows9 || 0, trains: res.trains || 0, um: Object.keys(res.unmatched || {}).slice(0, 14) }));
   return { done: false, line: L, seg: res.seg || 0, xp: res.xp || 0, skipped: res.skipped || "", ms: Date.now() - t0, remaining: todo.length - 1 };
 }
 var XP_BASE_WAIT = 210;
@@ -2581,11 +2581,15 @@ __name(ymdTodayKST, "ymdTodayKST");
 //   ① 마지막으로 성공한 경로를 기억해(이 인스턴스 안에서) 다음부터 그 경로를 맨 먼저 쓴다.
 //   ② 한 경로가 1.5초 안에 답이 없으면 기다리지 않고 다음 경로를 동시에 시작한다(먼저 성공한 쪽 채택).
 //   판단 로직·반환 형식은 그대로다 — 같은 데이터를 더 빨리 받을 뿐이다.
-var TAGO_PREF = null;
+// ★ 2026-10-02w: 서비스(열차·고속버스·시외버스)마다 성공하는 경로가 다르다 — 실측: TAGO_KEY2 는 버스 API 는 되지만
+//   열차정보 API 는 '등록되지 않은 서비스키'(403)라서 열차는 gentle-lab(binding) 경유만 성공한다. 그래서 선호 경로를 서비스별로 기억한다.
+var TAGO_PREF = {};
 var TAGO_HEDGE_MS = 1500;
 async function tagoFetchAny(env, innerNoKey) {
   var list = tagoAttempts(env).slice();
-  if (TAGO_PREF) list.sort(function (a, b) { return (b.via === TAGO_PREF ? 1 : 0) - (a.via === TAGO_PREF ? 1 : 0); });
+  var _svcM = /\/([A-Za-z]+Info)\//.exec(innerNoKey), _svc = _svcM ? _svcM[1] : "_";
+  var _pf = TAGO_PREF[_svc];
+  if (_pf) list.sort(function (a, b) { return (b.via === _pf ? 1 : 0) - (a.via === _pf ? 1 : 0); });
   var tried = [];
   if (!list.length) return { items: null, via: null, err: "" };
   function runOne(a) {
@@ -2609,7 +2613,7 @@ async function tagoFetchAny(env, innerNoKey) {
       runOne(a).then(function (r) {
         pending--;
         if (finished) return;
-        if (r) { finished = true; if (timer) clearTimeout(timer); TAGO_PREF = r.via; resolve(r); return; }
+        if (r) { finished = true; if (timer) clearTimeout(timer); TAGO_PREF[_svc] = r.via; resolve(r); return; }
         if (idx >= list.length) { if (pending === 0) { finished = true; if (timer) clearTimeout(timer); resolve({ items: null, via: null, err: tried.join(" | ") }); } return; }
         if (pending === 0) { if (timer) clearTimeout(timer); launch(); }
       });
@@ -3073,19 +3077,34 @@ __name(ldTrainGradeByNo, "ldTrainGradeByNo");
 // ldPickBest/ldGradeOptions 등 기존 판단 로직을 그대로 재사용한다(중복 로직 없음).
 // D1에 아직 그 구간 정차역 시각표가 안 채워졌으면(null 반환) 호출부가 기존처럼
 // 라이브 TAGO로 폴백한다 — 기존 6개 역 동작은 완전히 그대로 유지.
+var LD_TRAIN_D1_SQL = "SELECT t1.trn_no AS trn_no, t1.dptre_time AS dep, t2.arvl_time AS arr, tt.train_grade AS grade, tt.dptre_stn_nm AS dnm, tt.arvl_stn_nm AS anm " +
+  "FROM train_stops t1 " +
+  "JOIN train_stops t2 ON t2.trn_no = t1.trn_no AND t2.day_type = t1.day_type AND t2.seq > t1.seq " +
+  "JOIN train_trains tt ON tt.trn_no = t1.trn_no AND tt.day_type = t1.day_type " +
+  "WHERE t1.stn_nm = ?1 AND t2.stn_nm = ?2 AND t1.day_type = ?3 " +
+  "AND t1.dptre_time IS NOT NULL AND t2.arvl_time IS NOT NULL " +
+  "ORDER BY t1.dptre_time ASC LIMIT 400";
+// ★ 2026-10-02w (YJ: "속도 무조건 끌어올려"): 실측 — 장거리 한 건에서 열차 후보 조합(최대 5×5=25쌍)마다 D1 을 따로 불러
+//   (워커 동시 연결 한도 6개에 걸려 줄을 서고) 버스 TAGO 호출까지 같이 8초씩 기다렸다. 아직 캐시에 없는 쌍을
+//   env.DB.batch 한 번(왕복 1회)에 몰아서 읽어 캐시(LD_D1_CACHE)에 채운다 — 이후 쌍별 조회는 전부 캐시 적중.
+async function ldTrainD1Prefetch(pairs, env, stat, baseMs) {
+  if (!env || !env.DB || !pairs || !pairs.length) return;
+  var dt = ldDayTypeKST(baseMs), todo = [], seen = {};
+  for (var i = 0; i < pairs.length; i++) {
+    var dn = pairs[i][0], an = pairs[i][1]; if (!dn || !an) continue;
+    var k = dt + "|" + dn + "|" + an; if (seen[k] || ldTrainD1CacheGet(k)) continue; seen[k] = 1; todo.push([k, dn, an]);
+  }
+  if (todo.length < 2) return;
+  var t0 = Date.now();
+  var res = await env.DB.batch(todo.map(function (t) { return env.DB.prepare(LD_TRAIN_D1_SQL).bind(t[1], t[2], dt); }));
+  for (var j = 0; j < todo.length; j++) { var rr = res && res[j] && res[j].results; if (rr) ldTrainD1CacheSet(todo[j][0], rr); }
+  if (stat) { stat.ldTrainD1Batch = todo.length; stat.ldTrainD1BatchMs = Date.now() - t0; }
+}
 var LD_D1_CACHE = new Map(); function ldTrainD1CacheGet(k) { var v = LD_D1_CACHE.get(k); if (!v) return null; if (Date.now() - v.at > 20 * 60 * 1000) { LD_D1_CACHE.delete(k); return null; } return v.rows; } function ldTrainD1CacheSet(k, rows) { if (LD_D1_CACHE.size > 400) LD_D1_CACHE.clear(); LD_D1_CACHE.set(k, { at: Date.now(), rows: rows }); } async function ldFetchTrainD1(depNm, arrNm, env, stat, baseMs) {
   if (!env.DB || !depNm || !arrNm) return null;
   try {
     var dt = ldDayTypeKST(baseMs); var _ck = dt + "|" + depNm + "|" + arrNm; var _hit = ldTrainD1CacheGet(_ck); if (_hit && stat) stat.ldTrainD1Cached = (stat.ldTrainD1Cached || 0) + 1;   // ★ 2026-09-25 (기준시각): 앱이 고른 날짜의 요일로 조회
-    var q = _hit ? { results: _hit } : await env.DB.prepare(
-      "SELECT t1.trn_no AS trn_no, t1.dptre_time AS dep, t2.arvl_time AS arr, tt.train_grade AS grade, tt.dptre_stn_nm AS dnm, tt.arvl_stn_nm AS anm " +
-      "FROM train_stops t1 " +
-      "JOIN train_stops t2 ON t2.trn_no = t1.trn_no AND t2.day_type = t1.day_type AND t2.seq > t1.seq " +
-      "JOIN train_trains tt ON tt.trn_no = t1.trn_no AND tt.day_type = t1.day_type " +
-      "WHERE t1.stn_nm = ?1 AND t2.stn_nm = ?2 AND t1.day_type = ?3 " +
-      "AND t1.dptre_time IS NOT NULL AND t2.arvl_time IS NOT NULL " +
-      "ORDER BY t1.dptre_time ASC LIMIT 400"
-    ).bind(depNm, arrNm, dt).all();
+    var q = _hit ? { results: _hit } : await env.DB.prepare(LD_TRAIN_D1_SQL).bind(depNm, arrNm, dt).all();
     var rows = (q && q.results) || []; if (!_hit && q && q.results) ldTrainD1CacheSet(_ck, rows);
     if (!rows.length) return null;
     var ymd = ymdTodayKST(baseMs);
@@ -3401,6 +3420,7 @@ async function ldFetchLive(SY, SX, EY, EX, env, stat, G, busCoord, busNm, ctx) {
       for (var j = 0; j < arrR.length; j++)
         combos.push({ d: depR[i], a: arrR[j], rank: depR[i].min + arrR[j].min });
     combos.sort(function (a, b) { return a.rank - b.rank; });   // 접근+이탈 합이 짧은 조합부터
+    if (mode === "train") { try { await ldTrainD1Prefetch(combos.map(function (c) { return [c.d.t.nm, c.a.t.nm]; }), env, stat, baseMs); } catch (e) { if (stat) stat.ldTrainD1BatchErr = String((e && e.message) || e).slice(0, 80); } }
     await Promise.all(combos.map(function (c) {
       return fetchFn(c.d.t, c.a.t)
         .then(function (items) {
