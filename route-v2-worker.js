@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-02ao";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-02ap";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -4673,7 +4673,9 @@ async function fillBoardStopLive(G, out, env, stat, deadline, SY, SX) {
       const ck = v.cc + "|" + sid;
       let m = liveCacheGet(ck);
       if (!m) { m = await fetchStopArrivalsAny(v.cc, v.raw, env, deadline, G.callBudget, stat, routesAtStop(G, v.raw), coordOfG(G)); liveCacheSet(ck, m); }
-      if (m) { G.live[sid] = m; n++; }
+      // ★ 02ap: 도착정보가 하나도 없는(빈) 응답은 busWaitAtRaw 에서 '조회 안 함'과 똑같이 취급되므로(L.__names 가 비면 그대로 가정치로 흘러간다)
+      //   새 정보가 아니다 — 세지 않아야 재탐색(_search 2회차, CPU 약 150~200ms)을 쓸데없이 돌리지 않는다. 결과는 같다.
+      if (m) { G.live[sid] = m; if ((m.__names || []).length) n++; }
     } catch (err) { if (stat && !stat.boardErr) stat.boardErr = String((err && err.message) || err).slice(0, 60); }
   }));
   if (stat) stat.boardFetched = list.map((e) => e[0] + ":" + (((G.live[e[0]] || {}).__names || []).join(",") || "0\uAC1C"));
