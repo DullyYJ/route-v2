@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-02ar";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-02as";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -2877,6 +2877,10 @@ var LD_TERMINALS = {
   //   6개 역(NAT.../NATH...로 시작, YJ 실측 확인됨)의 동작은 완전히 그대로 유지된다.
   train: [
     { nm: "서울", id: "NAT010000", lat: 37.55473, lng: 126.9708 },
+    // ★ 02as (YJ: "모든 문제를 해결해"): SRT 역. 한국철도공사 역 목록(202개)에 없어 한 번도 후보가 되지 못했다(수서→부산이 광명·서울 경유로 197분,
+    //   카카오는 수서 SRT 131분). D1 시각표는 SR 열차 역명 앞에 'S' 를 붙여 둔다(S수서·S동탄 두 곳뿐, 2026-10-02 확인). 화면에는 'S' 를 떼고 보인다.
+    { nm: "S수서", id: "D1:S수서", lat: 37.48718, lng: 127.10144 },
+    { nm: "S동탄", id: "D1:S동탄", lat: 37.20003, lng: 127.09636 },
     { nm: "용산", id: "D1:용산", lat: 37.52991, lng: 126.9648 },
     { nm: "수색", id: "D1:수색", lat: 37.5806, lng: 126.8959 },
     { nm: "행신", id: "D1:행신", lat: 37.3645, lng: 126.4952 },
@@ -3965,7 +3969,7 @@ function ldFinish(fetched, stat, opt) {
       picked = ldPickBest(r.items, r.mode, fareFields, noFields, accessMin, gradeFields, wantGrade, baseMs);
     }
     if (picked) {
-      picked.depStop = r.dep.t.nm; picked.arrStop = r.arr.t.nm;
+      picked.depStop = String(r.dep.t.nm).replace(/^S(?=[가-힣])/, ""); picked.arrStop = String(r.arr.t.nm).replace(/^S(?=[가-힣])/, "");
       picked.arrLat = r.arr.t.lat; picked.arrLng = r.arr.t.lng;   // ★ 2026-10-01: 도착 후 이동구간을 도착시각 기준으로 다시 재기 위해
       picked.accessM = Math.round(r.dep.distM); picked.egressM = Math.round(r.arr.distM);
       picked.accessRoute = r.accessRoute || null; picked.egressRoute = r.egressRoute || null;
