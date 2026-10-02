@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-02u";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-02v";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -1174,7 +1174,7 @@ function dijkstra(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
       //   최소환승 탭도 그 경로를 환승 0회로 알고 있었다.
       const busXfer = e.kind === "bus" && pk[u] === "bus" && pl[u] !== e.line;
       const board = e.kind === "bus" && (pk[u] !== "bus" || busXfer);
-      const bw = board ? busWaitAt(G, e.line, stopIdOf(ub)) : 0; let xw = 0; if (e.kind === "xpress" && pk[u] !== "xpress") { const _xw = xpWait(G, e, d); if (_xw == null) continue; xw = Math.max(0, _xw - (e.bw || XP_BASE_WAIT)); }
+      const bw = board ? busWaitAt(G, e.line, stopIdOf(ub)) : 0; let xw = 0; if (e.kind === "xpress") { const _xw = xpWait(G, e, d); if (_xw == null) continue; xw = Math.max(0, _xw - (e.bw || XP_BASE_WAIT)); }
       const nd = d + (isW ? e.w * wpen : e.w) + (isX || busXfer ? xpen : 0) + bw + xw;
       const to = enc(e.to, mustS ? ride ? 1 : stOf(u) : 0);
       if (dist[to] === void 0 || nd < dist[to]) {
@@ -1203,7 +1203,7 @@ function dijkstra(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
     const e = (adj[a] || []).find((x) => x.to === b && x.kind === pk[path[i + 1]]);
     if (e) {
       real += e.w;
-      if (e.kind === "bus" && pk[path[i]] !== "bus") real += busWaitAt(G, e.line, stopIdOf(a)); if (e.kind === "xpress" && pk[path[i]] !== "xpress") { const _xw2 = xpWait(G, e, dist[path[i]]); if (_xw2 != null) real += Math.max(0, _xw2 - (e.bw || XP_BASE_WAIT)); }
+      if (e.kind === "bus" && pk[path[i]] !== "bus") real += busWaitAt(G, e.line, stopIdOf(a)); if (e.kind === "xpress") { const _xw2 = xpWait(G, e, dist[path[i]]); if (_xw2 != null) real += Math.max(0, _xw2 - (e.bw || XP_BASE_WAIT)); }
     }
   }
   if (gmap[dec(best)] !== void 0) real += gmap[dec(best)];
@@ -1453,7 +1453,7 @@ function kricDeriveCore(B, L, dayRows) {
       for (i = 0; i < q.length; i++) { if (i > 0 && i < q.length - 1 && q[i].a == null) { pass = true; continue; } S.push(q[i]); }
       var hops = [];
       for (i = 0; i + 1 < S.length; i++) { var A = S[i], Bn = S[i + 1]; if (A.d == null || A.id === Bn.id) continue; var hop = (Bn.d != null ? Bn.d : Bn.a) - A.d; if (!(hop > 0) || hop > 3600) continue; hops.push({ a: A.id, b: Bn.id, hop: hop, dep: Math.round(A.d / 60), adj: isAdj(A.id, Bn.id) }); }
-      trains.push({ day: day, pass: pass, hops: hops });
+      trains.push({ day: day, pass: pass, hops: hops, S: S });
     }
   }
   var hasAdj = {};
@@ -1473,7 +1473,39 @@ function kricDeriveCore(B, L, dayRows) {
   }
   var seg = [], xp = [];
   for (key in segH) if (segH[key].length >= 3) seg.push([key, kricMed(segH[key]), segH[key].length]);
-  for (key in xpH) if (xpH[key].length >= 3) xp.push([key, kricMed(xpH[key]), xpH[key].length, kricHex(xpD[key]["8"]), kricHex(xpD[key]["9"])]);
+  // ★ 2026-10-02v (YJ: "속도와 정확도 무조건 끌어올려"): 급행 간선을 '연속 정차역 한 칸'이 아니라
+  //   '같은 열차가 서는 모든 정차역 쌍(A→B)'으로 만든다. 실측: 1호선 서울→수원이 완행 62분으로만 나왔다
+  //   (카카오 급행 41분). 원인 = 급행 간선이 정차역 한 칸씩(서울>남영>용산>…)으로 쪼개져 있고, 완행 열차의
+  //   인접 구간까지 섞여 있어 급행 이득이 사라졌다. 이제 열차마다 정차 목록에서 (A,B) 쌍의 실제 소요시간을
+  //   재고, 같은 구간을 완행으로 가는 시간(구간 중앙값 합의 최단)보다 확실히 빠른 표본만 급행으로 본다.
+  //   한 쌍의 출발 시각표(wk/we)도 그 급행 표본만으로 만든다 → 대기시간이 실제 급행 배차를 따른다.
+  var LW = {}, ltMemo = {};
+  for (key in segH) { if (segH[key].length < 3) continue; var lab = key.split(">"); if (isAdj(lab[0], lab[1])) (LW[lab[0]] = LW[lab[0]] || {})[lab[1]] = kricMed(segH[key]); }
+  for (key in B.seg) { i = key.indexOf("|"); var lx = key.slice(0, i), ly = key.slice(i + 1); if (ST[lx] && ST[ly] && ST[lx].l === L && ST[ly].l === L && !(LW[lx] && LW[lx][ly] != null)) (LW[lx] = LW[lx] || {})[ly] = B.seg[key]; }
+  var ltFrom = function (src) {
+    if (ltMemo[src]) return ltMemo[src];
+    var dm = {}, dn = {}, cnt = 0; dm[src] = 0;
+    while (true) { var bk = null, bv = 1e12; for (var kk in dm) if (!dn[kk] && dm[kk] < bv) { bv = dm[kk]; bk = kk; } if (bk === null) break; dn[bk] = 1; if (++cnt > 400) break; var lw = LW[bk]; if (!lw) continue; for (var nk in lw) { var nv = bv + lw[nk]; if (dm[nk] === undefined || nv < dm[nk]) dm[nk] = nv; } }
+    return (ltMemo[src] = dm);
+  };
+  var PX = {};
+  for (i = 0; i < trains.length; i++) {
+    var TS = trains[i].S, tday = trains[i].day; if (!TS || TS.length < 3) continue;
+    for (var ia = 0; ia < TS.length - 1; ia++) {
+      var SA = TS[ia]; if (SA.d == null) continue; var lta = null;
+      for (var ib = ia + 1; ib < TS.length; ib++) {
+        var SB = TS[ib]; if (SA.id === SB.id || isAdj(SA.id, SB.id)) continue;
+        var tb = SB.a != null ? SB.a : SB.d; if (tb == null) continue;
+        var hp = tb - SA.d; if (!(hp > 0) || hp > 10800) continue;
+        if (!lta) lta = ltFrom(SA.id);
+        var lt0 = lta[SB.id]; if (lt0 === undefined) continue;
+        if (hp > lt0 - Math.max(120, lt0 * 0.1)) continue;
+        var pk2 = SA.id + ">" + SB.id, pe = PX[pk2] || (PX[pk2] = { h: [], "8": [], "9": [] });
+        pe.h.push(hp); pe[tday].push(Math.round(SA.d / 60));
+      }
+    }
+  }
+  for (key in PX) if (PX[key].h.length >= 3) xp.push([key, kricMed(PX[key].h), PX[key].h.length, kricHex(PX[key]["8"]), kricHex(PX[key]["9"])]);
   return { seg: seg, xp: xp, unmatched: unmatched, trains: trains.length, express: nEx, kc: kc, ks: ks, tdump: tdump0 };
 }
 async function kricLoad(env, G) {
@@ -1610,6 +1642,24 @@ async function kricStatus(env) {
   for (var i = 0; i < rr.length; i++) st[rr[i].k] = rr[i].v;
   var cr = await env.DB.prepare("SELECT COUNT(*) c, MIN(ts) oldest, MAX(ts) newest FROM kric_tt").first();
   return { now: Date.now(), tt: cr, state: st };
+}
+// ★ 2026-10-02v: 급행 간선 생성 방식이 바뀌어(위 kricDeriveCore) 저장된 kric_xp 를 한 번 다시 만들어야 한다.
+//   비밀값 없이도 안전하게 돌리려고 '버전이 달라졌을 때만' 한 번에 한 노선씩 계산하는 자기 제한형으로 만들었다.
+//   (이미 최신이면 아무것도 안 한다 → 반복 호출해도 부하·위험 없음. 입력은 D1에 저장된 공식 시각표뿐, 외부 호출 없음.)
+var KRIC_DERIVE_VER = "02v";
+async function kricRederive(env) {
+  await kricStateInit(env);
+  var cur = await env.DB.prepare("SELECT v FROM kric_state WHERE k='derive_ver'").first();
+  if (cur && cur.v === KRIC_DERIVE_VER) return { done: true, ver: KRIC_DERIVE_VER };
+  var lines = [], seen = {}; for (var kk in KRIC_LMAP) { if (!seen[KRIC_LMAP[kk]]) { seen[KRIC_LMAP[kk]] = 1; lines.push(KRIC_LMAP[kk]); } }
+  var dn = await env.DB.prepare("SELECT k FROM kric_state WHERE k LIKE ?").bind("rd:" + KRIC_DERIVE_VER + ":%").all();
+  var doneSet = {}; var dr = dn.results || []; for (var i = 0; i < dr.length; i++) doneSet[dr[i].k] = 1;
+  var todo = lines.filter(function (l) { return !doneSet["rd:" + KRIC_DERIVE_VER + ":" + l]; });
+  if (!todo.length) { await kricStateSet(env, "derive_ver", KRIC_DERIVE_VER); return { done: true, ver: KRIC_DERIVE_VER }; }
+  var L = todo[0], t0 = Date.now(), res;
+  try { res = await kricDerive(env, SUBWAY_BUNDLE, L); } catch (e) { return { done: false, line: L, error: String(e && e.message || e).slice(0, 160), remaining: todo.length }; }
+  await kricStateSet(env, "rd:" + KRIC_DERIVE_VER + ":" + L, JSON.stringify({ t: Date.now(), seg: res.seg || 0, xp: res.xp || 0, skipped: res.skipped || "" }));
+  return { done: false, line: L, seg: res.seg || 0, xp: res.xp || 0, skipped: res.skipped || "", ms: Date.now() - t0, remaining: todo.length - 1 };
 }
 var XP_BASE_WAIT = 210;
 var EXPRESS_RATIO = {};
@@ -2476,17 +2526,35 @@ __name(ldTagoCacheSet, "ldTagoCacheSet");
 // fetcher: 캐시가 없을 때만 불리는 실제 TAGO 호출(async () => items). 성공(비어있지
 // 않은 결과)만 L1(메모리)+L2(KV, env.ROWS_KV 재사용)에 채운다. KV 바인딩이 없거나
 // 쓰기가 실패해도 응답에는 영향 없음(기존처럼 그냥 매번 TAGO를 부르는 것과 동일).
+// ★ 2026-10-02v: '정상 응답인데 편이 없음'(예: 서울↔천안 고속버스)도 5분만 짧게 기억한다.
+//   예전엔 빈 결과는 절대 캐시하지 않아, 편이 없는 조합을 조회할 때마다 TAGO 를 다시 불러
+//   매번 몇 초씩 기다렸다. 일시 오류(null)는 그대로 캐시하지 않고, TAGO 가 가끔 빈 응답을 주는
+//   문제를 고려해 TTL 을 5분으로 짧게 둔다(최악의 경우도 5분 뒤엔 다시 조회).
+var LD_TAGO_NEG = /* @__PURE__ */ new Map();
+var LD_TAGO_NEG_TTL_MS = 5 * 60 * 1000;
 async function ldTagoCached(mode, depId, arrId, ymd, env, ctx, fetcher) {
   var k = ldTagoCacheKey(mode, depId, arrId, ymd);
   var mem = ldTagoCacheGet(k);
   if (mem) return { items: mem, via: "cache-mem" };
+  var ng0 = LD_TAGO_NEG.get(k);
+  if (ng0 && Date.now() - ng0 < LD_TAGO_NEG_TTL_MS) return { items: [], via: "cache-neg" };
   if (env && env.ROWS_KV) {
     try {
-      var kv = await env.ROWS_KV.get("ld:" + k, "json");
+      var kvs = await Promise.all([env.ROWS_KV.get("ld:" + k, "json"), env.ROWS_KV.get("ldn:" + k)]);
+      var kv = kvs[0];
       if (kv && Array.isArray(kv) && kv.length) { ldTagoCacheSet(k, kv); return { items: kv, via: "cache-kv" }; }
+      if (kvs[1]) { LD_TAGO_NEG.set(k, Date.now()); return { items: [], via: "cache-neg" }; }
     } catch (e) {}
   }
   var items = await fetcher();
+  if (Array.isArray(items) && !items.length) {
+    LD_TAGO_NEG.set(k, Date.now());
+    if (LD_TAGO_NEG.size > 400) LD_TAGO_NEG.clear();
+    if (env && env.ROWS_KV) {
+      var _pn = env.ROWS_KV.put("ldn:" + k, "1", { expirationTtl: 300 }).catch(function () {});
+      if (ctx && ctx.waitUntil) ctx.waitUntil(_pn);
+    }
+  }
   if (items && items.length) {
     ldTagoCacheSet(k, items);
     if (env && env.ROWS_KV) {
@@ -2507,20 +2575,49 @@ __name(ymdTodayKST, "ymdTodayKST");
 
 // TAGO_BASE 전용이 아닌 임의 base+svc+op 를 부른다 — tagoAttempts 의 3중 폴백
 // (env키 → 기본키 → 서비스바인딩)을 그대로 재사용해 신뢰성을 맞춘다.
+// ★ 2026-10-02v (YJ: "속도 무조건 끌어올려"): 실측 — 장거리 한 건에 TAGO 호출이 4~5초 걸렸다.
+//   첫 번째 키(env-key)가 계속 실패하고 두 번째(env-key2)에서야 성공하는데, 예전엔 매번 첫 키를 먼저 불러
+//   실패를 기다린 뒤에야 두 번째로 넘어갔다(실패 1회 + 성공 1회 = 지연 2배).
+//   ① 마지막으로 성공한 경로를 기억해(이 인스턴스 안에서) 다음부터 그 경로를 맨 먼저 쓴다.
+//   ② 한 경로가 1.5초 안에 답이 없으면 기다리지 않고 다음 경로를 동시에 시작한다(먼저 성공한 쪽 채택).
+//   판단 로직·반환 형식은 그대로다 — 같은 데이터를 더 빨리 받을 뿐이다.
+var TAGO_PREF = null;
+var TAGO_HEDGE_MS = 1500;
 async function tagoFetchAny(env, innerNoKey) {
-  var list = tagoAttempts(env);
+  var list = tagoAttempts(env).slice();
+  if (TAGO_PREF) list.sort(function (a, b) { return (b.via === TAGO_PREF ? 1 : 0) - (a.via === TAGO_PREF ? 1 : 0); });
   var tried = [];
-  for (var i = 0; i < list.length; i++) {
-    var a = list[i];
-    try {
-      var res = await a.run(innerNoKey);
-      var txt = await res.text();
-      var p = tagoParse(txt);
-      if (p.ok) return { items: p.items, via: a.via };
-      tried.push(a.via + ": " + p.why.slice(0, 80));
-    } catch (e) { tried.push(a.via + ": " + String((e && e.message) || e).slice(0, 80)); }
+  if (!list.length) return { items: null, via: null, err: "" };
+  function runOne(a) {
+    return (async function () {
+      try {
+        var res = await a.run(innerNoKey);
+        var txt = await res.text();
+        var p = tagoParse(txt);
+        if (p.ok) return { items: p.items, via: a.via };
+        tried.push(a.via + ": " + p.why.slice(0, 80));
+      } catch (e) { tried.push(a.via + ": " + String((e && e.message) || e).slice(0, 80)); }
+      return null;
+    })();
   }
-  return { items: null, via: null, err: tried.join(" | ") };
+  return await new Promise(function (resolve) {
+    var idx = 0, pending = 0, finished = false, timer = null;
+    function launch() {
+      if (finished || idx >= list.length) return;
+      var a = list[idx++];
+      pending++;
+      runOne(a).then(function (r) {
+        pending--;
+        if (finished) return;
+        if (r) { finished = true; if (timer) clearTimeout(timer); TAGO_PREF = r.via; resolve(r); return; }
+        if (idx >= list.length) { if (pending === 0) { finished = true; if (timer) clearTimeout(timer); resolve({ items: null, via: null, err: tried.join(" | ") }); } return; }
+        if (pending === 0) { if (timer) clearTimeout(timer); launch(); }
+      });
+      if (timer) clearTimeout(timer);
+      if (idx < list.length) timer = setTimeout(launch, TAGO_HEDGE_MS);
+    }
+    launch();
+  });
 }
 __name(tagoFetchAny, "tagoFetchAny");
 
@@ -4221,7 +4318,9 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
   const _isCustomTime = _baseMsGiven && Math.abs(_baseMs - Date.now()) > 5 * 60 * 1000;
   if (!_G) _G = buildSubway(SUBWAY_BUNDLE2);
   if (env && env.DB && !_G.__kricP && (!_G.__kricT || Date.now() - _G.__kricT > 600000)) { _G.__kricT = Date.now(); _G.__kricP = kricLoad(env, _G).catch(function (e) { _G.__kricStat = { err: String(e && e.message || e).slice(0, 120) }; _G.__kricT = Date.now() - 540000; }).then(function () { _G.__kricP = null; }); }
-  if (_G.__kricP) await _G.__kricP;
+  // ★ 2026-10-02v: 10분마다 하는 시각표 재적재 때문에 그 순간 들어온 요청이 D1 왕복(0.5~1초)을 기다렸다.
+  //   이미 한 번 적재된 뒤(__kricStat 있음)의 갱신은 기다리지 않고 직전 데이터를 쓴다(적재는 await 이후 동기 구간에서만 그래프를 바꿔 안전).
+  if (_G.__kricP) { if (!_G.__kricStat) await _G.__kricP; else if (ctx && ctx.waitUntil) ctx.waitUntil(_G.__kricP); }
   // 지하철 그래프는 전역 캐시라 시간 판정을 거기 넣을 수 없다. 요청마다 계산한다.
   const _nk = _nowMinKST(_baseMs);
   const _dk = new Date(_baseMs + 324e5).getUTCDay();
@@ -4257,7 +4356,7 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
   const SQL_COLS = "SELECT brs.route_key,brs.seq,brs.node_id,brs.node_nm,brs.lat,brs.lng,br.route_type,br.route_no,br.start_time,br.end_time,br.itv_wd,br.itv_sat,br.itv_sun "
                  + "FROM bus_route_stops brs JOIN bus_routes br ON brs.route_key=br.route_key ";
 
-  let rows = [], _nearErr = null;
+  let rows = [], _nearErr = null, _nearRowsCnt = 0;
   const _tD1 = Date.now();
   const _ck = rowsCacheKey(minLat, maxLat, minLng, maxLng);
   const _cached = rowsCacheGet(_ck);
@@ -4296,9 +4395,12 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
   //   로 최대 8번 왕복했다. 서브쿼리로 합치면 SQLite 옵티마이저가 내부 키 목록을
   //   한 번만 계산(LIST SUBQUERY)해서 재사용(REUSE LIST SUBQUERY)하는 걸 D1 콘솔에서
   //   직접 확인했다 — 결과는 완전히 같고 왕복만 1번으로 준다.
+  // ★ 2026-10-02v (YJ: "속도 무조건 끌어올려"): 실측 — 콜드 요청에서 D1 읽기가 1.7~2.0초(왕복이 순차 2번).
+  //   '근처 노선' 조회와 '나머지 corridor' 조회는 서로 입력이 독립이라 동시에 보낸다. 나머지 쪽은
+  //   원래 LIMIT(MAX_STOPS - 근처행수)로 받았는데, 같은 질의를 LIMIT MAX_STOPS 로 받아 앞에서부터
+  //   그만큼만 쓰면(아래 slice) 결과가 예전과 똑같다 — 왕복 1번이 사라진다.
   if (!_cached && !_kvHit) {
-    try {
-      const q = await env.DB.prepare(
+    const _nearP = env.DB.prepare(
         SQL_COLS + "WHERE brs.route_key IN ("
         + "SELECT DISTINCT route_key FROM bus_route_stops WHERE "
         + "(lat BETWEEN ?1 AND ?2 AND lng BETWEEN ?3 AND ?4) OR "
@@ -4309,26 +4411,23 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
         SY - NEAR_BOX, SY + NEAR_BOX, SX - NEAR_BOX, SX + NEAR_BOX,
         EY - NEAR_BOX, EY + NEAR_BOX, EX - NEAR_BOX, EX + NEAR_BOX,
         minLat, maxLat, minLng, maxLng, MAX_STOPS
-      ).all();
-      const got = (q && q.results) || [];
+      ).all().then((q) => ({ q }), (e) => ({ e }));
+    const _restP = env.DB.prepare(
+        SQL_COLS + "WHERE brs.lat BETWEEN ?1 AND ?2 AND brs.lng BETWEEN ?3 AND ?4 "
+        + "LIMIT ?5"   // ★ 2026-09-24: ORDER BY 제거(결과 동일, D1만 빨라짐)
+      ).bind(minLat, maxLat, minLng, maxLng, MAX_STOPS).all().then((q) => ({ q }), (e) => ({ e }));
+    const [_nr, _rr] = await Promise.all([_nearP, _restP]);
+    if (_nr.e) { _nearErr = String((_nr.e && _nr.e.message) || _nr.e).slice(0, 120); }
+    else {
+      const got = (_nr.q && _nr.q.results) || [];
       pushRows(got);
       _nearKeySet = new Set(got.map((r) => r.route_key));
-    } catch (e) { _nearErr = String((e && e.message) || e).slice(0, 120); }
+    }
+    _nearRowsCnt = rows.length;   // 근처 노선으로 채운 정류장 수(잘리지 않는 부분)
+    const restLimit = Math.max(0, MAX_STOPS - rows.length);
+    if (restLimit > 0 && !_rr.e) pushRows(((_rr.q && _rr.q.results) || []).slice(0, restLimit));   // 근처 노선만으로도 경로는 나온다
   }
 
-  const _nearRows = rows.length;   // 근처 노선으로 채운 정류장 수(잘리지 않는 부분)
-
-  // ②-b 남은 여유로 나머지 corridor
-  const restLimit = (_cached || _kvHit) ? 0 : Math.max(0, MAX_STOPS - rows.length);
-  if (restLimit > 0) {
-    try {
-      const q = await env.DB.prepare(
-        SQL_COLS + "WHERE brs.lat BETWEEN ?1 AND ?2 AND brs.lng BETWEEN ?3 AND ?4 "
-        + "LIMIT ?5"   // ★ 2026-09-24: 위와 같은 이유로 ORDER BY 제거(결과 동일, D1만 빨라짐)
-      ).bind(minLat, maxLat, minLng, maxLng, restLimit).all();
-      pushRows((q && q.results) || []);
-    } catch (e) { /* 근처 노선만으로도 경로는 나온다 */ }
-  }
   if (_cached) {
     rows = _cached;
   } else if (!_kvHit) {
@@ -4341,7 +4440,7 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
     }
   }
   const _msD1 = Date.now() - _tD1;
-  const _busDiag = { nearRoutes: _nearKeySet ? _nearKeySet.size : 0, nearRows: (_cached || _kvHit) ? rows.length : _nearRows,
+  const _busDiag = { nearRoutes: _nearKeySet ? _nearKeySet.size : 0, nearRows: (_cached || _kvHit) ? rows.length : _nearRowsCnt,
                      rows: rows.length, capped: rows.length >= MAX_STOPS, nearErr: _nearErr,
                      cached: !!(_cached || _kvHit), cacheTier: _cached ? "mem" : (_kvHit ? "kv" : "none"),
                      kvErr: _kvErr, d1Ms: _msD1 };
@@ -4776,7 +4875,7 @@ async function handleFetch(request, env, ctx) {
   //      /tago-probe?svc=ExpBusInfo&op=GetExpBusTrminlList
   //      /tago-probe?svc=SuburbsBusInfo&op=GetSuberbsBusTrminlList
   // ★ 2026-10-02 (항목6): KRIC 역사별 운행시각표(stationTimetable) 시험 조회 — 키는 시크릿 KRIC_KEY. 호출 한도(하루 1회 권장)를 지키려고 isolate 당 40회로 막는다. 데이터를 D1 에 적재한 뒤에는 이 주소를 지울 것.
-if (url.pathname === "/kric-status") { if (!env.DB) return new Response(JSON.stringify({ error: "no db" }), { status: 500, headers: CORS_H }); return new Response(JSON.stringify(await kricStatus(env)), { status: 200, headers: CORS_H }); } if ((url.pathname === "/kric-ingest" || url.pathname === "/kric-probe" || url.pathname === "/kric-derive") && (!env.KRIC_ADMIN || request.headers.get("x-kric-admin") !== env.KRIC_ADMIN)) return new Response(JSON.stringify({ error: "locked" }), { status: 403, headers: CORS_H }); if (url.pathname === "/kric-ingest") { globalThis.__kiN = (globalThis.__kiN || 0) + 1; if (globalThis.__kiN > 4000) return new Response(JSON.stringify({ error: "limit" }), { status: 429, headers: CORS_H }); if (!env.KRIC_KEY || !env.DB) return new Response(JSON.stringify({ error: "no key/db" }), { status: 500, headers: CORS_H }); const qo = url.searchParams.get("opr") || "", ql = url.searchParams.get("ln") || "", qs = url.searchParams.get("st") || "", qd = url.searchParams.get("day") || "", qn = url.searchParams.get("nm") || ""; if (!/^[A-Za-z0-9]{1,4}$/.test(qo) || !/^[A-Za-z0-9]{1,4}$/.test(ql) || !/^[A-Za-z0-9-]{1,12}$/.test(qs) || !/^[789]$/.test(qd) || !/^[A-Za-z0-9가-힣() .-]{0,30}$/.test(qn)) return new Response(JSON.stringify({ error: "bad param" }), { status: 400, headers: CORS_H }); await env.DB.prepare("CREATE TABLE IF NOT EXISTS kric_tt (opr TEXT, ln TEXT, st TEXT, day TEXT, nm TEXT, n INTEGER, data TEXT, ts INTEGER, PRIMARY KEY (opr, ln, st, day))").run(); const ex0 = await env.DB.prepare("SELECT n, nm FROM kric_tt WHERE opr=? AND ln=? AND st=? AND day=?").bind(qo, ql, qs, qd).first(); if (ex0) { let upd = false; if (qn && ex0.nm !== qn) { await env.DB.prepare("UPDATE kric_tt SET nm=? WHERE opr=? AND ln=? AND st=? AND day=?").bind(qn, qo, ql, qs, qd).run(); upd = true; } return new Response(JSON.stringify({ ok: true, skipped: true, n: ex0.n, upd: upd }), { status: 200, headers: CORS_H }); } const kr = await fetch("https://openapi.kric.go.kr/openapi/convenientInfo/stationTimetable?serviceKey=" + encodeURIComponent(env.KRIC_KEY) + "&format=json&railOprIsttCd=" + qo + "&lnCd=" + ql + "&stinCd=" + qs + "&dayCd=" + qd); const kt = await kr.text(); let kj = null; try { kj = JSON.parse(kt); } catch (e) { return new Response(JSON.stringify({ error: "nonjson", status: kr.status, head: kt.slice(0, 120) }), { status: 200, headers: CORS_H }); } const kh = kj && kj.header && kj.header.resultCode; if (kh !== "00") return new Response(JSON.stringify({ error: "hdr", code: kh, msg: kj && kj.header && kj.header.resultMsg }), { status: 200, headers: CORS_H }); const kb = Array.isArray(kj.body) ? kj.body : (kj.body ? [kj.body] : []); const kd = kb.map((x) => [x.trnNo, x.arvTm || "", x.dptTm || "", x.orgStinCd || "", x.tmnStinCd || ""].join(",")).join("\n"); await env.DB.prepare("INSERT OR IGNORE INTO kric_tt (opr, ln, st, day, nm, n, data, ts) VALUES (?,?,?,?,?,?,?,?)").bind(qo, ql, qs, qd, qn, kb.length, kd, Date.now()).run(); return new Response(JSON.stringify({ ok: true, n: kb.length, bytes: kd.length }), { status: 200, headers: CORS_H }); } if (url.pathname === "/kric-derive") { globalThis.__kdN = (globalThis.__kdN || 0) + 1; if (globalThis.__kdN > 300) return new Response(JSON.stringify({ error: "limit" }), { status: 429, headers: CORS_H }); if (!env.DB) return new Response(JSON.stringify({ error: "no db" }), { status: 500, headers: CORS_H }); const dl = url.searchParams.get("line") || ""; if (!/^[A-Z0-9]{2,4}$/.test(dl)) return new Response(JSON.stringify({ error: "bad line" }), { status: 400, headers: CORS_H }); try { const dres = await kricDerive(env, SUBWAY_BUNDLE, dl); return new Response(JSON.stringify(dres), { status: 200, headers: CORS_H }); } catch (de) { return new Response(JSON.stringify({ error: String(de && de.message || de).slice(0, 200) }), { status: 500, headers: CORS_H }); } } if (url.pathname === "/kric-probe") { globalThis.__kricN = (globalThis.__kricN || 0) + 1; if (globalThis.__kricN > 400) return new Response(JSON.stringify({ error: "probe limit" }), { status: 429, headers: CORS_H }); if (!env.KRIC_KEY) return new Response(JSON.stringify({ hasKey: false }), { status: 200, headers: CORS_H }); const kq = new URLSearchParams(); for (const [k, v] of url.searchParams) { if (/^(lnCd|railOprIsttCd|stinCd|dayCd|stinNm|svc|op)$/.test(k) && /^[A-Za-z0-9가-힣]{0,20}$/.test(v)) kq.set(k, v); } const ksvc = kq.get("svc") || "convenientInfo"; const kop = kq.get("op") || "stationTimetable"; kq.delete("svc"); kq.delete("op"); kq.set("format", "json"); const kn = Math.min(60000, parseInt(url.searchParams.get("n") || "3000", 10) || 3000); const kres = await fetch("https://openapi.kric.go.kr/openapi/" + ksvc + "/" + kop + "?serviceKey=" + encodeURIComponent(env.KRIC_KEY) + "&" + kq.toString()); const ktxt = await kres.text(); return new Response(JSON.stringify({ hasKey: true, status: kres.status, len: ktxt.length, head: ktxt.slice(parseInt(url.searchParams.get("off") || "0", 10) || 0, (parseInt(url.searchParams.get("off") || "0", 10) || 0) + kn) }, null, 1), { status: 200, headers: CORS_H }); }
+if (url.pathname === "/kric-rederive") { if (!env.DB) return new Response(JSON.stringify({ error: "no db" }), { status: 500, headers: CORS_H }); try { return new Response(JSON.stringify(await kricRederive(env)), { status: 200, headers: CORS_H }); } catch (re) { return new Response(JSON.stringify({ error: String(re && re.message || re).slice(0, 200) }), { status: 500, headers: CORS_H }); } } if (url.pathname === "/kric-status") { if (!env.DB) return new Response(JSON.stringify({ error: "no db" }), { status: 500, headers: CORS_H }); return new Response(JSON.stringify(await kricStatus(env)), { status: 200, headers: CORS_H }); } if ((url.pathname === "/kric-ingest" || url.pathname === "/kric-probe" || url.pathname === "/kric-derive") && (!env.KRIC_ADMIN || request.headers.get("x-kric-admin") !== env.KRIC_ADMIN)) return new Response(JSON.stringify({ error: "locked" }), { status: 403, headers: CORS_H }); if (url.pathname === "/kric-ingest") { globalThis.__kiN = (globalThis.__kiN || 0) + 1; if (globalThis.__kiN > 4000) return new Response(JSON.stringify({ error: "limit" }), { status: 429, headers: CORS_H }); if (!env.KRIC_KEY || !env.DB) return new Response(JSON.stringify({ error: "no key/db" }), { status: 500, headers: CORS_H }); const qo = url.searchParams.get("opr") || "", ql = url.searchParams.get("ln") || "", qs = url.searchParams.get("st") || "", qd = url.searchParams.get("day") || "", qn = url.searchParams.get("nm") || ""; if (!/^[A-Za-z0-9]{1,4}$/.test(qo) || !/^[A-Za-z0-9]{1,4}$/.test(ql) || !/^[A-Za-z0-9-]{1,12}$/.test(qs) || !/^[789]$/.test(qd) || !/^[A-Za-z0-9가-힣() .-]{0,30}$/.test(qn)) return new Response(JSON.stringify({ error: "bad param" }), { status: 400, headers: CORS_H }); await env.DB.prepare("CREATE TABLE IF NOT EXISTS kric_tt (opr TEXT, ln TEXT, st TEXT, day TEXT, nm TEXT, n INTEGER, data TEXT, ts INTEGER, PRIMARY KEY (opr, ln, st, day))").run(); const ex0 = await env.DB.prepare("SELECT n, nm FROM kric_tt WHERE opr=? AND ln=? AND st=? AND day=?").bind(qo, ql, qs, qd).first(); if (ex0) { let upd = false; if (qn && ex0.nm !== qn) { await env.DB.prepare("UPDATE kric_tt SET nm=? WHERE opr=? AND ln=? AND st=? AND day=?").bind(qn, qo, ql, qs, qd).run(); upd = true; } return new Response(JSON.stringify({ ok: true, skipped: true, n: ex0.n, upd: upd }), { status: 200, headers: CORS_H }); } const kr = await fetch("https://openapi.kric.go.kr/openapi/convenientInfo/stationTimetable?serviceKey=" + encodeURIComponent(env.KRIC_KEY) + "&format=json&railOprIsttCd=" + qo + "&lnCd=" + ql + "&stinCd=" + qs + "&dayCd=" + qd); const kt = await kr.text(); let kj = null; try { kj = JSON.parse(kt); } catch (e) { return new Response(JSON.stringify({ error: "nonjson", status: kr.status, head: kt.slice(0, 120) }), { status: 200, headers: CORS_H }); } const kh = kj && kj.header && kj.header.resultCode; if (kh !== "00") return new Response(JSON.stringify({ error: "hdr", code: kh, msg: kj && kj.header && kj.header.resultMsg }), { status: 200, headers: CORS_H }); const kb = Array.isArray(kj.body) ? kj.body : (kj.body ? [kj.body] : []); const kd = kb.map((x) => [x.trnNo, x.arvTm || "", x.dptTm || "", x.orgStinCd || "", x.tmnStinCd || ""].join(",")).join("\n"); await env.DB.prepare("INSERT OR IGNORE INTO kric_tt (opr, ln, st, day, nm, n, data, ts) VALUES (?,?,?,?,?,?,?,?)").bind(qo, ql, qs, qd, qn, kb.length, kd, Date.now()).run(); return new Response(JSON.stringify({ ok: true, n: kb.length, bytes: kd.length }), { status: 200, headers: CORS_H }); } if (url.pathname === "/kric-derive") { globalThis.__kdN = (globalThis.__kdN || 0) + 1; if (globalThis.__kdN > 300) return new Response(JSON.stringify({ error: "limit" }), { status: 429, headers: CORS_H }); if (!env.DB) return new Response(JSON.stringify({ error: "no db" }), { status: 500, headers: CORS_H }); const dl = url.searchParams.get("line") || ""; if (!/^[A-Z0-9]{2,4}$/.test(dl)) return new Response(JSON.stringify({ error: "bad line" }), { status: 400, headers: CORS_H }); try { const dres = await kricDerive(env, SUBWAY_BUNDLE, dl); return new Response(JSON.stringify(dres), { status: 200, headers: CORS_H }); } catch (de) { return new Response(JSON.stringify({ error: String(de && de.message || de).slice(0, 200) }), { status: 500, headers: CORS_H }); } } if (url.pathname === "/kric-probe") { globalThis.__kricN = (globalThis.__kricN || 0) + 1; if (globalThis.__kricN > 400) return new Response(JSON.stringify({ error: "probe limit" }), { status: 429, headers: CORS_H }); if (!env.KRIC_KEY) return new Response(JSON.stringify({ hasKey: false }), { status: 200, headers: CORS_H }); const kq = new URLSearchParams(); for (const [k, v] of url.searchParams) { if (/^(lnCd|railOprIsttCd|stinCd|dayCd|stinNm|svc|op)$/.test(k) && /^[A-Za-z0-9가-힣]{0,20}$/.test(v)) kq.set(k, v); } const ksvc = kq.get("svc") || "convenientInfo"; const kop = kq.get("op") || "stationTimetable"; kq.delete("svc"); kq.delete("op"); kq.set("format", "json"); const kn = Math.min(60000, parseInt(url.searchParams.get("n") || "3000", 10) || 3000); const kres = await fetch("https://openapi.kric.go.kr/openapi/" + ksvc + "/" + kop + "?serviceKey=" + encodeURIComponent(env.KRIC_KEY) + "&" + kq.toString()); const ktxt = await kres.text(); return new Response(JSON.stringify({ hasKey: true, status: kres.status, len: ktxt.length, head: ktxt.slice(parseInt(url.searchParams.get("off") || "0", 10) || 0, (parseInt(url.searchParams.get("off") || "0", 10) || 0) + kn) }, null, 1), { status: 200, headers: CORS_H }); }
 if (url.pathname === "/tago-probe") {
     const svc = url.searchParams.get("svc") || "";
     const op = url.searchParams.get("op") || "";
