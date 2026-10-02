@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-02w";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-02x";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -2583,13 +2583,20 @@ __name(ymdTodayKST, "ymdTodayKST");
 //   판단 로직·반환 형식은 그대로다 — 같은 데이터를 더 빨리 받을 뿐이다.
 // ★ 2026-10-02w: 서비스(열차·고속버스·시외버스)마다 성공하는 경로가 다르다 — 실측: TAGO_KEY2 는 버스 API 는 되지만
 //   열차정보 API 는 '등록되지 않은 서비스키'(403)라서 열차는 gentle-lab(binding) 경유만 성공한다. 그래서 선호 경로를 서비스별로 기억한다.
-var TAGO_PREF = {};
+var TAGO_BAD = {};   // "서비스|경로" → 마지막 실패 시각. 최근 5분 안에 실패한 경로는 맨 뒤로 보낸다
+var TAGO_RR = 0;     // 직접 키(TAGO_KEY·TAGO_KEY2…)를 번갈아 시작하게 하는 카운터
 var TAGO_HEDGE_MS = 1500;
+// ★ 2026-10-02x (YJ: "api 1,2 는 서로 다른 계정, 둘 다 운영 API 보유"): 계정이 다르면 하루 호출 한도도 따로 쌓인다.
+//   그래서 성공하는 직접 키들을 번갈아(라운드로빈) 먼저 써서 한도를 고르게 나눠 쓰고, 한 키가 최근 5분 안에 실패했으면
+//   (한도 초과·미등록 등) 맨 뒤로 보내 실패를 기다리지 않는다. gentle-lab(binding)은 직접 키 다음에 쓴다.
 async function tagoFetchAny(env, innerNoKey) {
-  var list = tagoAttempts(env).slice();
+  var all = tagoAttempts(env).slice();
   var _svcM = /\/([A-Za-z]+Info)\//.exec(innerNoKey), _svc = _svcM ? _svcM[1] : "_";
-  var _pf = TAGO_PREF[_svc];
-  if (_pf) list.sort(function (a, b) { return (b.via === _pf ? 1 : 0) - (a.via === _pf ? 1 : 0); });
+  var now0 = Date.now(), good = [], bad = [];
+  for (var q = 0; q < all.length; q++) { var bt = TAGO_BAD[_svc + "|" + all[q].via]; (bt && now0 - bt < 300000 ? bad : good).push(all[q]); }
+  var direct = good.filter(function (a) { return a.via !== "binding"; }), tail = good.filter(function (a) { return a.via === "binding"; });
+  if (direct.length > 1) { var rr = (TAGO_RR++) % direct.length; direct = direct.slice(rr).concat(direct.slice(0, rr)); }
+  var list = direct.concat(tail, bad);
   var tried = [];
   if (!list.length) return { items: null, via: null, err: "" };
   function runOne(a) {
@@ -2598,9 +2605,10 @@ async function tagoFetchAny(env, innerNoKey) {
         var res = await a.run(innerNoKey);
         var txt = await res.text();
         var p = tagoParse(txt);
-        if (p.ok) return { items: p.items, via: a.via };
+        if (p.ok) { delete TAGO_BAD[_svc + "|" + a.via]; return { items: p.items, via: a.via }; }
         tried.push(a.via + ": " + p.why.slice(0, 80));
       } catch (e) { tried.push(a.via + ": " + String((e && e.message) || e).slice(0, 80)); }
+      TAGO_BAD[_svc + "|" + a.via] = Date.now();
       return null;
     })();
   }
@@ -2613,7 +2621,7 @@ async function tagoFetchAny(env, innerNoKey) {
       runOne(a).then(function (r) {
         pending--;
         if (finished) return;
-        if (r) { finished = true; if (timer) clearTimeout(timer); TAGO_PREF[_svc] = r.via; resolve(r); return; }
+        if (r) { finished = true; if (timer) clearTimeout(timer); resolve(r); return; }
         if (idx >= list.length) { if (pending === 0) { finished = true; if (timer) clearTimeout(timer); resolve({ items: null, via: null, err: tried.join(" | ") }); } return; }
         if (pending === 0) { if (timer) clearTimeout(timer); launch(); }
       });
