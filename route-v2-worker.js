@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-02ag";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-02ah";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -4743,7 +4743,11 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
   //   원래 LIMIT(MAX_STOPS - 근처행수)로 받았는데, 같은 질의를 LIMIT MAX_STOPS 로 받아 앞에서부터
   //   그만큼만 쓰면(아래 slice) 결과가 예전과 똑같다 — 왕복 1번이 사라진다.
   if (!_cached && !_kvHit) {
-    const _nearP = env.DB.prepare(
+    // ★ 02ah: 측정(02ag) — D1 쿼리 자체는 15~60ms 인데 왕복이 230~1100ms. 지연은 읽는 양이 아니라 D1(아시아 본진) 왕복 쪽이다.
+    //   읽기 복제(read replication)를 켜면 가까운 복제본에서 읽을 수 있다. 세션 API(first-unconstrained)는 복제가 꺼져 있으면 아무 효과가 없고(그대로 본진),
+    //   켜면 자동으로 복제본을 쓴다. 이 데이터(버스 정류장)는 하루 한 번 새벽에만 바뀌어 약간 늦은 복제본이어도 무방하다.
+    let _dbR = env.DB; try { if (env.DB && typeof env.DB.withSession === "function" && p.get("ds") !== "0") _dbR = env.DB.withSession("first-unconstrained"); } catch (e) { _dbR = env.DB; }
+    const _nearP = _dbR.prepare(
         SQL_COLS + "WHERE brs.route_key IN ("
         + "SELECT DISTINCT route_key FROM bus_route_stops WHERE "
         + "(lat BETWEEN ?1 AND ?2 AND lng BETWEEN ?3 AND ?4) OR "
@@ -4755,13 +4759,13 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
         EY - NEAR_BOX, EY + NEAR_BOX, EX - NEAR_BOX, EX + NEAR_BOX,
         minLat, maxLat, minLng, maxLng, MAX_STOPS
       ).all().then((q) => ({ q }), (e) => ({ e }));
-    const _restP = env.DB.prepare(
+    const _restP = _dbR.prepare(
         SQL_COLS + "WHERE brs.lat BETWEEN ?1 AND ?2 AND brs.lng BETWEEN ?3 AND ?4 "
         + "LIMIT ?5"   // ★ 2026-09-24: ORDER BY 제거(결과 동일, D1만 빨라짐)
       ).bind(minLat, maxLat, minLng, maxLng, MAX_STOPS).all().then((q) => ({ q }), (e) => ({ e }));
     const _t1 = Date.now(); _nearP.then(function () { _d1Diag.nearMs = Date.now() - _t1; }); _restP.then(function () { _d1Diag.restMs = Date.now() - _t1; });
     const [_nr, _rr] = await Promise.all([_nearP, _restP]);
-    try { var _mn = _nr.q && _nr.q.meta, _mr = _rr.q && _rr.q.meta; _d1Diag.near = _mn ? { d: _mn.duration, rr: _mn.rows_read, n: (_nr.q.results || []).length, reg: _mn.served_by_region, pri: _mn.served_by_primary } : null; _d1Diag.rest = _mr ? { d: _mr.duration, rr: _mr.rows_read, n: (_rr.q.results || []).length } : null; } catch (e) {}
+    try { var _mn = _nr.q && _nr.q.meta, _mr = _rr.q && _rr.q.meta; _d1Diag.near = _mn ? { d: _mn.duration, rr: _mn.rows_read, n: (_nr.q.results || []).length, reg: _mn.served_by_region, pri: _mn.served_by_primary } : null; _d1Diag.sess = _dbR !== env.DB; _d1Diag.rest = _mr ? { d: _mr.duration, rr: _mr.rows_read, n: (_rr.q.results || []).length } : null; } catch (e) {}
     if (_nr.e) { _nearErr = String((_nr.e && _nr.e.message) || _nr.e).slice(0, 120); }
     else {
       const got = (_nr.q && _nr.q.results) || [];
