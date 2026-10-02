@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-02z";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-02aa";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -2503,8 +2503,8 @@ var LD_CAND_MAX_KM = 45;    // 이보다 멀면 대중교통으로 닿기 비현
 //   있는 편"까지 TTL 동안 계속 없다고 나올 수 있다. 있는 편만 캐시하므로 최악의 경우도
 //   기존과 동일(TAGO를 매번 다시 부름)이지 더 나빠지지 않는다(기존 기능 보존).
 var LD_TAGO_CACHE = /* @__PURE__ */ new Map();
-var LD_TAGO_TTL_MS = 20 * 60 * 1000;   // 20분 — 시각표라 D1 corridor 캐시(10분)보다 길게 둬도 안전
-var LD_TAGO_CACHE_MAX = 60;
+var LD_TAGO_TTL_MS = 6 * 3600 * 1000;   // ★ 02aa: 6시간 — 캐시 키에 조회 날짜(ymd)가 들어 있어 같은 날 시각표는 그대로다(예전 20분은 같은 구간을 다시 조회할 때마다 TAGO 를 불러 ~1초씩 기다렸다)
+var LD_TAGO_CACHE_MAX = 300;
 function ldTagoCacheKey(mode, depId, arrId, ymd) {
   return mode + "|" + depId + "|" + arrId + "|" + ymd;
 }
@@ -2531,7 +2531,7 @@ __name(ldTagoCacheSet, "ldTagoCacheSet");
 //   매번 몇 초씩 기다렸다. 일시 오류(null)는 그대로 캐시하지 않고, TAGO 가 가끔 빈 응답을 주는
 //   문제를 고려해 TTL 을 5분으로 짧게 둔다(최악의 경우도 5분 뒤엔 다시 조회).
 var LD_TAGO_NEG = /* @__PURE__ */ new Map();
-var LD_TAGO_NEG_TTL_MS = 5 * 60 * 1000;
+var LD_TAGO_NEG_TTL_MS = 30 * 60 * 1000;   // ★ 02aa: 5분→30분(정상 응답인데 편이 없는 조합 — 오류는 캐시 안 함)
 async function ldTagoCached(mode, depId, arrId, ymd, env, ctx, fetcher) {
   var k = ldTagoCacheKey(mode, depId, arrId, ymd);
   var mem = ldTagoCacheGet(k);
@@ -2551,7 +2551,7 @@ async function ldTagoCached(mode, depId, arrId, ymd, env, ctx, fetcher) {
     LD_TAGO_NEG.set(k, Date.now());
     if (LD_TAGO_NEG.size > 400) LD_TAGO_NEG.clear();
     if (env && env.ROWS_KV) {
-      var _pn = env.ROWS_KV.put("ldn:" + k, "1", { expirationTtl: 300 }).catch(function () {});
+      var _pn = env.ROWS_KV.put("ldn:" + k, "1", { expirationTtl: Math.round(LD_TAGO_NEG_TTL_MS / 1000) }).catch(function () {});
       if (ctx && ctx.waitUntil) ctx.waitUntil(_pn);
     }
   }
