@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-02ae";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-02af";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -3714,6 +3714,24 @@ async function ldFetchLive(SY, SX, EY, EX, env, stat, G, busCoord, busNm, ctx) {
       try { var _pf = await ldPairsFilter(mode, depPool, arrPool, env, stat); depPool = _pf.dep; arrPool = _pf.arr; _pairOk = _pf.ok; } catch (e) {}
       if (!depPool.length || !arrPool.length) { if (stat) stat["ldPairsSkip_" + mode] = 1; return; }
     }
+    if (mode === "train" && !(G && G._ldNoTF)) {   // ★ 02af: 열차도 같은 이치 — 메모리 시간표(ldTT)에서 그 요일에 편이 하나도 없는 역 쌍은 순위·조회에서 뺀다(두 역 다 시간표에 있을 때만 판정, 모르면 그대로 둔다)
+      try {
+        var _tdt = ldDayTypeKST(baseMs), _ttm = await ldTTGet(env, _tdt, stat);
+        if (_ttm) {
+          var _tpOk = function (dT, aT) {
+            if (!_ttm.byStn[dT.nm] || !_ttm.byStn[aT.nm]) return true;
+            var _k = _tdt + "|" + dT.nm + "|" + aT.nm, _r = ldTrainD1CacheGet(_k);
+            if (!_r) { _r = ldTTPair(_ttm, dT.nm, aT.nm); ldTrainD1CacheSet(_k, _r); }
+            return _r.length > 0;
+          };
+          var _d2 = depPool.filter(function (d) { return arrPool.some(function (a) { return _tpOk(d.t, a.t); }); });
+          var _a2 = arrPool.filter(function (a) { return _d2.some(function (d) { return _tpOk(d.t, a.t); }); });
+          if (stat) stat.ldTrainPairs = depPool.length + "x" + arrPool.length + "->" + _d2.length + "x" + _a2.length;
+          if (!_d2.length || !_a2.length) { if (stat) stat.ldPairsSkip_train = 1; return; }
+          depPool = _d2; arrPool = _a2; _pairOk = _tpOk;
+        }
+      } catch (e) {}
+    }
     // ★ 실제 접근/이탈 경로(다익스트라)는 네트워크가 아니라 순수 계산이라 fetch 전에 바로 구한다.
     var _tr0 = Date.now(), _dj0 = DJ_STAT.pops, _dc0 = DJ_STAT.calls; var depR = ldRankByAccess(depPool, G, busCoord, busNm, SY, SX, true, nSide).slice(0, nSide);
     var arrR = ldRankByAccess(arrPool, G, busCoord, busNm, EY, EX, false, nSide).slice(0, nSide); if (stat) { stat["ldRankMs_" + mode] = Date.now() - _tr0; stat["djRank_" + mode] = (DJ_STAT.calls - _dc0) + "c/" + (DJ_STAT.pops - _dj0) + "p"; }
@@ -4782,7 +4800,7 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
   const _rtw = parseRTW(p.get("rtw"));
   const _rtwApplied = prepRTW(G, _rtw);
   // ★ 앱이 보여 주는 주변 정류장 목록(위도,경도;…) — 승차 후보를 여기로 제한
-  G._allowBus = parseStops(p.get("stops")); G._ldNoPrune = p.get("lp") === "0";
+  G._allowBus = parseStops(p.get("stops")); G._ldNoPrune = p.get("lp") === "0"; G._ldNoTF = p.get("tf") === "0";
   // ★ 2026-09-15: 앱이 '대안 출발지' 여러 곳으로 따로 요청하던 걸 없앴다(YJ 절대규칙).
   //   출발지 주변 정류장은 원래 accessNodes 가 전부 승차 후보로 잡는다 — 엔진 일이다.
   //   앱이 넘기는 건 사용자 뜻 하나뿐: pref = 알림에서 직접 지정한 승차 정류장.
