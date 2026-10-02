@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-02ac";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-02ad";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -517,7 +517,7 @@ function rtwLookup(G, rk, stopId) {
   if (!R || !rk) return null;
   const no = G.routeNoOf && G.routeNoOf[rk];
   if (!no) return null;
-  if (stopId && R.byStop) {
+  if (stopId && R.byStop && !(G.rtwStat && G.rtwStat.stopKeys === 0)) {   // ★ 02ad: 키가 하나도 없으면 형제 id 를 뒤질 필요가 없다(결과 동일)
     let v = null;
     for (const sid of stopSiblings(stopId)) {          // \uAC19\uC740 \uC815\uB958\uC7A5\uC758 \uB2E4\uB978 id \uB3C4 \uBCF8\uB2E4
       const t = R.byStop[sid + "|" + no];
@@ -542,7 +542,19 @@ __name(rtwLookup, "rtwLookup");
 //     ICB168001440 에 실제 오는 노선 = 583·순혹83·인천e음89·91·인천e음88
 //     그런데 엔진은 그 정류장에서 77·75·1101 을 태우려 했다(5중 4개 빗나감).
 //   → 오지도 않는 노선을 태우는 경로는 탐색 단계에서 불리하게 만든다.
+// ★ 02ad: 터미널 후보 순위(ldRankByAccess)처럼 같은 계산을 수십 번 반복하는 동안만 켜는 임시 메모.
+//   실측: 한 요청에서 이 함수가 34만 번 불렸다(클로저·정규식·문자열 결합 포함). 값은 (노선, 정류장)만으로 정해지고
+//   그 구간(동기 계산) 동안 G.live·rtw 는 바뀌지 않으므로 같은 결과를 재사용해도 같다. 진단 카운터(liveCost·rtwStat.miss)는 첫 호출만 센다.
 function busWaitAt(G, rk, stopId) {
+  const M = G && G.__bwMemo;
+  if (!M) return busWaitAtRaw(G, rk, stopId);
+  const k = rk + "|" + stopId, h = M.get(k);
+  if (h !== void 0) { G.__waitSrc = h[1]; return h[0]; }
+  const v = busWaitAtRaw(G, rk, stopId);
+  M.set(k, [v, G.__waitSrc]);
+  return v;
+}
+function busWaitAtRaw(G, rk, stopId) {
   let unknown = false;
   const assumed = G && G.routeWait && G.routeWait[rk] != null ? G.routeWait[rk] : BUS_WAIT;
   const no = G && G.routeNoOf ? G.routeNoOf[rk] : null;
@@ -579,6 +591,7 @@ function busWaitAt(G, rk, stopId) {
   const mult = RED_BUS_RE.test(String((G && G.routeTypeOf && G.routeTypeOf[rk]) || "")) ? UNKNOWN_MULT_RED : UNKNOWN_MULT;
   return _log(assumed * mult, unknown ? "\uBAA8\uB984" : "\uAC00\uC815\uCE58");
 }
+__name(busWaitAtRaw, "busWaitAtRaw");
 __name(busWaitAt, "busWaitAt");
 // G\uC5D0 \uC2E4\uCE21 \uB300\uAE30\uB97C \uC2E4\uC5B4\uB454\uB2E4. routeWait(\uBC30\uCC28 \uAC00\uC815\uCE58)\uB294 \uB36E\uC5B4\uC4F0\uC9C0 \uC54A\uB294\uB2E4
 // \u2014 \uC815\uB958\uC7A5\uB9C8\uB2E4 \uAC12\uC774 \uB2E4\uB97C \uC218 \uC788\uC5B4\uC11C \uC2B9\uCC28 \uC9C0\uC810\uC5D0\uC11C \uACE8\uB77C\uC57C \uD55C\uB2E4.
@@ -601,32 +614,34 @@ var MinHeap = class {
     this.a = [];
   }
   push(p, v) {
-    const a = this.a;
-    a.push([p, v]);
+    const a = this.a, item = [p, v];
+    a.push(item);
     let i = a.length - 1;
     while (i > 0) {
       const par = i - 1 >> 1;
-      if (a[par][0] <= a[i][0]) break;
-      [a[par], a[i]] = [a[i], a[par]];
+      if (a[par][0] <= p) break;
+      a[i] = a[par];
       i = par;
     }
+    a[i] = item;
   }
   pop() {
     const a = this.a;
     if (!a.length) return null;
     const top = a[0], last = a.pop();
     if (a.length) {
-      a[0] = last;
+      const lp = last[0], n = a.length;
       let i = 0;
-      const n = a.length;
       for (; ; ) {
-        let l = 2 * i + 1, r = 2 * i + 2, m = i;
-        if (l < n && a[l][0] < a[m][0]) m = l;
-        if (r < n && a[r][0] < a[m][0]) m = r;
+        const l = 2 * i + 1, r = l + 1;
+        let m = i, pm = lp;
+        if (l < n && a[l][0] < pm) { m = l; pm = a[l][0]; }
+        if (r < n && a[r][0] < pm) { m = r; }
         if (m === i) break;
-        [a[m], a[i]] = [a[i], a[m]];
+        a[i] = a[m];
         i = m;
       }
+      a[i] = last;
     }
     return top;
   }
@@ -1100,6 +1115,7 @@ function dijkstra(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
   const adj = G.adj;
   const mustS = !!(opt && opt.mustSubway), noS = !!(opt && opt.noSubway);
   const nearSubOnly = !!(opt && opt.subwayNearest);
+  const cutoff = opt && opt.cutoff != null ? opt.cutoff : null;   // ★ 02ad: 이 비용을 넘도록 목표를 못 찾으면 포기(후보 순위용 가지치기)
   const enc = /* @__PURE__ */ __name((n, st) => mustS ? n + "#" + st : n, "enc");
   const dec = /* @__PURE__ */ __name((n) => mustS ? n.slice(0, n.length - 2) : n, "dec");
   const stOf = /* @__PURE__ */ __name((n) => mustS ? n.charCodeAt(n.length - 1) - 48 : 0, "stOf");
@@ -1150,6 +1166,7 @@ function dijkstra(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
   while (pq.size) {
     const [d, u] = pq.pop(); DJ_STAT.pops++;
     if (d > dist[u]) continue;
+    if (cutoff !== null && best === null && d > cutoff) { G.__djPruned = true; break; }
     const ub = dec(u);
     if (gmap[ub] !== void 0 && (!mustS || stOf(u) === 1) && !(noS && isSub(ub))) {
       const t = d + gmap[ub] * wpen;
@@ -1168,7 +1185,7 @@ function dijkstra(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
         if (!(isSub(ub) && nearIds.has(ub.slice(2)))) continue;
       }
       const isW = e.kind === "walk";
-      const isX = /xfer|walk/.test(e.kind);
+      const isX = e.kind === "sub-xfer" || e.kind === "walk";
       // 2026-09-08: 같은 정류장에서 다른 버스로 갈아타는 것이 공짜였다.
       //   pk[u] !== "bus" 만 보니 노선이 바뀌어도 이미 타고 있는 것으로 쳐서
       //   대기시간도, 환승 벌점도, 환승 횟수도 하나도 안 붙었다.
@@ -1351,6 +1368,7 @@ function dijkstra(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
     return o;
   });
   const lines = clean.filter((L) => L.mode === "subway" || L.mode === "bus").map((L) => L.mode === "bus" ? "\uBC84\uC2A4" : L.line);
+  G.__djLastBd = bd;
   return {
     totalMin: Math.round(real / 60),
     transfers: xf,
@@ -2343,21 +2361,33 @@ __name(busLegsWithOffset, "busLegsWithOffset");
 //   근접정류소 응답을 보면 ICB168000609 와 ICB368000609 가
 //   좌표까지 동일하다 — 같은 정류장의 다른 id 일 뿐이다.
 //   → 저장·조회는 정규화한 키로 하고, 조회가 비면 형제 id 로 한 번 더 시도한다.
+// ★ 02ad: stopNorm/stopSiblings 는 id 만으로 정해지는 순수 함수인데 busWaitAt 에서 한 요청에 수십만 번 불려(정규식·문자열 결합) 메모해 둔다.
+var _SN_MEMO = /* @__PURE__ */ new Map(), _SS_MEMO = /* @__PURE__ */ new Map();
 function stopNorm(id) {
+  const m0 = typeof id === "string" ? _SN_MEMO.get(id) : void 0;
+  if (m0 !== void 0) return m0;
   const t = String(id || "");
   const m = /^([A-Za-z]{2,4})([0-9])([0-9]{5,})$/.exec(t);
-  return m ? m[1] + "#" + m[3] : t;
+  const r = m ? m[1] + "#" + m[3] : t;
+  if (typeof id === "string") { if (_SN_MEMO.size > 60000) _SN_MEMO.clear(); _SN_MEMO.set(id, r); }
+  return r;
 }
 __name(stopNorm, "stopNorm");
 function stopSiblings(id) {
+  const m0 = typeof id === "string" ? _SS_MEMO.get(id) : void 0;
+  if (m0 !== void 0) return m0;   // 읽기 전용으로만 쓰인다(호출부는 순회만 함)
   const t = String(id || "");
   const m = /^([A-Za-z]{2,4})([0-9])([0-9]{5,})$/.exec(t);
-  if (!m) return [t];
-  const out = [t];
-  for (const d of ["1", "3", "2", "4"]) {
-    const alt = m[1] + d + m[3];
-    if (alt !== t && out.indexOf(alt) < 0) out.push(alt);
+  let out;
+  if (!m) out = [t];
+  else {
+    out = [t];
+    for (const d of ["1", "3", "2", "4"]) {
+      const alt = m[1] + d + m[3];
+      if (alt !== t && out.indexOf(alt) < 0) out.push(alt);
+    }
   }
+  if (typeof id === "string") { if (_SS_MEMO.size > 60000) _SS_MEMO.clear(); _SS_MEMO.set(id, out); }
   return out;
 }
 __name(stopSiblings, "stopSiblings");
@@ -3069,14 +3099,29 @@ __name(ldNearestN, "ldNearestN");
 // 후보들의 실제 접근시간(이미 있는 로컬 지하철·버스 다익스트라 재사용, 네트워크
 // 비용 없음)을 재서 가까운 순으로 다시 줄세운다. 코리도 밖 등으로 못 구하면
 // ldWalkMin(직선거리 도보 환산)으로 대체한다 — 기존 폴백 규칙과 동일.
-function ldRankByAccess(cands, G, busCoord, busNm, fromLat, fromLng, toTerminal) {
-  var withMin = cands.map(function (c) {
-    var route = toTerminal
-      ? ldLocalRoute(G, busCoord, busNm, fromLat, fromLng, c.t.lat, c.t.lng)
-      : ldLocalRoute(G, busCoord, busNm, c.t.lat, c.t.lng, fromLat, fromLng);
-    var min = route ? route.totalMin : ldWalkMin(c.distM);
-    return { t: c.t, distM: c.distM, route: route, min: min };
-  });
+var LD_RANK_CUT_MULT = 1.3, LD_RANK_CUT_ADD = 300;
+function ldRankByAccess(cands, G, busCoord, busNm, fromLat, fromLng, toTerminal, nKeep) {
+  // ★ 02ad (YJ: "속도 무조건"): 실측 — 도시간 한 건에서 길찾기가 50~60번, 그중 90% 이상이 이 터미널 후보 순위였다.
+  //   후보는 직선거리 가까운 순으로 오므로, 상위 nKeep+1 개를 구한 뒤부터는 그 (nKeep+1)번째 비용의 1.3배+5분을 넘는 후보는
+  //   탐색을 거기서 멈춘다(어차피 상위 nKeep 에 못 든다). 쓰는 후보는 예전처럼 끝까지 정확히 계산한다.
+  //   ?lp=0 이면 가지치기를 끈다(예전 동작과 결과 비교용).
+  var keep = (nKeep && !(G && G._ldNoPrune)) ? nKeep + 1 : 0;
+  var withMin = [], costs = [];
+  if (G) G.__bwMemo = /* @__PURE__ */ new Map();
+  try {
+    for (var i = 0; i < cands.length; i++) {
+      var c = cands[i], opt = null;
+      if (keep && costs.length >= keep) opt = { cutoff: costs[keep - 1] * LD_RANK_CUT_MULT + LD_RANK_CUT_ADD };
+      if (G) { G.__djPruned = false; G.__djLastBd = null; }
+      var route = toTerminal
+        ? ldLocalRoute(G, busCoord, busNm, fromLat, fromLng, c.t.lat, c.t.lng, opt)
+        : ldLocalRoute(G, busCoord, busNm, c.t.lat, c.t.lng, fromLat, fromLng, opt);
+      if (!route && G && G.__djPruned) continue;
+      if (route && G && G.__djLastBd != null) { costs.push(G.__djLastBd); costs.sort(function (a, b) { return a - b; }); }
+      var min = route ? route.totalMin : ldWalkMin(c.distM);
+      withMin.push({ t: c.t, distM: c.distM, route: route, min: min });
+    }
+  } finally { if (G) G.__bwMemo = null; }
   withMin.sort(function (a, b) { return a.min - b.min; });
   return withMin;
 }
@@ -3530,11 +3575,11 @@ __name(ldGradeOptions, "ldGradeOptions");
 //   handleRouteV2 가 본선 탐색에 쓰던 같은 G/busCoord/busNm 을 그대로 넘겨받아 쓰므로
 //   D1 재조회 없이(=비용 추가 없이) 순수 계산만 늘어난다. 못 찾으면(코리도 밖 등) null →
 //   ldToRoute 가 기존처럼 직선거리 도보로 조용히 되돌아간다(기존 기능 보존).
-function ldLocalRoute(G, busCoord, busNm, aLat, aLng, bLat, bLng) {
+function ldLocalRoute(G, busCoord, busNm, aLat, aLng, bLat, bLng, opt) {
   try {
     if (!G || !busCoord || !busNm) return null;
     if (aLat == null || aLng == null || bLat == null || bLng == null) return null;
-    return dijkstra(G, busCoord, busNm, aLat, aLng, bLat, bLng, "minTime");
+    return dijkstra(G, busCoord, busNm, aLat, aLng, bLat, bLng, "minTime", opt || void 0);
   } catch (e) { return null; }
 }
 __name(ldLocalRoute, "ldLocalRoute");
@@ -3561,8 +3606,8 @@ async function ldFetchLive(SY, SX, EY, EX, env, stat, G, busCoord, busNm, ctx) {
     var arrPool = ldNearestN(EY, EX, LD_TERMINALS[mode], LD_CAND_POOL, LD_CAND_MAX_KM);
     if (!depPool.length || !arrPool.length) return;
     // ★ 실제 접근/이탈 경로(다익스트라)는 네트워크가 아니라 순수 계산이라 fetch 전에 바로 구한다.
-    var _tr0 = Date.now(), _dj0 = DJ_STAT.pops, _dc0 = DJ_STAT.calls; var depR = ldRankByAccess(depPool, G, busCoord, busNm, SY, SX, true).slice(0, nSide);
-    var arrR = ldRankByAccess(arrPool, G, busCoord, busNm, EY, EX, false).slice(0, nSide); if (stat) { stat["ldRankMs_" + mode] = Date.now() - _tr0; stat["djRank_" + mode] = (DJ_STAT.calls - _dc0) + "c/" + (DJ_STAT.pops - _dj0) + "p"; }
+    var _tr0 = Date.now(), _dj0 = DJ_STAT.pops, _dc0 = DJ_STAT.calls; var depR = ldRankByAccess(depPool, G, busCoord, busNm, SY, SX, true, nSide).slice(0, nSide);
+    var arrR = ldRankByAccess(arrPool, G, busCoord, busNm, EY, EX, false, nSide).slice(0, nSide); if (stat) { stat["ldRankMs_" + mode] = Date.now() - _tr0; stat["djRank_" + mode] = (DJ_STAT.calls - _dc0) + "c/" + (DJ_STAT.pops - _dj0) + "p"; }
     if (depR.length && arrR.length) found[mode] = true;
     var combos = [];
     for (var i = 0; i < depR.length; i++)
@@ -4627,7 +4672,7 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
   const _rtw = parseRTW(p.get("rtw"));
   const _rtwApplied = prepRTW(G, _rtw);
   // ★ 앱이 보여 주는 주변 정류장 목록(위도,경도;…) — 승차 후보를 여기로 제한
-  G._allowBus = parseStops(p.get("stops"));
+  G._allowBus = parseStops(p.get("stops")); G._ldNoPrune = p.get("lp") === "0";
   // ★ 2026-09-15: 앱이 '대안 출발지' 여러 곳으로 따로 요청하던 걸 없앴다(YJ 절대규칙).
   //   출발지 주변 정류장은 원래 accessNodes 가 전부 승차 후보로 잡는다 — 엔진 일이다.
   //   앱이 넘기는 건 사용자 뜻 하나뿐: pref = 알림에서 직접 지정한 승차 정류장.
