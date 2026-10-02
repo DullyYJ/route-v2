@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-02aa";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-02ac";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -1094,7 +1094,9 @@ function accessNodesCached(G, busCoord, lat, lng, allowBus, stat) {
   return res;
 }
 __name(accessNodesCached, "accessNodesCached");
+var DJ_STAT = { calls: 0, pops: 0, ms: 0 };   // ★ 02ac: 길찾기가 몇 번·얼마나 도는지 센다(워커 시계는 계산 중엔 멈춰서 ms 로는 CPU 를 못 잰다 → 횟수로 잰다)
 function dijkstra(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
+  DJ_STAT.calls++;
   const adj = G.adj;
   const mustS = !!(opt && opt.mustSubway), noS = !!(opt && opt.noSubway);
   const nearSubOnly = !!(opt && opt.subwayNearest);
@@ -1146,7 +1148,7 @@ function dijkstra(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
   }
   let best = null, bd = 1e9;
   while (pq.size) {
-    const [d, u] = pq.pop();
+    const [d, u] = pq.pop(); DJ_STAT.pops++;
     if (d > dist[u]) continue;
     const ub = dec(u);
     if (gmap[ub] !== void 0 && (!mustS || stOf(u) === 1) && !(noS && isSub(ub))) {
@@ -2532,6 +2534,43 @@ __name(ldTagoCacheSet, "ldTagoCacheSet");
 //   문제를 고려해 TTL 을 5분으로 짧게 둔다(최악의 경우도 5분 뒤엔 다시 조회).
 var LD_TAGO_NEG = /* @__PURE__ */ new Map();
 var LD_TAGO_NEG_TTL_MS = 30 * 60 * 1000;   // ★ 02aa: 5분→30분(정상 응답인데 편이 없는 조합 — 오류는 캐시 안 함)
+// ★ 02ab (YJ: "버스시간표도 요일이 같으면 같으니 계속 저장해 두고 주기적으로 다시 저장"): 같은 구간·같은 요일(공휴일은 따로)이면
+//   시간표가 같다고 보고, 지난번에 받은 시간표의 날짜만 오늘로 옮겨 즉시 응답한다. 3시간 넘은 사본이면 응답은 사본으로 먼저 하고
+//   (사용자는 안 기다림) 뒤에서 TAGO 를 다시 불러 새로 저장한다(stale-while-revalidate). 사본은 8일까지만 쓴다.
+//   요일별로 따로 두는 이유: 금요일 증편처럼 요일마다 다른 노선이 있어 월~금을 한 묶음으로 보면 틀릴 수 있다.
+var LD_DT_BUSY = {}, LD_TAGO_DT = new Map(), LD_DT_MAX_MS = 8 * 24 * 3600 * 1000, LD_DT_REFRESH_MS = 3 * 3600 * 1000;
+function ldYmdMs(ymd) { return Date.UTC(+ymd.slice(0, 4), +ymd.slice(4, 6) - 1, +ymd.slice(6, 8)); }
+function ldDtKey(mode, depId, arrId, ymd) {
+  var dow = new Date(ldYmdMs(ymd)).getUTCDay();
+  return mode + "|" + depId + "|" + arrId + "|" + (ldIsHolidayYmd(ymd) ? "H" : dow);
+}
+function ldShiftItems(items, fromYmd, toYmd) {
+  var delta = Math.round((ldYmdMs(toYmd) - ldYmdMs(fromYmd)) / 864e5);
+  if (!delta) return items;
+  return items.map(function (it) {
+    var o = {};
+    for (var k in it) {
+      var v = it[k];
+      if (typeof v === "string" && /^20\d{10}(\d{2})?$/.test(v)) {
+        var t = new Date(Date.UTC(+v.slice(0, 4), +v.slice(4, 6) - 1, +v.slice(6, 8), +v.slice(8, 10), +v.slice(10, 12), v.length > 12 ? +v.slice(12, 14) : 0) + delta * 864e5);
+        var p2 = function (n) { return String(n).padStart(2, "0"); };
+        v = t.getUTCFullYear() + p2(t.getUTCMonth() + 1) + p2(t.getUTCDate()) + p2(t.getUTCHours()) + p2(t.getUTCMinutes()) + (v.length > 12 ? p2(t.getUTCSeconds()) : "");
+      }
+      o[k] = v;
+    }
+    return o;
+  });
+}
+async function ldDtGet(dk, env) {
+  var m = LD_TAGO_DT.get(dk); if (m) return m;
+  if (env && env.ROWS_KV) { try { var kv = await env.ROWS_KV.get("ld2:" + dk, "json"); if (kv && kv.items && kv.items.length && kv.ymd) { LD_TAGO_DT.set(dk, kv); return kv; } } catch (e) {} }
+  return null;
+}
+function ldDtPut(dk, ymd, items, env, ctx) {
+  var rec = { ymd: ymd, at: Date.now(), items: items };
+  LD_TAGO_DT.set(dk, rec); while (LD_TAGO_DT.size > 400) LD_TAGO_DT.delete(LD_TAGO_DT.keys().next().value);
+  if (env && env.ROWS_KV) { var pr = env.ROWS_KV.put("ld2:" + dk, JSON.stringify(rec), { expirationTtl: 9 * 24 * 3600 }).catch(function () {}); if (ctx && ctx.waitUntil) ctx.waitUntil(pr); }
+}
 async function ldTagoCached(mode, depId, arrId, ymd, env, ctx, fetcher) {
   var k = ldTagoCacheKey(mode, depId, arrId, ymd);
   var mem = ldTagoCacheGet(k);
@@ -2546,6 +2585,17 @@ async function ldTagoCached(mode, depId, arrId, ymd, env, ctx, fetcher) {
       if (kvs[1]) { LD_TAGO_NEG.set(k, Date.now()); return { items: [], via: "cache-neg" }; }
     } catch (e) {}
   }
+  var dk = ldDtKey(mode, depId, arrId, ymd);
+  var dtRec = await ldDtGet(dk, env);
+  if (dtRec && Date.now() - dtRec.at < LD_DT_MAX_MS) {
+    if (Date.now() - dtRec.at > LD_DT_REFRESH_MS && ctx && ctx.waitUntil && !LD_DT_BUSY[dk]) {
+      LD_DT_BUSY[dk] = 1;
+      ctx.waitUntil((async function () { try { var fresh = await fetcher(); if (fresh && fresh.length) { ldTagoCacheSet(k, fresh); ldDtPut(dk, ymd, fresh, env, ctx); } } catch (e) {} finally { delete LD_DT_BUSY[dk]; } })());
+    }
+    var shifted = ldShiftItems(dtRec.items, dtRec.ymd, ymd);
+    ldTagoCacheSet(k, shifted);
+    return { items: shifted, via: "cache-dt" };
+  }
   var items = await fetcher();
   if (Array.isArray(items) && !items.length) {
     LD_TAGO_NEG.set(k, Date.now());
@@ -2556,7 +2606,7 @@ async function ldTagoCached(mode, depId, arrId, ymd, env, ctx, fetcher) {
     }
   }
   if (items && items.length) {
-    ldTagoCacheSet(k, items);
+    ldTagoCacheSet(k, items); ldDtPut(dk, ymd, items, env, ctx);
     if (env && env.ROWS_KV) {
       var _p = env.ROWS_KV.put("ld:" + k, JSON.stringify(items), { expirationTtl: Math.round(LD_TAGO_TTL_MS / 1000) })
         .catch(function () {});
@@ -3038,11 +3088,18 @@ __name(ldRankByAccess, "ldRankByAccess");
 //   고르므로 응답 정렬 순서에 상관없이 안전하다.
 // ★ 2026-09-24 (YJ 전체 연결 지시): 오늘 요일(KST)이 train_trains/train_stops 의
 //   day_type(WD=평일 대표/화요일 실측, SAT=토요일, SUN=일요일) 중 어느 것에 해당하는지.
+// ★ 02ab (YJ: "평일 주말 공휴일"): 예전엔 요일만 봐서 평일 공휴일(대체공휴일 포함)이 '평일' 시간표로 나갔다.
+//   평일에 걸친 공휴일은 일요일(=D1 의 SUN, 스키마 주석상 '일요일,공휴일') 시간표를 쓴다. 토요일 공휴일은 토요일 그대로.
+//   출처: publicholidays.co.kr 2026·2027 목록. 해마다 한 번 갱신해야 한다(모르는 날짜는 예전처럼 요일로만 판단).
+var LD_HOLIDAYS = {};
+"20261005 20261009 20261225 20270101 20270208 20270209 20270301 20270505 20270513 20270607 20270816 20270914 20270915 20270916 20271004 20271011 20271227".split(" ").forEach(function (h) { LD_HOLIDAYS[h] = 1; });
+function ldIsHolidayYmd(ymd) { return !!LD_HOLIDAYS[ymd]; }
 function ldDayTypeKST(baseMs) {
   var d = new Date((baseMs != null ? baseMs : Date.now()) + 9 * 3600 * 1000);
   var dow = d.getUTCDay();   // 0=일 ... 6=토 (KST 기준)
   if (dow === 0) return "SUN";
   if (dow === 6) return "SAT";
+  if (LD_HOLIDAYS[d.getUTCFullYear() + String(d.getUTCMonth() + 1).padStart(2, "0") + String(d.getUTCDate()).padStart(2, "0")]) return "SUN";
   return "WD";
 }
 __name(ldDayTypeKST, "ldDayTypeKST");
@@ -3504,8 +3561,8 @@ async function ldFetchLive(SY, SX, EY, EX, env, stat, G, busCoord, busNm, ctx) {
     var arrPool = ldNearestN(EY, EX, LD_TERMINALS[mode], LD_CAND_POOL, LD_CAND_MAX_KM);
     if (!depPool.length || !arrPool.length) return;
     // ★ 실제 접근/이탈 경로(다익스트라)는 네트워크가 아니라 순수 계산이라 fetch 전에 바로 구한다.
-    var _tr0 = Date.now(); var depR = ldRankByAccess(depPool, G, busCoord, busNm, SY, SX, true).slice(0, nSide);
-    var arrR = ldRankByAccess(arrPool, G, busCoord, busNm, EY, EX, false).slice(0, nSide); if (stat) stat["ldRankMs_" + mode] = Date.now() - _tr0;
+    var _tr0 = Date.now(), _dj0 = DJ_STAT.pops, _dc0 = DJ_STAT.calls; var depR = ldRankByAccess(depPool, G, busCoord, busNm, SY, SX, true).slice(0, nSide);
+    var arrR = ldRankByAccess(arrPool, G, busCoord, busNm, EY, EX, false).slice(0, nSide); if (stat) { stat["ldRankMs_" + mode] = Date.now() - _tr0; stat["djRank_" + mode] = (DJ_STAT.calls - _dc0) + "c/" + (DJ_STAT.pops - _dj0) + "p"; }
     if (depR.length && arrR.length) found[mode] = true;
     var combos = [];
     for (var i = 0; i < depR.length; i++)
@@ -4413,7 +4470,7 @@ async function applyLiveWaits(out, stat, env, deadline) {
 __name(applyLiveWaits, "applyLiveWaits");
 
 async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
-  const _tReq = Date.now();
+  const _tReq = Date.now(), _djC0 = DJ_STAT.calls, _djP0 = DJ_STAT.pops;
   const p = url.searchParams;
   const SX = parseFloat(p.get("SX")), SY = parseFloat(p.get("SY")), EX = parseFloat(p.get("EX")), EY = parseFloat(p.get("EY"));
   const CORS = { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*" };
@@ -4710,7 +4767,7 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
     //   있어서 내 객체를 덮어썼고, 진단에 'undefinedms' 로 찍혔다. 다른 이름을 쓴다.
     _liveStat.msBreak = { d1: _busDiag.d1Ms, graph: _msGraph, live: _msLive,
                           search: (typeof _msSearch !== "undefined" ? _msSearch : null),
-                          total: Date.now() - _tReq, cached: !!_busDiag.cached };
+                          total: Date.now() - _tReq, cached: !!_busDiag.cached, djCalls: DJ_STAT.calls - _djC0, djPops: DJ_STAT.pops - _djP0 };
     const _lab = { minTime: "최단", minTransfer: "최소환승", subway: "지하철", bus: "버스", direct: "직행" };
     _liveStat.tabs = Object.keys(_lab).filter((k) => out[k]).map((k) => {
       const r = out[k];
