@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-02y";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-02z";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -3090,11 +3090,39 @@ __name(ldTrainGradeByNo, "ldTrainGradeByNo");
 //   (train_stops 에 역이름 인덱스가 없어 매번 3만 행 전체 스캔 → 인덱스를 만든 뒤에도 25문 배치가 1~4 초) 이 한 단계가 요청 전체 시간을 좌우했다.
 //   열차 시간표는 요일유형(WD/SAT/SUN)당 정차 약 1만 행·열차 약 940편으로 작고 거의 안 바뀐다 → 요일유형별로 통째로 한 번만 읽어
 //   메모리(L1, 20분)와 KV(L2, 30분)에 두고, 쌍 조회는 메모리에서 계산한다(수 ms 이하). D1 쿼리 결과와 행 모양·정렬·한도가 같다.
-var LD_TT = {}, LD_TT_P = {}, LD_TT_TTL_MS = 20 * 60 * 1000, LD_TT_KV_MS = 30 * 60 * 1000;
+var LD_TT = {}, LD_TT_P = {}, LD_TT_TTL_MS = 60 * 60 * 1000, LD_TT_KV_MS = 26 * 3600 * 1000;   // ★ 02z(YJ 제안): 시간표는 새벽 cron 이 하루 한 번 통째로 KV 에 저장 → 낮 동안 D1 을 안 읽는다(메모리 1시간, KV 26시간)
 function ldTTBuild(stops, meta) {
   var byStn = {};
   for (var i = 0; i < stops.length; i++) { var r = stops[i]; var nm = r[2]; if (nm == null) continue; (byStn[nm] || (byStn[nm] = [])).push([r[0], r[1], r[3], r[4]]); }
   return { byStn: byStn, meta: meta };
+}
+async function ldTTLoadD1(env, dt) {
+  if (!env || !env.DB) return null;
+  var res = await env.DB.batch([
+    env.DB.prepare("SELECT trn_no, seq, stn_nm, arvl_time, dptre_time FROM train_stops WHERE day_type = ?1").bind(dt),
+    env.DB.prepare("SELECT trn_no, train_grade, dptre_stn_nm, arvl_stn_nm FROM train_trains WHERE day_type = ?1").bind(dt)
+  ]);
+  var sr = (res && res[0] && res[0].results) || [], tr = (res && res[1] && res[1].results) || [];
+  if (!sr.length || !tr.length) return null;
+  var stops = sr.map(function (r) { return [r.trn_no, r.seq, r.stn_nm, r.arvl_time, r.dptre_time]; });
+  var meta = {}; for (var i = 0; i < tr.length; i++) meta[tr[i].trn_no] = [tr[i].train_grade, tr[i].dptre_stn_nm, tr[i].arvl_stn_nm];
+  return { s: stops, m: meta };
+}
+// ★ 02z: 새벽 cron(02~03시, 기존 17~18 UTC 틱)마다 불리는 예열 — 요일유형 3가지를 D1 에서 한 번씩 읽어 KV 에 저장한다.
+//   6시간 안에 이미 했으면 건너뛴다(틱 18번 중 첫 틱만 실제로 읽음). 실패해도 요청 쪽이 필요할 때 스스로 채운다(ldTTGet).
+async function ldTTWarm(env) {
+  if (!env || !env.DB || !env.ROWS_KV) return { skipped: "no-binding" };
+  var mk = null; try { mk = await env.ROWS_KV.get("ldtt:at"); } catch (e) {}
+  if (mk && Date.now() - Number(mk) < 6 * 3600 * 1000) return { skipped: "fresh" };
+  var out = {}, dts = ["WD", "SAT", "SUN"];
+  for (var i = 0; i < dts.length; i++) {
+    try { var ld = await ldTTLoadD1(env, dts[i]); if (!ld) { out[dts[i]] = "empty"; continue; }
+      await env.ROWS_KV.put("ldtt:" + dts[i], JSON.stringify({ at: Date.now(), s: ld.s, m: ld.m }), { expirationTtl: 36 * 3600 });
+      var tt = ldTTBuild(ld.s, ld.m); tt.at = Date.now(); LD_TT[dts[i]] = tt; out[dts[i]] = ld.s.length;
+    } catch (e) { out[dts[i]] = "err " + String((e && e.message) || e).slice(0, 60); }
+  }
+  try { await env.ROWS_KV.put("ldtt:at", String(Date.now()), { expirationTtl: 36 * 3600 }); } catch (e) {}
+  return out;
 }
 async function ldTTGet(env, dt, stat) {
   var hit = LD_TT[dt]; if (hit && Date.now() - hit.at < LD_TT_TTL_MS) { if (stat) stat.ldTT = "mem"; return hit; }
@@ -3108,16 +3136,9 @@ async function ldTTGet(env, dt, stat) {
       } catch (e) {}
     }
     if (!stops) {
-      if (!env || !env.DB) return null;
-      var res = await env.DB.batch([
-        env.DB.prepare("SELECT trn_no, seq, stn_nm, arvl_time, dptre_time FROM train_stops WHERE day_type = ?1").bind(dt),
-        env.DB.prepare("SELECT trn_no, train_grade, dptre_stn_nm, arvl_stn_nm FROM train_trains WHERE day_type = ?1").bind(dt)
-      ]);
-      var sr = (res && res[0] && res[0].results) || [], tr = (res && res[1] && res[1].results) || [];
-      if (!sr.length || !tr.length) return null;
-      stops = sr.map(function (r) { return [r.trn_no, r.seq, r.stn_nm, r.arvl_time, r.dptre_time]; });
-      meta = {}; for (var i = 0; i < tr.length; i++) meta[tr[i].trn_no] = [tr[i].train_grade, tr[i].dptre_stn_nm, tr[i].arvl_stn_nm];
-      if (env.ROWS_KV) { try { env.ROWS_KV.put("ldtt:" + dt, JSON.stringify({ at: Date.now(), s: stops, m: meta }), { expirationTtl: 3600 }).catch(function () {}); } catch (e) {} }
+      var _ld = await ldTTLoadD1(env, dt); if (!_ld) return null;
+      stops = _ld.s; meta = _ld.m;
+      if (env.ROWS_KV) { try { env.ROWS_KV.put("ldtt:" + dt, JSON.stringify({ at: Date.now(), s: stops, m: meta }), { expirationTtl: 36 * 3600 }).catch(function () {}); } catch (e) {} }
     }
     var tt = ldTTBuild(stops, meta); tt.at = kvAt || Date.now(); if (via === "kv") tt.at = Date.now();
     LD_TT[dt] = tt;
@@ -4815,7 +4836,7 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
   return new Response(JSON.stringify({ result: out, busStopsInCorridor: Object.keys(busCoord).length, rtwApplied: _rtwApplied, engVer: ENGINE_VERSION, rtwStat: G.rtwStat || null, liveStat: _liveStat, _src: "route-v2" }), { status: 200, headers: CORS });
 }
 __name(handleRouteV2, "handleRouteV2");
-var route_v2_worker_default = { async scheduled(event, env, ctx) { ctx.waitUntil(kricCron(event, env)); }, async fetch(request, env, ctx) {
+var route_v2_worker_default = { async scheduled(event, env, ctx) { ctx.waitUntil(kricCron(event, env)); ctx.waitUntil(ldTTWarm(env).catch(function () {})); }, async fetch(request, env, ctx) {
   // ★ 2026-09-05: 어떤 예외도 1101 페이지로 새지 않게 한다.
   //   HTML 오류 페이지는 원인을 감추고, 앱쪽에선 'JSON 아님'로만 보인다.
   try {
