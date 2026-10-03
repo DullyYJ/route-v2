@@ -3,6 +3,9 @@ name: Inspect board-writer (read-only)
 # board-writer 워커의 현재 Cloudflare 설정(바인딩 이름·종류, 호환 날짜, 크론)만 읽어 출력한다. 값·시크릿은 출력하지 않는다.
 on:
   workflow_dispatch:
+  push:
+    branches: [ claude/jolly-darwin-dtzab9 ]
+    paths: [ .github/workflows/bw-inspect.yml ]
 
 jobs:
   inspect:
