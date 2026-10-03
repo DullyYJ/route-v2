@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-03bl";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-03bm";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -1463,7 +1463,7 @@ function dijkstra(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
       xf++;
       const s = G.ST[n.slice(2)];
       const toLn = G.LN[l] && G.LN[l].n || l;
-      cur = { mode: "transfer", at: s ? s.n : "", toLine: toLn, sec: edgeW(prev2, n, "sub-xfer") };
+      cur = { mode: "transfer", at: s ? s.n : "", toLine: toLn, sec: edgeW(prev2, n, "sub-xfer"), xferWaitSec: (G.LN[l] && G.LN[l].hw || 300) / 2 };   // ★ 03bm: 환승 시간 안의 배차 대기(=배차간격/2) — 합계는 그대로, 앱이 대기로 나눠 보여 준다
       legs.push(cur);
       cur = null;
     } else if (k === "walk") {
@@ -2315,6 +2315,7 @@ function legsToSubPath(legs, r, o) {
       //   \uC544\uB798 \uD6C4\uCC98\uB9AC(\uC774\uC6C3 \uAD6C\uAC04 \uC774\uB984 \uC774\uC5B4\uBC1B\uAE30)\uAC00 \uCC44\uC6B4\uB2E4.
       const _sp3 = { trafficType: 3, sectionTime: L.min || 0, arriveSec: cum, startSec: cum, endSec: cum + (L.min || 0) * 60, distance: 0, lane: [{ name: _nm }] };
       if (L.mode === "transfer" && L.at) { _sp3.startName = L.at; _sp3.endName = L.at; }
+      if (L.mode === "transfer" && L.xferWaitSec > 0) _sp3.xferWaitSec = Math.min(Math.round(L.xferWaitSec), (L.min || 0) * 60);
       sp.push(_sp3);
       cum += (L.min || 0) * 60;
     }
