@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-03bf";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-03bg";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -106,6 +106,34 @@ function busRowsSort(rows) {
     return a.route_key < b.route_key ? -1 : a.route_key > b.route_key ? 1
       : (a.seq - b.seq) || (a.node_id < b.node_id ? -1 : a.node_id > b.node_id ? 1 : 0);
   });
+}
+// ★ 2026-10-03bg: KV 에 두는 행 모양을 압축한다. 행마다 노선 정보(노선번호·첨두/평일/주말 간격 등 8칸)와 정류장 정보(이름·좌표)가
+//   그대로 반복돼 한 지역 값이 수 MB 였고, 처음 읽을 때(콜드) 그 전송+파싱이 d1Ms 0.3~0.7초의 대부분이었다.
+//   노선·정류장을 한 번씩만 적고 행은 [노선번호표, seq, 정류장번호표] 세 칸으로 줄인다(행 순서·값은 그대로 → 결과 동일).
+//   예전 모양(배열)으로 저장된 값도 계속 읽는다.
+var ROWS_PACK_COLS = ["route_key", "route_type", "route_no", "start_time", "end_time", "itv_wd", "itv_sat", "itv_sun"];
+function rowsPack(rows) {
+  var R = [], N = [], rm = Object.create(null), nm = Object.create(null), d = new Array(rows.length * 3), i, r, ri, ni, nk;
+  for (i = 0; i < rows.length; i++) {
+    r = rows[i];
+    ri = rm[r.route_key];
+    if (ri === void 0) { ri = rm[r.route_key] = R.length; R.push([r.route_key, r.route_type, r.route_no, r.start_time, r.end_time, r.itv_wd, r.itv_sat, r.itv_sun]); }
+    nk = r.node_id + "\u0001" + r.node_nm + "\u0001" + r.lat + "\u0001" + r.lng;
+    ni = nm[nk];
+    if (ni === void 0) { ni = nm[nk] = N.length; N.push([r.node_id, r.node_nm, r.lat, r.lng]); }
+    d[i * 3] = ri; d[i * 3 + 1] = r.seq; d[i * 3 + 2] = ni;
+  }
+  return { v: 2, r: R, n: N, d: d };
+}
+function rowsUnpack(v) {
+  if (Array.isArray(v)) return v;
+  if (!v || v.v !== 2 || !v.r || !v.n || !v.d) return null;
+  var R = v.r, N = v.n, d = v.d, out = new Array(d.length / 3), i, a, b;
+  for (i = 0; i < out.length; i++) {
+    a = R[d[i * 3]]; b = N[d[i * 3 + 2]];
+    out[i] = { route_key: a[0], seq: d[i * 3 + 1], node_id: b[0], node_nm: b[1], lat: b[2], lng: b[3], route_type: a[1], route_no: a[2], start_time: a[3], end_time: a[4], itv_wd: a[5], itv_sat: a[6], itv_sun: a[7] };
+  }
+  return out;
 }
 function rowsCacheGet(k) {
   const v = ROWS_CACHE.get(k);
@@ -5032,7 +5060,7 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
       //   KV 의 엣지 캐시(cacheTtl)를 켜면 같은 지역을 다시 읽을 때 중앙 저장소까지 가지 않는다.
       //   실측: 이 읽기(d1Ms)가 시내 경로 응답 0.6~0.8초 중 약 0.25~0.3초를 차지했다(캐시 미적중 시 0.4~0.9초).
       const v = await env.ROWS_KV.get(_ck, { type: "json", cacheTtl: 21600 });
-      if (v && Array.isArray(v)) _kvHit = v;
+      { const _u = rowsUnpack(v); if (_u && _u.length) _kvHit = _u; }
     } catch (e) { _kvErr = String((e && e.message) || e).slice(0, 120); }
   }
   let _btMissing = null, _btTier = null;
@@ -5100,7 +5128,7 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
     { const _ts = Date.now(); busRowsSort(rows); _d1Diag.sortMs = Date.now() - _ts; }   // ★ 02ak: 결정적 순서(캐시에도 정렬된 채로)
     rowsCacheSet(_ck, rows);
     if (env.ROWS_KV && rows.length) {
-      const _kvPut = env.ROWS_KV.put(_ck, JSON.stringify(rows), { expirationTtl: ROWS_KV_TTL_S })
+      const _kvPut = env.ROWS_KV.put(_ck, JSON.stringify(rowsPack(rows)), { expirationTtl: ROWS_KV_TTL_S })
         .catch(() => {});   // KV 쓰기 실패해도 응답에는 영향 없음(기존 기능 보존)
       if (ctx && ctx.waitUntil) ctx.waitUntil(_kvPut); else await _kvPut;
     }
