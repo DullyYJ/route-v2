@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-03bh";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-03bi";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -1428,7 +1428,7 @@ function dijkstra(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
           const _ee = (adj[prev2] || []).find((x) => x.to === n && x.kind === "xpress");
           if (_ee) { const _xw = xpWait(G, _ee, dist[path[i - 1]]); if (_xw != null) _xe = Math.max(0, _xw - (_ee.bw || XP_BASE_WAIT)); }
         }
-        cur.sec += _dw + _xe;
+        cur.sec += _dw + _xe; if (_xe > 0) cur.xpWait = (cur.xpWait || 0) + _xe;   // ★ 03bi: 앱이 '대기'와 '승차'를 나눠 보여줄 수 있게 급행 대기초를 따로 둔다(값은 그대로)
         cur.secList.push((cur.secList.length ? cur.secList[cur.secList.length - 1] : 0) + _dw + _xe);
       }
     } else if (k === "bus") {
@@ -1527,7 +1527,7 @@ function dijkstra(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
       o.stops = L.stopList.length;
       o.stopList = L.stopList;
       o.coordList = L.coordList;
-      o.secList = L.secList || null; if (L.hasExpress) o.express = true;
+      o.secList = L.secList || null; if (L.hasExpress) o.express = true; if (L.xpWait > 0) o.xpWaitSec = Math.round(L.xpWait);
       if (L.mode === "bus") {
         o.busNo = L.busNo;
         o.waitSec = L.waitSec != null ? L.waitSec : null;
@@ -2255,6 +2255,7 @@ function legsToSubPath(legs, r, o) {
         endX: _s1 ? _s1[1] : null,
         endY: _s1 ? _s1[0] : null,
         passStopList: { stations: _stns },
+        xpWaitSec: L.xpWaitSec > 0 ? L.xpWaitSec : null,
         waitSec: L.mode === "bus" ? (L.waitSec != null ? L.waitSec : null) : null,
         waitReal: L.mode === "bus" ? !!L.waitReal : false,
         waitLive: L.mode === "bus" ? !!L.waitLive : false,
