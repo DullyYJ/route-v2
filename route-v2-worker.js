@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-03bp";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-03bq";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -5177,7 +5177,8 @@ async function xferAnnotate(env, sub) {
       var c = rows.filter(function (r) { return r.stn === stn && r.from_line === fl; });
       if (!c.length) continue;
       var c1 = c.filter(function (r) { return r.to_line === tl; });
-      if (c1.length) c = c1;
+      if (!c1.length) continue;   // 갈아타는 노선(9호선·경의중앙 등)이 자료에 없으면 다른 노선 행을 대신 쓰지 않는다
+      c = c1;
       var c2 = c.filter(function (r) { return nxt && r.to_dir === nxt; });
       if (c2.length) c = c2;
       var fdirs = {};
