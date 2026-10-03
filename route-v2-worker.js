@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-03bk";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-03bl";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -4998,6 +4998,7 @@ var _xferIngesting = false;
 function xfNorm(s) {
   s = String(s == null ? "" : s).replace(/\(.*?\)/g, "").replace(/\s+/g, "").replace(/방면$/, "");
   if (s.length > 1 && /역$/.test(s)) s = s.slice(0, -1);
+  if (s === "\uC774\uC218") s = "\uCD1D\uC2E0\uB300\uC785\uAD6C";   // 이수 = 총신대입구(공공데이터는 옛 이름)
   return s;
 }
 function xfLine(s) {
@@ -5178,14 +5179,21 @@ async function xferAnnotate(env, sub) {
       if (c1.length) c = c1;
       var c2 = c.filter(function (r) { return nxt && r.to_dir === nxt; });
       if (c2.length) c = c2;
-      var c3 = c.filter(function (r) { return !prev || r.from_dir !== prev; });
+      var fdirs = {};
+      c.forEach(function (r) { fdirs[r.from_dir] = 1; });
+      var c3 = c;
+      if (Object.keys(fdirs).length > 1) {
+        // 오는 방향을 모르면(직전 역이 자료의 방면에 없음) 틀린 안내를 하느니 붙이지 않는다
+        if (!prev || !fdirs[prev]) continue;
+        c3 = c.filter(function (r) { return r.from_dir !== prev; });
+      }
       if (c3.length) c = c3;
       c.sort(function (p, q) { return (p.secs == null ? 9e9 : p.secs) - (q.secs == null ? 9e9 : q.secs); });
       var r0 = c[0];
       // 방향이 끝까지 하나로 안 좁혀지면(분기역 등) 틀린 안내를 하느니 안 붙인다
       var uniq = {};
       c.forEach(function (r) { uniq[r.drop_car + "-" + r.drop_door + ">" + r.board_car + "-" + r.board_door] = 1; });
-      if (Object.keys(uniq).length > 1 && !(c2.length && c3.length)) continue;
+      if (Object.keys(uniq).length > 1 && !c2.length) continue;
       w.xfer = { dropCar: r0.drop_car, dropDoor: r0.drop_door, boardCar: r0.board_car, boardDoor: r0.board_door, secs: r0.secs, from: fl, to: tl, src: "seoulmetro" };
     }
     // 도착역 빠른하차 — 마지막 지하철 구간
