@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-03bc";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-03bd";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -1392,8 +1392,16 @@ function dijkstra(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
       cur.to = s.n;
       {
         const _dw = edgeW(prev2, n, k, prev2 === void 0 ? void 0 : dist[path[i - 1]]); if (k === "xpress") cur.hasExpress = true;
-        cur.sec += _dw;
-        cur.secList.push((cur.secList.length ? cur.secList[cur.secList.length - 1] : 0) + _dw);
+        // ★ 2026-10-03: 급행을 기다리는 시간(위 real 합산의 xpWait - 기준대기)을 구간에도 넣는다.
+        //   예전엔 총시간(totalTime)에만 들어가고 구간(타임라인)에는 없어서, 급행이 있는 경로는
+        //   도착 시각(타임라인)이 총시간보다 2~14분 빨랐다(예: 서울→평택 totalTime 100분, 구간합 87분).
+        let _xe = 0;
+        if (k === "xpress" && prev2 !== void 0) {
+          const _ee = (adj[prev2] || []).find((x) => x.to === n && x.kind === "xpress");
+          if (_ee) { const _xw = xpWait(G, _ee, dist[path[i - 1]]); if (_xw != null) _xe = Math.max(0, _xw - (_ee.bw || XP_BASE_WAIT)); }
+        }
+        cur.sec += _dw + _xe;
+        cur.secList.push((cur.secList.length ? cur.secList[cur.secList.length - 1] : 0) + _dw + _xe);
       }
     } else if (k === "bus") {
       const id = n.split("|")[1];
