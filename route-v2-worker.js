@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-03bb";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-03bc";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -1355,11 +1355,8 @@ function dijkstra(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
     if (e) {
       let _ew = e.w, _xw2 = null; if (e.kind === "xpress") { _xw2 = xpWait(G, e, dist[path[i]]); if (_xw2 != null) _ew = XP_LAST_HOP; }
       real += _ew;
-      // ★ 2026-10-03: 버스→버스 환승도 새로 타는 것이므로 그 노선의 대기를 더한다. 예전엔 '버스가 아닌 곳에서
-      //   버스를 탈 때'만 더해서, 버스 환승이 있는 경로는 totalTime 이 구간 시간 합(타임라인 도착)보다 5~12분 짧았다
-      //   (예: 강남→수원 버스 탭 totalTime 52분인데 구간 합 64분·도착 63분). 구간(leg)을 만들 때는 환승마다
-      //   대기를 이미 넣고 있었으므로, 총시간만 빠져 있던 것이다.
-      if (e.kind === "bus" && (pk[path[i]] !== "bus" || pl[path[i]] !== e.line)) real += busWaitAt(G, e.line, stopIdOf(a)); if (_xw2 != null) real += Math.max(0, _xw2 - (e.bw || XP_BASE_WAIT));
+      // (버스→버스 환승 대기는 여기서 더하지 않고, 아래 legs 를 만든 뒤 leg 의 waitSec 로 더한다 — 2026-10-03)
+      if (e.kind === "bus" && pk[path[i]] !== "bus") real += busWaitAt(G, e.line, stopIdOf(a)); if (_xw2 != null) real += Math.max(0, _xw2 - (e.bw || XP_BASE_WAIT));
     }
   }
   if (gmap[dec(best)] !== void 0) real += gmap[dec(best)];
@@ -1402,12 +1399,13 @@ function dijkstra(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
       const id = n.split("|")[1];
       const nm = busNm[id] || id;
       if (!cur || cur.mode !== "bus" || cur.line !== (l || "")) {
-        if (cur && cur.mode === "bus") xf++;          // 같은 정류장 버스→버스 갈아탐
+        let _busXfer = false; if (cur && cur.mode === "bus") { xf++; _busXfer = true; }          // 같은 정류장 버스→버스 갈아탐
         const _sid = stopIdOf(prev2) || stopIdOf(n);
         const _w0 = busWaitAt(G, l, _sid);
         const _wsrc = (G && G.__waitSrc) || "";
         const _wreal = (_wsrc === "\uC2E4\uCE21" || _wsrc === "rtw");
         cur = { mode: "bus", line: l || "", busNo: G.routeNoOf && G.routeNoOf[l] || "", from: nm, stopList: [], coordList: [], secList: [], sec: _w0, waitSec: _w0, waitReal: _wreal, waitSrc: _wsrc, waitUnknown: !_wreal, boardStopId: _sid || null };
+        cur._busXfer = _busXfer;
         if (prev2 && prev2.charCodeAt(0) === 66) {
           const pid = prev2.slice(2);
           cur.from = busNm[pid] || pid;
@@ -1440,6 +1438,11 @@ function dijkstra(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
     } else if (k === "access" && i === 0) {
     }
   }
+  // ★ 2026-10-03: 버스→버스 환승으로 새로 타는 구간의 승차 대기를 총시간에 더한다.
+  //   위 real 합산은 '버스가 아닌 곳에서 버스를 탈 때'만 대기를 더해서, 버스 환승 경로의 totalTime 이
+  //   구간 합(타임라인 도착)보다 4~12분 짧았다(예: 강남→수원 버스 탭 52분 vs 구간합 64분).
+  //   leg 는 환승마다 대기를 이미 넣고 있으므로 그 값을 그대로 더하면 둘이 일치한다.
+  for (const _bl of legs) if (_bl._busXfer) real += (_bl.waitSec || 0);
   real -= applyExpressDiscount(legs); // ★ 2026-09-28d: 경의중앙선 등 급행 구간 보정(위 설명 참조)
   optimizeAlight(legs);          // ★ 하차 정류장을 엔진에서 정한다
   real += extendAlight(legs, G); // ★ 역 정류장이 몇 정거장 뒤에 있으면 거기까지 타고 간다
