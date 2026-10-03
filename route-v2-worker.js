@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-03bn";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-03bo";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -5242,6 +5242,63 @@ async function xferAnnotateAll(env, od, ctx) {
     }
   } catch (e) {}
 }
+// ★ 2026-10-03: 서울교통공사 지하철 알림정보(열차 지연·무정차·사고 공지, 1분 갱신) → 노선별 '지금 유효한 공식 공지'.
+//   각 노선에서 가장 최근 공지가 '재개·정상운행·조치완료' 류가 아니면 아직 진행 중인 것으로 본다. 4시간 넘은 공지는 버린다.
+//   같은 응답을 2분 캐시한다(앱 수가 늘어도 공공 API 호출은 일정하게).
+var NTCE_URL = "https://apis.data.go.kr/B553766/ntce/getNtceList";
+var NTCE_FRESH_MS = 4 * 3600 * 1000;
+function ntceKstYmd(ms) { return new Date(ms + 9 * 3600 * 1000).toISOString().slice(0, 10).replace(/-/g, ""); }
+async function ntceFetch(env) {
+  const keys = xferKeyList(env);
+  if (!keys.length) throw new Error("no key");
+  const since = ntceKstYmd(Date.now() - 24 * 3600 * 1000);
+  let last = "";
+  for (let i = 0; i < keys.length; i++) {
+    try {
+      const res = await fetch(NTCE_URL + "?pageNo=1&numOfRows=100&dataType=JSON&srchStartNoftOcrnYmd=" + since + "&serviceKey=" + encodeURIComponent(keys[i]));
+      const txt = await res.text();
+      const j = JSON.parse(txt);
+      const h = j && j.response && j.response.header;
+      if (!h || String(h.resultCode) !== "00") { last = "hdr " + (h && h.resultCode); continue; }
+      const it = j.response.body && j.response.body.items && j.response.body.items.item;
+      return Array.isArray(it) ? it : (it ? [it] : []);
+    } catch (e) { last = String((e && e.message) || e).slice(0, 80); }
+  }
+  throw new Error("ntce fail " + last);
+}
+function ntceParseMs(s) {
+  const m = String(s || "").match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/);
+  return m ? Date.parse(m[1] + "-" + m[2] + "-" + m[3] + "T" + m[4] + ":" + m[5] + ":" + m[6] + "+09:00") : null;
+}
+var NTCE_RESOLVED_RE = /\uC7AC\uAC1C|\uC815\uC0C1\s?\uC6B4\uD589|\uC815\uC0C1\uD654|\uC870\uCE58\s?\uC644\uB8CC|\uC815\uC0C1\s?\uC6B4\uC601/;   // 재개|정상 운행|정상화|조치 완료|정상 운영
+function ntceActive(items, now) {
+  const by = {};
+  for (const x of items) {
+    const ts = ntceParseMs(x.noftOcrnDt);
+    if (!ts || now - ts > NTCE_FRESH_MS || ts > now + 600000) continue;
+    const lines = String(x.lineNmLst || "").split(",").map((v) => v.trim()).filter(Boolean);
+    for (const ln of lines) { if (!by[ln] || by[ln].ts < ts) by[ln] = { ts, x }; }
+  }
+  const out = {};
+  for (const ln in by) {
+    const x = by[ln].x;
+    const txt = String(x.noftTtl || "") + " " + String(x.noftCn || "");
+    if (x.xcseSitnEndDt || NTCE_RESOLVED_RE.test(String(x.noftTtl || ""))) continue;
+    let body = String(x.noftCn || "").replace(/\r?\n/g, " ").replace(/^\s*\uC11C\uC6B8\uAD50\uD1B5\uACF5\uC0AC\uC5D0\uC11C \uC54C\uB824\uB4DC\uB9BD\uB2C8\uB2E4\.?\s*/, "").replace(/\s+\d{2}-\d{2} \d{2}:\d{2}(:\d{2})?\s*$/, "").trim();
+    out[ln] = { title: String(x.noftTtl || "").slice(0, 80), text: body.slice(0, 160), ts: by[ln].ts, nonstop: x.nonstopYn === "Y", code: x.noftSeCd || null };
+    void txt;
+  }
+  return out;
+}
+async function lineNotices(env, ctx) {
+  const ck = new Request("https://ntce.cache.internal/v1");
+  try { const hit = await caches.default.match(ck); if (hit) return await hit.json(); } catch (e) {}
+  const items = await ntceFetch(env);
+  const now = Date.now();
+  const res = { ok: true, now, lines: ntceActive(items, now), n: items.length };
+  try { await caches.default.put(ck, new Response(JSON.stringify(res), { headers: { "Content-Type": "application/json", "Cache-Control": "public, s-maxage=120" } })); } catch (e) {}
+  return res;
+}
 async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
   const _tReq = Date.now(), _djC0 = DJ_STAT.calls, _djP0 = DJ_STAT.pops;
   const p = url.searchParams;
@@ -5862,6 +5919,17 @@ if (url.pathname === "/bt-verify" || url.pathname === "/bt-fill") { try {
 if (url.pathname === "/ld-pairs-warm") { try { return new Response(JSON.stringify(await ldPairsWarm(env, ctx, url.searchParams.get("mode"), url.searchParams.get("idx"))), { status: 200, headers: CORS_H }); } catch (e) { return new Response(JSON.stringify({ error: String(e && e.message || e).slice(0, 200) }), { status: 500, headers: CORS_H }); } }
 if (url.pathname === "/kric-rederive") { if (!env.DB) return new Response(JSON.stringify({ error: "no db" }), { status: 500, headers: CORS_H }); try { return new Response(JSON.stringify(await kricRederive(env)), { status: 200, headers: CORS_H }); } catch (re) { return new Response(JSON.stringify({ error: String(re && re.message || re).slice(0, 200) }), { status: 500, headers: CORS_H }); } } if (url.pathname === "/kric-status") { if (!env.DB) return new Response(JSON.stringify({ error: "no db" }), { status: 500, headers: CORS_H }); return new Response(JSON.stringify(await kricStatus(env)), { status: 200, headers: CORS_H }); } if ((url.pathname === "/kric-ingest" || url.pathname === "/kric-probe" || url.pathname === "/kric-derive") && (!env.KRIC_ADMIN || request.headers.get("x-kric-admin") !== env.KRIC_ADMIN)) return new Response(JSON.stringify({ error: "locked" }), { status: 403, headers: CORS_H }); if (url.pathname === "/kric-ingest") { globalThis.__kiN = (globalThis.__kiN || 0) + 1; if (globalThis.__kiN > 4000) return new Response(JSON.stringify({ error: "limit" }), { status: 429, headers: CORS_H }); if (!env.KRIC_KEY || !env.DB) return new Response(JSON.stringify({ error: "no key/db" }), { status: 500, headers: CORS_H }); const qo = url.searchParams.get("opr") || "", ql = url.searchParams.get("ln") || "", qs = url.searchParams.get("st") || "", qd = url.searchParams.get("day") || "", qn = url.searchParams.get("nm") || ""; if (!/^[A-Za-z0-9]{1,4}$/.test(qo) || !/^[A-Za-z0-9]{1,4}$/.test(ql) || !/^[A-Za-z0-9-]{1,12}$/.test(qs) || !/^[789]$/.test(qd) || !/^[A-Za-z0-9가-힣() .-]{0,30}$/.test(qn)) return new Response(JSON.stringify({ error: "bad param" }), { status: 400, headers: CORS_H }); await env.DB.prepare("CREATE TABLE IF NOT EXISTS kric_tt (opr TEXT, ln TEXT, st TEXT, day TEXT, nm TEXT, n INTEGER, data TEXT, ts INTEGER, PRIMARY KEY (opr, ln, st, day))").run(); const ex0 = await env.DB.prepare("SELECT n, nm FROM kric_tt WHERE opr=? AND ln=? AND st=? AND day=?").bind(qo, ql, qs, qd).first(); if (ex0) { let upd = false; if (qn && ex0.nm !== qn) { await env.DB.prepare("UPDATE kric_tt SET nm=? WHERE opr=? AND ln=? AND st=? AND day=?").bind(qn, qo, ql, qs, qd).run(); upd = true; } return new Response(JSON.stringify({ ok: true, skipped: true, n: ex0.n, upd: upd }), { status: 200, headers: CORS_H }); } const kr = await fetch("https://openapi.kric.go.kr/openapi/convenientInfo/stationTimetable?serviceKey=" + encodeURIComponent(env.KRIC_KEY) + "&format=json&railOprIsttCd=" + qo + "&lnCd=" + ql + "&stinCd=" + qs + "&dayCd=" + qd); const kt = await kr.text(); let kj = null; try { kj = JSON.parse(kt); } catch (e) { return new Response(JSON.stringify({ error: "nonjson", status: kr.status, head: kt.slice(0, 120) }), { status: 200, headers: CORS_H }); } const kh = kj && kj.header && kj.header.resultCode; if (kh !== "00") return new Response(JSON.stringify({ error: "hdr", code: kh, msg: kj && kj.header && kj.header.resultMsg }), { status: 200, headers: CORS_H }); const kb = Array.isArray(kj.body) ? kj.body : (kj.body ? [kj.body] : []); const kd = kb.map((x) => [x.trnNo, x.arvTm || "", x.dptTm || "", x.orgStinCd || "", x.tmnStinCd || ""].join(",")).join("\n"); await env.DB.prepare("INSERT OR IGNORE INTO kric_tt (opr, ln, st, day, nm, n, data, ts) VALUES (?,?,?,?,?,?,?,?)").bind(qo, ql, qs, qd, qn, kb.length, kd, Date.now()).run(); return new Response(JSON.stringify({ ok: true, n: kb.length, bytes: kd.length }), { status: 200, headers: CORS_H }); } if (url.pathname === "/kric-derive") { globalThis.__kdN = (globalThis.__kdN || 0) + 1; if (globalThis.__kdN > 300) return new Response(JSON.stringify({ error: "limit" }), { status: 429, headers: CORS_H }); if (!env.DB) return new Response(JSON.stringify({ error: "no db" }), { status: 500, headers: CORS_H }); const dl = url.searchParams.get("line") || ""; if (!/^[A-Z0-9]{2,4}$/.test(dl)) return new Response(JSON.stringify({ error: "bad line" }), { status: 400, headers: CORS_H }); try { const dres = await kricDerive(env, SUBWAY_BUNDLE, dl); return new Response(JSON.stringify(dres), { status: 200, headers: CORS_H }); } catch (de) { return new Response(JSON.stringify({ error: String(de && de.message || de).slice(0, 200) }), { status: 500, headers: CORS_H }); } } if (url.pathname === "/kric-probe") { globalThis.__kricN = (globalThis.__kricN || 0) + 1; if (globalThis.__kricN > 400) return new Response(JSON.stringify({ error: "probe limit" }), { status: 429, headers: CORS_H }); if (!env.KRIC_KEY) return new Response(JSON.stringify({ hasKey: false }), { status: 200, headers: CORS_H }); const kq = new URLSearchParams(); for (const [k, v] of url.searchParams) { if (/^(lnCd|railOprIsttCd|stinCd|dayCd|stinNm|svc|op)$/.test(k) && /^[A-Za-z0-9가-힣]{0,20}$/.test(v)) kq.set(k, v); } const ksvc = kq.get("svc") || "convenientInfo"; const kop = kq.get("op") || "stationTimetable"; kq.delete("svc"); kq.delete("op"); kq.set("format", "json"); const kn = Math.min(60000, parseInt(url.searchParams.get("n") || "3000", 10) || 3000); const kres = await fetch("https://openapi.kric.go.kr/openapi/" + ksvc + "/" + kop + "?serviceKey=" + encodeURIComponent(env.KRIC_KEY) + "&" + kq.toString()); const ktxt = await kres.text(); return new Response(JSON.stringify({ hasKey: true, status: kres.status, len: ktxt.length, head: ktxt.slice(parseInt(url.searchParams.get("off") || "0", 10) || 0, (parseInt(url.searchParams.get("off") || "0", 10) || 0) + kn) }, null, 1), { status: 200, headers: CORS_H }); }
 // ★ 2026-10-03: 서울교통공사 빠른하차(getFstExit)·환승정보(odcloud 15098252) 키·응답 확인용. 키는 응답에 싣지 않는다.
+if (url.pathname === "/line-notices") {
+    try {
+      const r = await lineNotices(env, ctx);
+      const want = String(url.searchParams.get("lines") || "").split(",").map((v) => v.trim()).filter(Boolean).slice(0, 8);
+      const lines = {};
+      for (const k in r.lines) if (!want.length || want.indexOf(k) >= 0) lines[k] = r.lines[k];
+      return new Response(JSON.stringify({ ok: true, now: r.now, lines }), { status: 200, headers: Object.assign({}, CORS_H, { "Cache-Control": "public, max-age=60" }) });
+    } catch (e) {
+      return new Response(JSON.stringify({ ok: false, error: String((e && e.message) || e).slice(0, 120) }), { status: 200, headers: CORS_H });
+    }
+  }
 if (url.pathname === "/xfer-status") {
     if (!env.DB) return new Response(JSON.stringify({ error: "no db" }), { status: 500, headers: CORS_H });
     await xferTables(env);
