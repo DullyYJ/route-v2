@@ -81,6 +81,27 @@ function rideClean(b) {
   const av = String(b.av || "").slice(0, 16).replace(/[^0-9A-Za-z._\-]/g, "");
   return { pred: Math.round(pred * 10) / 10, act: Math.round(act * 10) / 10, xf: Math.round(xf), hr: Math.round(hr), wk, lines, mode, av };
 }
+async function rideHandle(req, env, cors) {
+  let body = {};
+  try { body = await req.json(); } catch (e) {}
+  const c = rideClean(body || {});
+  if (!c) return new Response(JSON.stringify({ ok: false, error: "invalid" }), { status: 400, headers: cors });
+  try {
+    await ensureRideLog(env);
+    if (!await rideAllowed(req, env)) return new Response(JSON.stringify({ ok: false, error: "rate limited" }), { status: 429, headers: cors });
+    const day = Math.floor(Date.now() / 864e5);
+    await env.DB.prepare("INSERT INTO ride_log (day, pred, act, xf, lines, hr, wk, mode, av) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)").bind(day, c.pred, c.act, c.xf, c.lines, c.hr, c.wk, c.mode, c.av).run();
+    if (Math.random() < 0.02) {   // 가끔 오래된 기록·제한표 정리(1년 / 24시간)
+      try {
+        await env.DB.prepare("DELETE FROM ride_log WHERE day < ?1").bind(day - RIDE_KEEP_DAYS).run();
+        await env.DB.prepare("DELETE FROM react_rl WHERE hr < ?1").bind(Math.floor(Date.now() / 36e5) - 24).run();
+      } catch (e) {}
+    }
+    return new Response(JSON.stringify({ ok: true }), { headers: cors });
+  } catch (e) {
+    return new Response(JSON.stringify({ ok: false, error: e.message }), { status: 500, headers: cors });
+  }
+}
 var _lrReady = false;
 async function ensureLineRoom(env) {
   if (_lrReady) return;
@@ -1451,7 +1472,7 @@ __name(getCols, "getCols");
 var worker_default = {
   // 크론 (20분마다)
   async scheduled(event, env, ctx) {
-    ctx.waitUntil((async () => { try { await ensureLineRoom(env); await env.DB.prepare("DELETE FROM line_msgs WHERE ts < ?1").bind(Date.now() - 14 * 24 * 3600 * 1000).run(); await env.DB.prepare("DELETE FROM line_reports WHERE ts < ?1").bind(Date.now() - 14 * 24 * 3600 * 1000).run(); } catch (e) {} try { await ensureRideLog(env); await env.DB.prepare("DELETE FROM ride_log WHERE day < ?1").bind(Math.floor(Date.now() / 864e5) - RIDE_KEEP_DAYS).run(); await env.DB.prepare("DELETE FROM react_rl WHERE hr < ?1").bind(Math.floor(Date.now() / 36e5) - 24).run(); } catch (e) {} })());
+    ctx.waitUntil((async () => { try { await ensureLineRoom(env); await env.DB.prepare("DELETE FROM line_msgs WHERE ts < ?1").bind(Date.now() - 14 * 24 * 3600 * 1000).run(); await env.DB.prepare("DELETE FROM line_reports WHERE ts < ?1").bind(Date.now() - 14 * 24 * 3600 * 1000).run(); } catch (e) {} })());
     ctx.waitUntil(Promise.all([
       generatePosts(env).then((r) => console.log("[board-writer][posts]", JSON.stringify(r))),
       generateTalks(env).then((r) => console.log("[board-writer][talks]", JSON.stringify(r))),
@@ -1677,20 +1698,7 @@ var worker_default = {
         return new Response(JSON.stringify({ ok: false, error: e.message }), { status: 500, headers: cors });
       }
     }
-    if (url.pathname === "/ridelog" && req.method === "POST") {
-      let body = {};
-      try { body = await req.json(); } catch (e) {}
-      const c = rideClean(body || {});
-      if (!c) return new Response(JSON.stringify({ ok: false, error: "invalid" }), { status: 400, headers: cors });
-      try {
-        await ensureRideLog(env);
-        if (!await rideAllowed(req, env)) return new Response(JSON.stringify({ ok: false, error: "rate limited" }), { status: 429, headers: cors });
-        await env.DB.prepare("INSERT INTO ride_log (day, pred, act, xf, lines, hr, wk, mode, av) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)").bind(Math.floor(Date.now() / 864e5), c.pred, c.act, c.xf, c.lines, c.hr, c.wk, c.mode, c.av).run();
-        return new Response(JSON.stringify({ ok: true }), { headers: cors });
-      } catch (e) {
-        return new Response(JSON.stringify({ ok: false, error: e.message }), { status: 500, headers: cors });
-      }
-    }
+    if (url.pathname === "/ridelog" && req.method === "POST") return rideHandle(req, env, cors);
     if (url.pathname === "/lreport" && req.method === "POST") {
       let body = {};
       try { body = await req.json(); } catch (e) {}
