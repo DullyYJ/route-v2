@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-03bj";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-03bk";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -4982,6 +4982,257 @@ async function applyLiveWaits(out, stat, env, deadline) {
 }
 __name(applyLiveWaits, "applyLiveWaits");
 
+// ══════════════════════════════════════════════════════════════════════
+// ★ 2026-10-03 (개선안 2): 환승 시 '몇 호차 몇 번째 문' 안내 + 도착역 빠른하차 위치
+//   · 환승: 서울교통공사 도시철도 환승정보(공공데이터 15098252, odcloud) — 하차 호차-문 → 환승 승차 호차-문, 소요시간
+//   · 하차: 서울교통공사 빠른하차정보(B553766/inout/getFstExit) — 계단·엘리베이터·에스컬레이터에 가까운 호차-문
+//   두 자료 모두 서울교통공사 구간만 있어서, 없는 환승역(코레일·9호선 등)은 그냥 안내를 붙이지 않는다.
+//   D1(xfer_pos, fst_exit)에 한 달에 한 번 적재하고 응답을 만들 때 subPath 에 xfer / exitFast 를 덧붙인다(기존 필드 불변).
+// ══════════════════════════════════════════════════════════════════════
+var XFER_URL = "https://api.odcloud.kr/api/15098252/v1/uddi:b77326ab-5f86-48a1-bd0f-c72a1fd87e21";
+var EXIT_URL = "https://apis.data.go.kr/B553766/inout/getFstExit";
+var XFER_TTL_MS = 35 * 24 * 3600 * 1000;
+var _xferMem = null;      // { t, rows }
+var _exitMem = {};        // stn -> { t, rows }
+var _xferIngesting = false;
+function xfNorm(s) {
+  s = String(s == null ? "" : s).replace(/\(.*?\)/g, "").replace(/\s+/g, "").replace(/방면$/, "");
+  if (s.length > 1 && /역$/.test(s)) s = s.slice(0, -1);
+  return s;
+}
+function xfLine(s) {
+  s = String(s == null ? "" : s);
+  var m = s.match(/(\d+)\s*호선/);
+  if (m) return m[1];
+  if (/^\d+$/.test(s.trim())) return s.trim();
+  return s.replace(/\s+/g, "").replace(/선$/, "");
+}
+function xfCodeLine(code) {
+  var c = String(code || "").slice(0, 2);
+  var M = { "01": "1", "02": "2", "03": "3", "04": "4", "25": "5", "26": "6", "27": "7", "28": "8" };
+  return M[c] || "";
+}
+function xferKeyList(env) {
+  var keys = [];
+  var c = [env.DATA_GO_KR_KEY, env.TAGO_KEY, env.TAGO_KEY2, env.XFER_KEY, env.XFER_KEY2];
+  for (var i = 0; i < c.length; i++) { if (c[i] && keys.indexOf(c[i]) < 0) keys.push(c[i]); }
+  return keys;
+}
+async function xferTables(env) {
+  await env.DB.prepare("CREATE TABLE IF NOT EXISTS xfer_pos (id INTEGER PRIMARY KEY, stn TEXT, from_line TEXT, from_dir TEXT, drop_car TEXT, drop_door TEXT, to_code TEXT, to_line TEXT, to_dir TEXT, board_car TEXT, board_door TEXT, secs INTEGER)").run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS xfer_pos_stn ON xfer_pos (stn)").run();
+  await env.DB.prepare("CREATE TABLE IF NOT EXISTS fst_exit (id TEXT PRIMARY KEY, line TEXT, stn TEXT, drtn TEXT, door TEXT, fac TEXT, fwk TEXT, facpos TEXT, updown TEXT)").run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS fst_exit_stn ON fst_exit (stn)").run();
+  await env.DB.prepare("CREATE TABLE IF NOT EXISTS xfer_meta (k TEXT PRIMARY KEY, v TEXT)").run();
+}
+async function xferMetaGet(env, k) {
+  var r = await env.DB.prepare("SELECT v FROM xfer_meta WHERE k=?").bind(k).first();
+  return r ? r.v : null;
+}
+async function xferMetaSet(env, k, v) {
+  await env.DB.prepare("INSERT INTO xfer_meta (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v").bind(k, String(v)).run();
+}
+function xfSecs(t) {
+  var m = String(t || "").match(/^(\d+):(\d+)/);
+  return m ? (parseInt(m[1], 10) * 60 + parseInt(m[2], 10)) : null;
+}
+async function xferFetchAll(env, kind) {
+  var keys = xferKeyList(env);
+  if (!keys.length) throw new Error("no key");
+  var all = [];
+  var lastErr = "";
+  for (var ki = 0; ki < keys.length; ki++) {
+    all = [];
+    try {
+      var page = 1, total = null, ok = true;
+      while (ok) {
+        var u = kind === "xfer"
+          ? XFER_URL + "?page=" + page + "&perPage=1000&returnType=JSON&serviceKey=" + encodeURIComponent(keys[ki])
+          : EXIT_URL + "?pageNo=" + page + "&numOfRows=1000&dataType=JSON&serviceKey=" + encodeURIComponent(keys[ki]);
+        var res = await fetch(u);
+        var txt = await res.text();
+        var j = null;
+        try { j = JSON.parse(txt); } catch (e) { lastErr = "nonjson " + res.status + " " + txt.slice(0, 80); ok = false; break; }
+        var items;
+        if (kind === "xfer") {
+          if (!j || !Array.isArray(j.data)) { lastErr = "bad xfer " + txt.slice(0, 80); ok = false; break; }
+          items = j.data; total = j.totalCount;
+        } else {
+          var h = j && j.response && j.response.header;
+          if (!h || String(h.resultCode) !== "00") { lastErr = "hdr " + (h && h.resultCode) + " " + (h && h.resultMsg); ok = false; break; }
+          var b = j.response.body || {};
+          var it = b.items && b.items.item;
+          items = Array.isArray(it) ? it : (it ? [it] : []);
+          total = parseInt(b.totalCount, 10);
+        }
+        for (var q = 0; q < items.length; q++) all.push(items[q]);
+        if (!items.length || (total != null && all.length >= total) || page >= 12) break;
+        page++;
+      }
+      if (ok && all.length) return all;
+    } catch (e) { lastErr = String((e && e.message) || e).slice(0, 100); }
+  }
+  throw new Error("fetch fail: " + lastErr);
+}
+async function xferIngest(env) {
+  await xferTables(env);
+  var out = {};
+  // 환승정보
+  var xr = await xferFetchAll(env, "xfer");
+  var st = [];
+  for (var i = 0; i < xr.length; i++) {
+    var x = xr[i];
+    var code = String(x["환승종료역"] || "");
+    st.push(env.DB.prepare("INSERT OR REPLACE INTO xfer_pos (id, stn, from_line, from_dir, drop_car, drop_door, to_code, to_line, to_dir, board_car, board_door, secs) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")
+      .bind(parseInt(x["고유번호"], 10) || i + 1, xfNorm(x["환승시작역"]), xfLine(x["환승시작 호선"]), xfNorm(x["하차 열차 방면"]), String(x["하차위치(호차)"] || ""), String(x["하차위치(문)"] || ""),
+            code, xfCodeLine(code), xfNorm(x["환승 열차 방면"]), String(x["환승 승차위치(호차)"] || ""), String(x["환승 승차위치(문)"] || ""), xfSecs(x["소요시간"])));
+  }
+  if (xr.length >= 500) {   // 너무 적게 받았으면 기존 자료를 지우지 않는다
+    await env.DB.prepare("DELETE FROM xfer_pos").run();
+    for (var a = 0; a < st.length; a += 80) await env.DB.batch(st.slice(a, a + 80));
+  }
+  out.xfer = xr.length;
+  // 빠른하차
+  var er = await xferFetchAll(env, "exit");
+  var st2 = [];
+  for (var k = 0; k < er.length; k++) {
+    var e = er[k];
+    st2.push(env.DB.prepare("INSERT OR REPLACE INTO fst_exit (id, line, stn, drtn, door, fac, fwk, facpos, updown) VALUES (?,?,?,?,?,?,?,?,?)")
+      .bind(String(e.qckgffMngNo || (e.stnCd + "-" + k)), xfLine(e.lineNm), xfNorm(e.stnNm), xfNorm(e.drtnInfo), String(e.qckgffVhclDoorNo || ""), String(e.plfmCmgFac || ""), String(e.fwkPstnNm || ""), String(e.facPstnNm || ""), String(e.upbdnbSe || "")));
+  }
+  if (er.length >= 500) {
+    await env.DB.prepare("DELETE FROM fst_exit").run();
+    for (var b2 = 0; b2 < st2.length; b2 += 80) await env.DB.batch(st2.slice(b2, b2 + 80));
+  }
+  out.exit = er.length;
+  await xferMetaSet(env, "last_ok", Date.now());
+  _xferMem = null; _exitMem = {};
+  return out;
+}
+// 오래됐거나 없으면 백그라운드로 적재(동시 중복 방지)
+async function xferEnsure(env, ctx) {
+  try {
+    if (!env || !env.DB || _xferIngesting) return;
+    var last = parseInt(await xferMetaGet(env, "last_ok").catch(function () { return null; }), 10) || 0;
+    if (last && Date.now() - last < XFER_TTL_MS) return;
+    var tried = parseInt(await xferMetaGet(env, "last_try").catch(function () { return null; }), 10) || 0;
+    if (tried && Date.now() - tried < 3600 * 1000) return;   // 실패해도 1시간에 한 번만
+    _xferIngesting = true;
+    var job = (async function () {
+      try {
+        await xferTables(env);
+        await xferMetaSet(env, "last_try", Date.now());
+        var r = await xferIngest(env);
+        await xferMetaSet(env, "last_res", JSON.stringify(r));
+      } catch (e) {
+        try { await xferMetaSet(env, "last_err", String((e && e.message) || e).slice(0, 200)); } catch (e2) {}
+      } finally { _xferIngesting = false; }
+    })();
+    if (ctx && ctx.waitUntil) ctx.waitUntil(job);
+  } catch (e) { _xferIngesting = false; }
+}
+async function xferRows(env) {
+  if (_xferMem && Date.now() - _xferMem.t < 3600 * 1000) return _xferMem.rows;
+  var r = await env.DB.prepare("SELECT stn, from_line, from_dir, drop_car, drop_door, to_line, to_dir, board_car, board_door, secs FROM xfer_pos").all();
+  var rows = (r && r.results) || [];
+  if (rows.length) _xferMem = { t: Date.now(), rows: rows };
+  return rows;
+}
+async function exitRows(env, stn) {
+  var m = _exitMem[stn];
+  if (m && Date.now() - m.t < 3600 * 1000) return m.rows;
+  var r = await env.DB.prepare("SELECT line, drtn, door, fac, fwk, facpos, updown FROM fst_exit WHERE stn=?").bind(stn).all();
+  var rows = (r && r.results) || [];
+  _exitMem[stn] = { t: Date.now(), rows: rows };
+  return rows;
+}
+function xfStops(sp) {
+  var s = sp && sp.passStopList && sp.passStopList.stations;
+  return (s || []).filter(function (x) { return x && !x.pass; }).map(function (x) { return xfNorm(x.stationName); });
+}
+function xfLaneName(sp) { return sp && sp.lane && sp.lane[0] ? String(sp.lane[0].name || "") : ""; }
+// subPath 배열을 제자리에서 보강한다. 어떤 오류도 응답을 막지 않는다.
+async function xferAnnotate(env, sub) {
+  try {
+    if (!env || !env.DB || !Array.isArray(sub)) return;
+    var hasSub = false;
+    for (var z = 0; z < sub.length; z++) if (sub[z].trafficType === 1) hasSub = true;
+    if (!hasSub) return;
+    var rows = null;
+    // 환승
+    for (var i = 1; i < sub.length - 1; i++) {
+      var w = sub[i];
+      if (w.trafficType !== 3 || xfLaneName(w) !== "환승") continue;   // '환승'
+      var A = sub[i - 1], B = sub[i + 1];
+      if (!A || !B || A.trafficType !== 1 || B.trafficType !== 1) continue;
+      if (!rows) rows = await xferRows(env);
+      if (!rows.length) return;
+      var stn = xfNorm(w.startName || A.endName);
+      var fl = xfLine(xfLaneName(A)), tl = xfLine(xfLaneName(B));
+      var sa = xfStops(A), sb = xfStops(B);
+      var prev = sa.length >= 2 ? sa[sa.length - 2] : "";
+      var nxt = sb.length >= 2 ? sb[1] : "";
+      var c = rows.filter(function (r) { return r.stn === stn && r.from_line === fl; });
+      if (!c.length) continue;
+      var c1 = c.filter(function (r) { return r.to_line === tl; });
+      if (c1.length) c = c1;
+      var c2 = c.filter(function (r) { return nxt && r.to_dir === nxt; });
+      if (c2.length) c = c2;
+      var c3 = c.filter(function (r) { return !prev || r.from_dir !== prev; });
+      if (c3.length) c = c3;
+      c.sort(function (p, q) { return (p.secs == null ? 9e9 : p.secs) - (q.secs == null ? 9e9 : q.secs); });
+      var r0 = c[0];
+      // 방향이 끝까지 하나로 안 좁혀지면(분기역 등) 틀린 안내를 하느니 안 붙인다
+      var uniq = {};
+      c.forEach(function (r) { uniq[r.drop_car + "-" + r.drop_door + ">" + r.board_car + "-" + r.board_door] = 1; });
+      if (Object.keys(uniq).length > 1 && !(c2.length && c3.length)) continue;
+      w.xfer = { dropCar: r0.drop_car, dropDoor: r0.drop_door, boardCar: r0.board_car, boardDoor: r0.board_door, secs: r0.secs, from: fl, to: tl, src: "seoulmetro" };
+    }
+    // 도착역 빠른하차 — 마지막 지하철 구간
+    var last = -1;
+    for (var j = sub.length - 1; j >= 0; j--) { if (sub[j].trafficType === 1) { last = j; break; } }
+    if (last >= 0) {
+      var L = sub[last];
+      var ls = xfStops(L);
+      var st = xfNorm(L.endName);
+      var ln = xfLine(xfLaneName(L));
+      var pv = ls.length >= 2 ? ls[ls.length - 2] : "";
+      var er = await exitRows(env, st);
+      var e1 = er.filter(function (r) { return r.line === ln; });
+      var e2 = e1.filter(function (r) { return pv && r.drtn !== pv; });
+      if (e2.length) e1 = e2;
+      if (e1.length) {
+        // 방향이 둘로 갈리면(순환·분기) 정직하게 포기
+        var dirs = {};
+        e1.forEach(function (r) { dirs[r.drtn] = 1; });
+        if (Object.keys(dirs).length <= 1) {
+          var seen = {}, outl = [];
+          var order = { "엘리베이터": 0, "에스컬레이터": 1, "계단": 2 };
+          e1.sort(function (p, q) { return (order[p.fac] != null ? order[p.fac] : 9) - (order[q.fac] != null ? order[q.fac] : 9); });
+          for (var m = 0; m < e1.length && outl.length < 3; m++) {
+            var r2 = e1[m];
+            if (seen[r2.fac]) continue;
+            seen[r2.fac] = 1;
+            outl.push({ door: r2.door, fac: r2.fac, at: r2.fwk || null });
+          }
+          if (outl.length) L.exitFast = outl;
+        }
+      }
+    }
+  } catch (e) { /* 보강은 덤 — 실패해도 길찾기는 그대로 */ }
+}
+async function xferAnnotateAll(env, od, ctx) {
+  try {
+    if (!env || !env.DB) return;
+    xferEnsure(env, ctx);   // 기다리지 않는다
+    var ps = od && od.result && od.result.path;
+    if (!Array.isArray(ps)) return;
+    var done = [];
+    for (var i = 0; i < ps.length; i++) {
+      if (ps[i] && Array.isArray(ps[i].subPath) && done.indexOf(ps[i].subPath) < 0) { done.push(ps[i].subPath); await xferAnnotate(env, ps[i].subPath); }
+    }
+  } catch (e) {}
+}
 async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
   const _tReq = Date.now(), _djC0 = DJ_STAT.calls, _djP0 = DJ_STAT.pops;
   const p = url.searchParams;
@@ -5408,6 +5659,7 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
 
   if (p.get("format") === "app" || url.pathname === "/route-v2-app") {
     const _od = buildAppResponse(out, { sx: SX, sy: SY, ex: EX, ey: EY, sn: p.get("SN"), en: p.get("EN") });
+    await xferAnnotateAll(env, _od, ctx);
     _od.rtwApplied = _rtwApplied;
     _od.engVer = ENGINE_VERSION;
     _od.rtwStat = G.rtwStat || null;
@@ -5601,6 +5853,15 @@ if (url.pathname === "/bt-verify" || url.pathname === "/bt-fill") { try {
 if (url.pathname === "/ld-pairs-warm") { try { return new Response(JSON.stringify(await ldPairsWarm(env, ctx, url.searchParams.get("mode"), url.searchParams.get("idx"))), { status: 200, headers: CORS_H }); } catch (e) { return new Response(JSON.stringify({ error: String(e && e.message || e).slice(0, 200) }), { status: 500, headers: CORS_H }); } }
 if (url.pathname === "/kric-rederive") { if (!env.DB) return new Response(JSON.stringify({ error: "no db" }), { status: 500, headers: CORS_H }); try { return new Response(JSON.stringify(await kricRederive(env)), { status: 200, headers: CORS_H }); } catch (re) { return new Response(JSON.stringify({ error: String(re && re.message || re).slice(0, 200) }), { status: 500, headers: CORS_H }); } } if (url.pathname === "/kric-status") { if (!env.DB) return new Response(JSON.stringify({ error: "no db" }), { status: 500, headers: CORS_H }); return new Response(JSON.stringify(await kricStatus(env)), { status: 200, headers: CORS_H }); } if ((url.pathname === "/kric-ingest" || url.pathname === "/kric-probe" || url.pathname === "/kric-derive") && (!env.KRIC_ADMIN || request.headers.get("x-kric-admin") !== env.KRIC_ADMIN)) return new Response(JSON.stringify({ error: "locked" }), { status: 403, headers: CORS_H }); if (url.pathname === "/kric-ingest") { globalThis.__kiN = (globalThis.__kiN || 0) + 1; if (globalThis.__kiN > 4000) return new Response(JSON.stringify({ error: "limit" }), { status: 429, headers: CORS_H }); if (!env.KRIC_KEY || !env.DB) return new Response(JSON.stringify({ error: "no key/db" }), { status: 500, headers: CORS_H }); const qo = url.searchParams.get("opr") || "", ql = url.searchParams.get("ln") || "", qs = url.searchParams.get("st") || "", qd = url.searchParams.get("day") || "", qn = url.searchParams.get("nm") || ""; if (!/^[A-Za-z0-9]{1,4}$/.test(qo) || !/^[A-Za-z0-9]{1,4}$/.test(ql) || !/^[A-Za-z0-9-]{1,12}$/.test(qs) || !/^[789]$/.test(qd) || !/^[A-Za-z0-9가-힣() .-]{0,30}$/.test(qn)) return new Response(JSON.stringify({ error: "bad param" }), { status: 400, headers: CORS_H }); await env.DB.prepare("CREATE TABLE IF NOT EXISTS kric_tt (opr TEXT, ln TEXT, st TEXT, day TEXT, nm TEXT, n INTEGER, data TEXT, ts INTEGER, PRIMARY KEY (opr, ln, st, day))").run(); const ex0 = await env.DB.prepare("SELECT n, nm FROM kric_tt WHERE opr=? AND ln=? AND st=? AND day=?").bind(qo, ql, qs, qd).first(); if (ex0) { let upd = false; if (qn && ex0.nm !== qn) { await env.DB.prepare("UPDATE kric_tt SET nm=? WHERE opr=? AND ln=? AND st=? AND day=?").bind(qn, qo, ql, qs, qd).run(); upd = true; } return new Response(JSON.stringify({ ok: true, skipped: true, n: ex0.n, upd: upd }), { status: 200, headers: CORS_H }); } const kr = await fetch("https://openapi.kric.go.kr/openapi/convenientInfo/stationTimetable?serviceKey=" + encodeURIComponent(env.KRIC_KEY) + "&format=json&railOprIsttCd=" + qo + "&lnCd=" + ql + "&stinCd=" + qs + "&dayCd=" + qd); const kt = await kr.text(); let kj = null; try { kj = JSON.parse(kt); } catch (e) { return new Response(JSON.stringify({ error: "nonjson", status: kr.status, head: kt.slice(0, 120) }), { status: 200, headers: CORS_H }); } const kh = kj && kj.header && kj.header.resultCode; if (kh !== "00") return new Response(JSON.stringify({ error: "hdr", code: kh, msg: kj && kj.header && kj.header.resultMsg }), { status: 200, headers: CORS_H }); const kb = Array.isArray(kj.body) ? kj.body : (kj.body ? [kj.body] : []); const kd = kb.map((x) => [x.trnNo, x.arvTm || "", x.dptTm || "", x.orgStinCd || "", x.tmnStinCd || ""].join(",")).join("\n"); await env.DB.prepare("INSERT OR IGNORE INTO kric_tt (opr, ln, st, day, nm, n, data, ts) VALUES (?,?,?,?,?,?,?,?)").bind(qo, ql, qs, qd, qn, kb.length, kd, Date.now()).run(); return new Response(JSON.stringify({ ok: true, n: kb.length, bytes: kd.length }), { status: 200, headers: CORS_H }); } if (url.pathname === "/kric-derive") { globalThis.__kdN = (globalThis.__kdN || 0) + 1; if (globalThis.__kdN > 300) return new Response(JSON.stringify({ error: "limit" }), { status: 429, headers: CORS_H }); if (!env.DB) return new Response(JSON.stringify({ error: "no db" }), { status: 500, headers: CORS_H }); const dl = url.searchParams.get("line") || ""; if (!/^[A-Z0-9]{2,4}$/.test(dl)) return new Response(JSON.stringify({ error: "bad line" }), { status: 400, headers: CORS_H }); try { const dres = await kricDerive(env, SUBWAY_BUNDLE, dl); return new Response(JSON.stringify(dres), { status: 200, headers: CORS_H }); } catch (de) { return new Response(JSON.stringify({ error: String(de && de.message || de).slice(0, 200) }), { status: 500, headers: CORS_H }); } } if (url.pathname === "/kric-probe") { globalThis.__kricN = (globalThis.__kricN || 0) + 1; if (globalThis.__kricN > 400) return new Response(JSON.stringify({ error: "probe limit" }), { status: 429, headers: CORS_H }); if (!env.KRIC_KEY) return new Response(JSON.stringify({ hasKey: false }), { status: 200, headers: CORS_H }); const kq = new URLSearchParams(); for (const [k, v] of url.searchParams) { if (/^(lnCd|railOprIsttCd|stinCd|dayCd|stinNm|svc|op)$/.test(k) && /^[A-Za-z0-9가-힣]{0,20}$/.test(v)) kq.set(k, v); } const ksvc = kq.get("svc") || "convenientInfo"; const kop = kq.get("op") || "stationTimetable"; kq.delete("svc"); kq.delete("op"); kq.set("format", "json"); const kn = Math.min(60000, parseInt(url.searchParams.get("n") || "3000", 10) || 3000); const kres = await fetch("https://openapi.kric.go.kr/openapi/" + ksvc + "/" + kop + "?serviceKey=" + encodeURIComponent(env.KRIC_KEY) + "&" + kq.toString()); const ktxt = await kres.text(); return new Response(JSON.stringify({ hasKey: true, status: kres.status, len: ktxt.length, head: ktxt.slice(parseInt(url.searchParams.get("off") || "0", 10) || 0, (parseInt(url.searchParams.get("off") || "0", 10) || 0) + kn) }, null, 1), { status: 200, headers: CORS_H }); }
 // ★ 2026-10-03: 서울교통공사 빠른하차(getFstExit)·환승정보(odcloud 15098252) 키·응답 확인용. 키는 응답에 싣지 않는다.
+if (url.pathname === "/xfer-status") {
+    if (!env.DB) return new Response(JSON.stringify({ error: "no db" }), { status: 500, headers: CORS_H });
+    await xferTables(env);
+    const q = async (sql) => { try { const r = await env.DB.prepare(sql).first(); return r ? r.n : null; } catch (e) { return String(e.message || e).slice(0, 80); } };
+    const meta = {};
+    try { const r = await env.DB.prepare("SELECT k, v FROM xfer_meta").all(); for (const x of (r.results || [])) meta[x.k] = x.v; } catch (e) {}
+    if (url.searchParams.get("go") === "1" && (!parseInt(meta.last_try, 10) || Date.now() - parseInt(meta.last_try, 10) > 600000)) { try { await xferMetaSet(env, "last_try", Date.now()); meta.ingest = await xferIngest(env); } catch (e) { meta.ingestErr = String((e && e.message) || e).slice(0, 200); } }
+    return new Response(JSON.stringify({ xfer: await q("SELECT COUNT(*) n FROM xfer_pos"), exit: await q("SELECT COUNT(*) n FROM fst_exit"), meta }), { status: 200, headers: CORS_H });
+  }
 if (url.pathname === "/xfer-probe") {
     const keys = [];
     for (const k of [env.DATA_GO_KR_KEY, env.TAGO_KEY, env.TAGO_KEY2, env.XFER_KEY, env.XFER_KEY2]) { if (k && keys.indexOf(k) < 0) keys.push(k); }
