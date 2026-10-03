@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-03br";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-03bs";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -2416,7 +2416,12 @@ function buildAppResponse(result, o) {
   add(result.subway, 1, "sub");
   add(result.bus, 2, "bus");
   add(result.direct, 2, "direct");   // 한 번에 가는 직행 - 버스 탭 후보이자 최소환승 탭의 0환승 후보
-  add(result.longDistance, 4, "longdist");   // ★ 2026-09-22 열차·고속버스·시외버스(80km 이상일 때만)
+  // ★ 03bs (YJ: "장거리는 일반 지하철·버스로 못 가는 경로 기준으로 보여줘"): 시내 경로가 하나라도 있으면 따로 '장거리' 탭을 두지 않는다.
+  //   장거리가 확실히 빠르면 위에서 최단시간(·최소환승) 탭에 이미 올라가 있고, 느리면(예: 밤이라 다음날 첫차 기다림, 의정부행 KTX-이음 497분) 보여줄 이유가 없다.
+  //   시내 경로가 아예 없을 때(서울→부산 등)와, 사용자가 장거리 등급·편을 직접 골라 다시 요청한 경우(ldPick)는 예전처럼 장거리 탭을 낸다.
+  let _regular = false;
+  try { for (const _r of [result.minTime, result.minTransfer, result.minWalk, result.subway, result.bus, result.direct]) if (_r && typeof _r.totalMin === "number") _regular = true; } catch (e) {}
+  if (!_regular || (o && o.ldPick)) add(result.longDistance, 4, "longdist");   // ★ 2026-09-22 열차·고속버스·시외버스(30km 이상 열차, 80km 이상 버스)
   // \u2605 2026-09-05: \uBC84\uC2A4 \uD0ED\uC740 \uBC84\uC2A4\uB9CC \uD0C0\uB294 \uACBD\uB85C\uB9CC \uBCF4\uC5EC\uC57C \uD55C\uB2E4.
   //   \uC5C6\uC73C\uBA74 \uC5C6\uB2E4\uACE0 \uB9D0\uD574\uC57C \uC571\uC774 \uB2E4\uB978 \uACBD\uB85C\uB85C \uBA54\uAFB8\uC9C0 \uC54A\uB294\uB2E4.
   // 2026-09-08: pathType 은 p.info 안에 있다. p.pathType 은 늘 undefined 라 항상 false 였다.
@@ -5725,7 +5730,7 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
   }
 
   if (p.get("format") === "app" || url.pathname === "/route-v2-app") {
-    const _od = buildAppResponse(out, { sx: SX, sy: SY, ex: EX, ey: EY, sn: p.get("SN"), en: p.get("EN") });
+    const _od = buildAppResponse(out, { sx: SX, sy: SY, ex: EX, ey: EY, sn: p.get("SN"), en: p.get("EN"), ldPick: !!(p.get("ldMode") || p.get("ldGrade") || p.get("ldDepTs")) });
     await xferAnnotateAll(env, _od, ctx);
     _od.rtwApplied = _rtwApplied;
     _od.engVer = ENGINE_VERSION;
