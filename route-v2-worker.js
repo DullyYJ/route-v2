@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-03bq";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-03br";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -5938,7 +5938,8 @@ if (url.pathname === "/xfer-status") {
     const meta = {};
     try { const r = await env.DB.prepare("SELECT k, v FROM xfer_meta").all(); for (const x of (r.results || [])) meta[x.k] = x.v; } catch (e) {}
     if (url.searchParams.get("go") === "1" && (!parseInt(meta.last_try, 10) || Date.now() - parseInt(meta.last_try, 10) > 600000)) { try { await xferMetaSet(env, "last_try", Date.now()); meta.ingest = await xferIngest(env); } catch (e) { meta.ingestErr = String((e && e.message) || e).slice(0, 200); } }
-    return new Response(JSON.stringify({ xfer: await q("SELECT COUNT(*) n FROM xfer_pos"), exit: await q("SELECT COUNT(*) n FROM fst_exit"), meta }), { status: 200, headers: CORS_H });
+    const okMs = parseInt(meta.last_ok, 10) || 0, ageDays = okMs ? Math.round((Date.now() - okMs) / 864e5 * 10) / 10 : null;   // ★ 03br: 갱신이 조용히 실패해도 보이도록 마지막 성공 경과일·stale 표시
+    return new Response(JSON.stringify({ xfer: await q("SELECT COUNT(*) n FROM xfer_pos"), exit: await q("SELECT COUNT(*) n FROM fst_exit"), ageDays, stale: ageDays == null || ageDays > XFER_TTL_MS / 864e5 + 5, meta }), { status: 200, headers: CORS_H });
   }
 if (url.pathname === "/xfer-probe") {
     const keys = [];
