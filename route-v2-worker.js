@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-03be";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-03bf";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -5031,7 +5031,7 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
       // ★ 2026-10-03: cacheTtl — 이 키는 날짜 칸이 들어 있어(하루 한 번 05:00 에 바뀜) 하루 동안 내용이 변하지 않는다.
       //   KV 의 엣지 캐시(cacheTtl)를 켜면 같은 지역을 다시 읽을 때 중앙 저장소까지 가지 않는다.
       //   실측: 이 읽기(d1Ms)가 시내 경로 응답 0.6~0.8초 중 약 0.25~0.3초를 차지했다(캐시 미적중 시 0.4~0.9초).
-      const v = await env.ROWS_KV.get(_ck, { type: "json", cacheTtl: 3600 });
+      const v = await env.ROWS_KV.get(_ck, { type: "json", cacheTtl: 21600 });
       if (v && Array.isArray(v)) _kvHit = v;
     } catch (e) { _kvErr = String((e && e.message) || e).slice(0, 120); }
   }
