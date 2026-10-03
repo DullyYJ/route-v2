@@ -47,6 +47,40 @@ var LR_PER_IP_HR = 30;
 var LR_HIDE_N = 3;
 var LR_HIDDEN_SQL = " AND id NOT IN (SELECT msg_id FROM line_reports GROUP BY msg_id HAVING COUNT(*) >= " + LR_HIDE_N + ")";
 var LR_KINDS_OK = ["chat", "delay", "crowd"];
+// ★ 2026-10-03 (익명 정확도 기록): 앱이 예상한 '탑승~하차' 분과 실제로 걸린 분을 목적지 도착 때 한 번 보낸다.
+//   저장하는 것: 날짜(일 단위), 예상분, 실제분, 환승 횟수, 노선명, 시간대(시), 평일 여부, 수단 구분, 앱 버전.
+//   저장하지 않는 것: 역 이름·좌표·사용자 식별값·IP. IP 는 시간당 횟수 제한에만 쓰고 제한표는 24시간 뒤 지운다. 기록은 1년 뒤 삭제.
+var RIDE_PER_IP_HR = 12;
+var RIDE_KEEP_DAYS = 365;
+var _rideReady = false;
+async function ensureRideLog(env) {
+  if (_rideReady) return;
+  await env.DB.prepare("CREATE TABLE IF NOT EXISTS ride_log (id INTEGER PRIMARY KEY AUTOINCREMENT, day INTEGER NOT NULL, pred REAL NOT NULL, act REAL NOT NULL, xf INTEGER NOT NULL, lines TEXT, hr INTEGER, wk INTEGER, mode TEXT, av TEXT)").run();
+  _rideReady = true;
+}
+async function rideAllowed(req, env) {
+  try {
+    const ip = req.headers.get("CF-Connecting-IP") || "?";
+    const hr = Math.floor(Date.now() / 36e5);
+    await env.DB.prepare("CREATE TABLE IF NOT EXISTS react_rl (k TEXT, hr INTEGER, n INTEGER, PRIMARY KEY (k, hr))").run();
+    await env.DB.prepare("INSERT INTO react_rl (k,hr,n) VALUES (?1,?2,1) ON CONFLICT(k,hr) DO UPDATE SET n = n + 1").bind("rd:" + ip, hr).run();
+    const r = await env.DB.prepare("SELECT n FROM react_rl WHERE k=?1 AND hr=?2").bind("rd:" + ip, hr).first();
+    return ((r && r.n) || 1) <= RIDE_PER_IP_HR;
+  } catch (e) { return false; }
+}
+function rideClean(b) {
+  const num = (v) => (typeof v === "number" && isFinite(v)) ? v : NaN;
+  const pred = num(b.pred), act = num(b.act), xf = num(b.xf), hr = num(b.hr), wk = num(b.wk);
+  if (!(pred >= 3 && pred <= 300 && act >= 3 && act <= 300)) return null;
+  const ratio = act / pred;
+  if (ratio < 0.3 || ratio > 3) return null;
+  if (!(xf >= 0 && xf <= 6) || !(hr >= 0 && hr <= 23) || !(wk === 0 || wk === 1)) return null;
+  const lines = String(b.lines == null ? "" : b.lines);
+  if (lines.length > 40 || !/^[0-9A-Za-z가-힣,·\s\-]*$/.test(lines)) return null;
+  const mode = ["sub", "bus", "mix"].indexOf(b.mode) >= 0 ? b.mode : "sub";
+  const av = String(b.av || "").slice(0, 16).replace(/[^0-9A-Za-z._\-]/g, "");
+  return { pred: Math.round(pred * 10) / 10, act: Math.round(act * 10) / 10, xf: Math.round(xf), hr: Math.round(hr), wk, lines, mode, av };
+}
 var _lrReady = false;
 async function ensureLineRoom(env) {
   if (_lrReady) return;
@@ -1417,7 +1451,7 @@ __name(getCols, "getCols");
 var worker_default = {
   // 크론 (20분마다)
   async scheduled(event, env, ctx) {
-    ctx.waitUntil((async () => { try { await ensureLineRoom(env); await env.DB.prepare("DELETE FROM line_msgs WHERE ts < ?1").bind(Date.now() - 14 * 24 * 3600 * 1000).run(); await env.DB.prepare("DELETE FROM line_reports WHERE ts < ?1").bind(Date.now() - 14 * 24 * 3600 * 1000).run(); } catch (e) {} })());
+    ctx.waitUntil((async () => { try { await ensureLineRoom(env); await env.DB.prepare("DELETE FROM line_msgs WHERE ts < ?1").bind(Date.now() - 14 * 24 * 3600 * 1000).run(); await env.DB.prepare("DELETE FROM line_reports WHERE ts < ?1").bind(Date.now() - 14 * 24 * 3600 * 1000).run(); } catch (e) {} try { await ensureRideLog(env); await env.DB.prepare("DELETE FROM ride_log WHERE day < ?1").bind(Math.floor(Date.now() / 864e5) - RIDE_KEEP_DAYS).run(); await env.DB.prepare("DELETE FROM react_rl WHERE hr < ?1").bind(Math.floor(Date.now() / 36e5) - 24).run(); } catch (e) {} })());
     ctx.waitUntil(Promise.all([
       generatePosts(env).then((r) => console.log("[board-writer][posts]", JSON.stringify(r))),
       generateTalks(env).then((r) => console.log("[board-writer][talks]", JSON.stringify(r))),
@@ -1639,6 +1673,20 @@ var worker_default = {
         if (dup) return new Response(JSON.stringify({ ok: true, dup: true, id: dup.id }), { headers: cors });
         const res = await env.DB.prepare("INSERT INTO line_msgs (line,kind,nick,text,stn,ipk,ts) VALUES (?1,?2,?3,?4,?5,?6,?7)").bind(line, kind, nick, text, stn || null, ipk, now).run();
         return new Response(JSON.stringify({ ok: true, id: res && res.meta ? res.meta.last_row_id : null, ts: now }), { headers: cors });
+      } catch (e) {
+        return new Response(JSON.stringify({ ok: false, error: e.message }), { status: 500, headers: cors });
+      }
+    }
+    if (url.pathname === "/ridelog" && req.method === "POST") {
+      let body = {};
+      try { body = await req.json(); } catch (e) {}
+      const c = rideClean(body || {});
+      if (!c) return new Response(JSON.stringify({ ok: false, error: "invalid" }), { status: 400, headers: cors });
+      try {
+        await ensureRideLog(env);
+        if (!await rideAllowed(req, env)) return new Response(JSON.stringify({ ok: false, error: "rate limited" }), { status: 429, headers: cors });
+        await env.DB.prepare("INSERT INTO ride_log (day, pred, act, xf, lines, hr, wk, mode, av) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)").bind(Math.floor(Date.now() / 864e5), c.pred, c.act, c.xf, c.lines, c.hr, c.wk, c.mode, c.av).run();
+        return new Response(JSON.stringify({ ok: true }), { headers: cors });
       } catch (e) {
         return new Response(JSON.stringify({ ok: false, error: e.message }), { status: 500, headers: cors });
       }
