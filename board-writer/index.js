@@ -43,12 +43,16 @@ async function reactAllowed(req, env) {
 //   · line_msgs: 노선(또는 버스번호)별 한 줄 대화(chat)와 제보(delay=지연, crowd=혼잡). IP 는 해시(ipk)만 저장한다.
 //   · 같은 사람이 같은 노선·역에 같은 제보를 20분 안에 또 보내도 한 번으로 센다(경보 부풀리기 방지).
 var LR_PER_IP_HR = 30;
+// ★ 2026-10-03: 신고가 서로 다른 3명 이상 모인 글은 보이지 않게 한다(자동 숨김). 신고한 기기 식별 코드도 14일 뒤 같이 지운다.
+var LR_HIDE_N = 3;
+var LR_HIDDEN_SQL = " AND id NOT IN (SELECT msg_id FROM line_reports GROUP BY msg_id HAVING COUNT(*) >= " + LR_HIDE_N + ")";
 var LR_KINDS_OK = ["chat", "delay", "crowd"];
 var _lrReady = false;
 async function ensureLineRoom(env) {
   if (_lrReady) return;
   await env.DB.prepare("CREATE TABLE IF NOT EXISTS line_msgs (id INTEGER PRIMARY KEY AUTOINCREMENT, line TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'chat', nick TEXT, text TEXT, stn TEXT, ipk TEXT, ts INTEGER NOT NULL)").run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_line_msgs ON line_msgs (line, ts)").run();
+  await env.DB.prepare("CREATE TABLE IF NOT EXISTS line_reports (msg_id INTEGER NOT NULL, ipk TEXT NOT NULL, ts INTEGER NOT NULL, PRIMARY KEY (msg_id, ipk))").run();
   _lrReady = true;
 }
 function lrLineOk(line) {
@@ -77,9 +81,9 @@ async function lrAlerts(env, lines) {
   for (const ln of lines) out[ln] = { reporters: 0, stations: [] };
   if (!lines.length) return out;
   const ph = lines.map(() => "?").join(",");
-  const a = await env.DB.prepare("SELECT line, COUNT(DISTINCT ipk) AS n FROM line_msgs WHERE kind='delay' AND ts > ? AND ts <= ? AND line IN (" + ph + ") GROUP BY line").bind(since, Date.now(), ...lines).all();
+  const a = await env.DB.prepare("SELECT line, COUNT(DISTINCT ipk) AS n FROM line_msgs WHERE kind='delay' AND ts > ? AND ts <= ? AND line IN (" + ph + ")" + LR_HIDDEN_SQL + " GROUP BY line").bind(since, Date.now(), ...lines).all();
   (a.results || []).forEach((r) => { if (out[r.line]) out[r.line].reporters = r.n; });
-  const b = await env.DB.prepare("SELECT line, stn, COUNT(DISTINCT ipk) AS n, MAX(ts) AS last FROM line_msgs WHERE kind='delay' AND stn IS NOT NULL AND stn <> '' AND ts > ? AND ts <= ? AND line IN (" + ph + ") GROUP BY line, stn ORDER BY n DESC, last DESC").bind(since, Date.now(), ...lines).all();
+  const b = await env.DB.prepare("SELECT line, stn, COUNT(DISTINCT ipk) AS n, MAX(ts) AS last FROM line_msgs WHERE kind='delay' AND stn IS NOT NULL AND stn <> '' AND ts > ? AND ts <= ? AND line IN (" + ph + ")" + LR_HIDDEN_SQL + " GROUP BY line, stn ORDER BY n DESC, last DESC").bind(since, Date.now(), ...lines).all();
   (b.results || []).forEach((r) => { if (out[r.line] && out[r.line].stations.length < 5) out[r.line].stations.push({ stn: r.stn, n: r.n, last: r.last }); });
   return out;
 }
@@ -1413,7 +1417,7 @@ __name(getCols, "getCols");
 var worker_default = {
   // 크론 (20분마다)
   async scheduled(event, env, ctx) {
-    ctx.waitUntil((async () => { try { await ensureLineRoom(env); await env.DB.prepare("DELETE FROM line_msgs WHERE ts < ?1").bind(Date.now() - 14 * 24 * 3600 * 1000).run(); } catch (e) {} })());
+    ctx.waitUntil((async () => { try { await ensureLineRoom(env); await env.DB.prepare("DELETE FROM line_msgs WHERE ts < ?1").bind(Date.now() - 14 * 24 * 3600 * 1000).run(); await env.DB.prepare("DELETE FROM line_reports WHERE ts < ?1").bind(Date.now() - 14 * 24 * 3600 * 1000).run(); } catch (e) {} })());
     ctx.waitUntil(Promise.all([
       generatePosts(env).then((r) => console.log("[board-writer][posts]", JSON.stringify(r))),
       generateTalks(env).then((r) => console.log("[board-writer][talks]", JSON.stringify(r))),
@@ -1639,6 +1643,25 @@ var worker_default = {
         return new Response(JSON.stringify({ ok: false, error: e.message }), { status: 500, headers: cors });
       }
     }
+    if (url.pathname === "/lreport" && req.method === "POST") {
+      let body = {};
+      try { body = await req.json(); } catch (e) {}
+      const id = parseInt(body.id, 10);
+      if (!isFinite(id) || id <= 0) return new Response(JSON.stringify({ ok: false, error: "id" }), { status: 400, headers: cors });
+      try {
+        await ensureLineRoom(env);
+        if (!await lrAllowed(req, env)) return new Response(JSON.stringify({ ok: false, error: "rate limited" }), { status: 429, headers: cors });
+        const ipk = await lrIpHash(req);
+        const m = await env.DB.prepare("SELECT id, ipk FROM line_msgs WHERE id=?1").bind(id).first();
+        if (!m) return new Response(JSON.stringify({ ok: true, gone: true }), { headers: cors });
+        if (m.ipk === ipk) return new Response(JSON.stringify({ ok: true, own: true }), { headers: cors });   // 내 글은 신고 대상이 아니다
+        await env.DB.prepare("INSERT OR IGNORE INTO line_reports (msg_id, ipk, ts) VALUES (?1,?2,?3)").bind(id, ipk, Date.now()).run();
+        const c = await env.DB.prepare("SELECT COUNT(*) AS n FROM line_reports WHERE msg_id=?1").bind(id).first();
+        return new Response(JSON.stringify({ ok: true, hidden: ((c && c.n) || 0) >= LR_HIDE_N }), { headers: cors });
+      } catch (e) {
+        return new Response(JSON.stringify({ ok: false, error: e.message }), { status: 500, headers: cors });
+      }
+    }
     if (url.pathname === "/lroom") {
       const line = String(url.searchParams.get("line") || "").trim();
       if (!lrLineOk(line)) return new Response(JSON.stringify({ ok: false, error: "line" }), { status: 400, headers: cors });
@@ -1650,7 +1673,7 @@ var worker_default = {
         try {
           await ensureLineRoom(env);
           const now = Date.now();
-          const rs = await env.DB.prepare("SELECT id, kind, nick, text, stn, ts FROM line_msgs WHERE line=?1 AND ts <= ?2 AND ts > ?3 ORDER BY ts DESC, id DESC LIMIT 80").bind(line, now, now - 12 * 3600 * 1000).all();
+          const rs = await env.DB.prepare("SELECT id, kind, nick, text, stn, ts FROM line_msgs WHERE line=?1 AND ts <= ?2 AND ts > ?3" + LR_HIDDEN_SQL + " ORDER BY ts DESC, id DESC LIMIT 80").bind(line, now, now - 12 * 3600 * 1000).all();
           const al = await lrAlerts(env, [line]);
           snap = { msgs: (rs.results || []).reverse(), alert: al[line] || { reporters: 0, stations: [] } };
           try { await caches.default.put(snapKey, new Response(JSON.stringify(snap), { headers: { "Content-Type": "application/json", "Cache-Control": "public, s-maxage=5" } })); } catch (e) {}
