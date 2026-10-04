@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-04bv";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-04bw";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -5318,6 +5318,14 @@ async function lineNotices(env, ctx) {
 //     방향당 열차 3대 미만, 역 이름 매칭 30% 초과 실패, 노선이 가지 없는 한 줄(트리)이 아닌 경우.
 //   · 호출량: 노선별 2분에 1회 이하(KV 의 lastTry 로 isolate 사이에도 공유). 요청이 와도 응답을 막지 않고 백그라운드(waitUntil)로 갱신한다.
 // ══════════════════════════════════════════════════════════════════════
+// ★ 2026-10-04 (YJ 결정): 지연 추정은 **환경변수 EST_ENABLED 가 "1"(또는 "true")일 때만** 동작한다. 기본값은 꺼짐.
+//   이유: 서울 지하철 서버(swopenapi)가 Cloudflare 출구 주소의 요청을 거부한다(522/400, 배치를 서울로 옮겨도 동일). 한국 IP 중계가 생길 때까지 realtimePosition 호출을 전부 끈다.
+//   꺼져 있으면: 서울/KV 호출 없음, /line-notices 에 추정 없음(저장돼 있던 상태도 표시 안 함), /est-status 는 모든 노선이 hold:"disabled".
+//   아래 판정·기준선 로직은 그대로 남겨 두었다 — 중계를 확보하고 EST_ENABLED=1 만 켜면 다시 동작한다.
+function estEnabled(env) {
+  var v = env && env.EST_ENABLED;
+  return v === "1" || v === 1 || v === true || String(v).toLowerCase() === "true";
+}
 var EST_LINES = { "9호선": "S09", "신분당선": "SBD", "공항철도": "ARX", "경의중앙선": "GJC", "수인분당선": "SUI" };
 var EST_OBS_MS = 120 * 1000;            // 노선별 관측(공공 API 호출) 간격
 var EST_STALE_MS = 5 * 60 * 1000;       // 위치 자료가 이보다 오래되면 보류
@@ -5541,6 +5549,7 @@ async function estFetchPositions(env, lineName) {
 }
 // 한 노선을 한 번 관측해 상태를 갱신·저장한다. 호출은 (lastTry 로) 노선당 2분에 1회 이하, 전 노선 합계는 하루 상한 안에서.
 async function estRefreshLine(env, lineName, lineId, st, now, bundle) {
+  if (!estEnabled(env)) return Object.assign(estNewState(), st);      // 꺼져 있으면 아무것도 하지 않는다(KV·서울 호출 없음)
   var tt = estHeadwaySec(bundle, lineId, now);
   st = Object.assign(estNewState(), st);
   st.lastTry = now;
@@ -5584,6 +5593,7 @@ async function estRefreshLine(env, lineName, lineId, st, now, bundle) {
 // /line-notices 에 합칠 추정 공지. 응답을 막지 않는다: 저장된 상태로 바로 답하고, 갱신할 때가 된 노선은 백그라운드에서 갱신한다.
 async function estimateNotices(env, ctx, official, now, bundle) {
   var out = {};
+  if (!estEnabled(env)) return out;                                   // 꺼짐: 추정 공지를 아예 만들지 않는다
   if (!env || !env.ROWS_KV) return out;
   bundle = bundle || SUBWAY_BUNDLE;
   var names = Object.keys(EST_LINES).filter(function (n) { return !(official && official[n]); });
@@ -5601,6 +5611,7 @@ async function estimateNotices(env, ctx, official, now, bundle) {
   return out;
 }
 async function estimateCached(env, ctx, official, now) {
+  if (!estEnabled(env)) { _estMem = { at: 0, out: null }; return {}; }  // 꺼짐: 메모리 캐시에 남은 것도 내보내지 않는다
   if (_estMem.out && now - _estMem.at < EST_MEM_TTL_MS) return _estMem.out;
   var out = await estimateNotices(env, ctx, official, now);
   _estMem = { at: now, out: out };
@@ -6243,7 +6254,12 @@ if (url.pathname === "/line-notices") {
   }
 // ★ 2026-10-04: 지연 의심(추정) 상태 확인용(읽기 전용, 키·원본 위치 자료 없음). 노선별 판정 가능 여부와 보류 이유, 연속 횟수를 보여준다.
 if (url.pathname === "/est-status") {
-    const now = Date.now(), out = { now, dayType: ldDayTypeKST(now), kvBound: !!env.ROWS_KV, seoulBound: !!(env.BUSAPI && typeof env.BUSAPI.fetch === "function"), lines: {} };
+    const now = Date.now(), enabled = estEnabled(env), out = { now, enabled, dayType: ldDayTypeKST(now), kvBound: !!env.ROWS_KV, seoulBound: !!(env.BUSAPI && typeof env.BUSAPI.fetch === "function"), lines: {} };
+    if (!enabled) {   // 꺼져 있으면 KV 도 읽지 않고 모든 노선을 hold:"disabled" 로 보여 준다
+      out.note = "지연 추정 꺼짐(EST_ENABLED 미설정). 서울 swopenapi 가 Cloudflare 출구를 거부해 중단 — 한국 IP 중계 확보 후 EST_ENABLED=1 로 켠다";
+      for (const name of Object.keys(EST_LINES)) out.lines[name] = { hold: "disabled", phase: "none", source: estHeadwaySec(SUBWAY_BUNDLE, EST_LINES[name], now) != null ? "timetable" : "baseline" };
+      return new Response(JSON.stringify(out), { status: 200, headers: CORS_H });
+    }
     try {
       const kst = new Date(now + 9 * 3600 * 1000), ymd = kst.toISOString().slice(0, 10).replace(/-/g, "");
       const used = env.ROWS_KV ? await env.ROWS_KV.get("est:cnt:" + ymd, "json") : null;

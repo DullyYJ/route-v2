@@ -12,7 +12,7 @@ const caches = { default: { async match() { return undefined; }, async put() {} 
 const { w, SUBWAY_BUNDLE: B, _reset } = W(caches, fakeFetch);
 const kv = new Map(); let seoulCalls = 0, mode = 'bad';
 const hwNow = () => 480;
-const env = { DATA_GO_KR_KEY: 'x', ROWS_KV: { async get(k) { return kv.has(k) ? JSON.parse(kv.get(k)) : null; }, async put(k, v) { kv.set(k, v); } },
+const env = { DATA_GO_KR_KEY: 'x', EST_ENABLED: '1', ROWS_KV: { async get(k) { return kv.has(k) ? JSON.parse(kv.get(k)) : null; }, async put(k, v) { kv.set(k, v); } },
   BUSAPI: { async fetch(req) { seoulCalls++; return new Response(JSON.stringify(mkList()), { status: 200 }); } } };
 // 합성 9호선 열차: bundle 좌표를 쓰지 않고 이름만 필요하므로 역 이름 순서대로 배치(간격은 좌표가 정함)
 const S9 = Object.keys(B.stations).filter(k => B.stations[k].l === 'S09');
@@ -47,6 +47,35 @@ function mkList() {
   const stj = JSON.parse(await (await w.fetch(new Request('https://x.test/est-status'), env, {})).text());
   console.log('est-status:', JSON.stringify(stj.lines['9호선']), JSON.stringify(stj.lines['신분당선']));
   assert.strictEqual(stj.lines['신분당선'].source, 'baseline'); assert.strictEqual(stj.lines['신분당선'].baseline.samples, 0); assert.strictEqual(stj.lines['신분당선'].windowMode, 'fixed-hours'); assert.strictEqual(stj.lines['9호선'].source, 'timetable'); assert.strictEqual(stj.lines['9호선'].inWindow, true); assert.ok(stj.budget && stj.budget.usedToday > 0);
+  // ── EST_ENABLED 꺼짐(기본) ──
+  {
+    let kvOps = 0, seoul = 0; const kv2 = new Map();
+    // 켠 상태에서 저장된 의심 상태(kv)를 그대로 물려받되, 스위치만 끈다
+    kv2.set('est:v1:S09', kv.get('est:v1:S09'));
+    const offEnv = { DATA_GO_KR_KEY: 'x', ROWS_KV: { async get(k) { kvOps++; return kv2.has(k) ? JSON.parse(kv2.get(k)) : null; }, async put(k, v) { kvOps++; kv2.set(k, v); } }, BUSAPI: { async fetch() { seoul++; return new Response('{}'); } } };
+    const getOff = async (q = '') => JSON.parse(await (await w.fetch(new Request('https://x.test/line-notices' + q), offEnv, { waitUntil() {} })).text());
+    ntceItems = []; _reset();
+    let r2 = await getOff();
+    console.log('꺼짐 /line-notices lines:', JSON.stringify(r2.lines), 'seoul', seoul, 'kv', kvOps);
+    assert.strictEqual(r2.ok, true); assert.deepStrictEqual(r2.lines, {}); assert.strictEqual(seoul, 0); assert.strictEqual(kvOps, 0);
+    // 1~8호선 공식 공지는 그대로
+    ntceItems = [{ lineNmLst: '2호선', noftTtl: '2호선 지연', noftCn: '2호선 신호장애로 지연', noftOcrnDt: new Date(Date.now() + 9 * 3600e3 - 60e3).toISOString().slice(0, 19), nonstopYn: 'N', noftSeCd: '1' }];
+    _reset(); r2 = await getOff();
+    console.log('꺼짐 + 공식 2호선:', JSON.stringify(Object.keys(r2.lines)));
+    assert.deepStrictEqual(Object.keys(r2.lines), ['2호선']); assert.ok(!r2.lines['2호선'].estimated); assert.strictEqual(seoul, 0);
+    // /est-status
+    kvOps = 0;
+    const st2 = JSON.parse(await (await w.fetch(new Request('https://x.test/est-status'), offEnv, {})).text());
+    console.log('꺼짐 /est-status:', JSON.stringify(st2.lines['9호선']), JSON.stringify(st2.lines['신분당선']), 'enabled', st2.enabled);
+    assert.strictEqual(st2.enabled, false); assert.strictEqual(kvOps, 0); assert.strictEqual(seoul, 0);
+    ['9호선', '신분당선', '공항철도', '경의중앙선', '수인분당선'].forEach(n => { assert.strictEqual(st2.lines[n].hold, 'disabled', n); assert.strictEqual(st2.lines[n].phase, 'none', n); });
+    assert.ok(/EST_ENABLED/.test(st2.note));
+    // 켠 상태의 /est-status 는 enabled:true
+    const st1 = JSON.parse(await (await w.fetch(new Request('https://x.test/est-status'), env, {})).text());
+    assert.strictEqual(st1.enabled, true);
+    ntceItems = [];
+    console.log('PASS: EST_ENABLED 꺼짐 — 서울·KV 호출 0, /line-notices 에 추정 없음(공식 그대로), /est-status hold:disabled');
+  }
   console.log('PASS: /line-notices 통합(공식 우선·추정 합치기·필터) + /est-status');
 })().catch(e => { console.error('FAIL', e.message); process.exit(1); });
 // /est-status

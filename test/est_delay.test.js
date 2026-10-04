@@ -5,7 +5,7 @@ const ei = src.lastIndexOf('\nexport {'); assert.ok(ei > 0); src = src.slice(0, 
 const api = new Function(src + `
 return { SUBWAY_BUNDLE, ldDayTypeKST, EST_LINES, EST_OBS_MS, EST_RESET_MS, EST_CLEARED_SHOW_MS,
   estHeadwaySec, estInServiceWindow, estWindowFor, estBaseline, estMedian, EST_BASE_MIN_N, estChain, estGaps, estVerdict, estStep, estPublic, estNewState,
-  estimateNotices, estRefreshLine, estimateCached, _resetMem: function(){ _estMem = {at:0,out:null}; } };`)();
+  estimateNotices, estRefreshLine, estimateCached, estEnabled, _resetMem: function(){ _estMem = {at:0,out:null}; } };`)();
 const B = api.SUBWAY_BUNDLE;
 let pass = 0; const t = (name, fn) => { try { fn(); pass++; console.log('  ok  ', name); } catch (e) { console.log('  FAIL', name, '\n      ', e.message); process.exitCode = 1; } };
 const at = (kstStr) => Date.parse(kstStr + '+09:00');   // 'YYYY-MM-DDTHH:MM:SS' (KST)
@@ -75,7 +75,7 @@ t('관측이 10분 넘게 끊기면 연속이 아니다', () => { let s = api.es
 console.log('[estimateNotices — 모의 KV·BUSAPI]');
 function mkEnv(listFn, opts = {}) {
   const kv = new Map(); let calls = 0, urls = [];
-  const env = { ROWS_KV: { async get(k) { return kv.has(k) ? JSON.parse(kv.get(k)) : null; }, async put(k, v) { kv.set(k, v); } } };
+  const env = { EST_ENABLED: '1', ROWS_KV: { async get(k) { return kv.has(k) ? JSON.parse(kv.get(k)) : null; }, async put(k, v) { kv.set(k, v); } } };
   if (!opts.noBinding) env.BUSAPI = { async fetch(req) { calls++; urls.push(decodeURIComponent(new URL(req.url).searchParams.get('path'))); const r = listFn(); return new Response(JSON.stringify(r), { status: 200 }); } };
   return { env, kv, calls: () => calls, urls: () => urls };
 }
@@ -148,7 +148,7 @@ const run = async (m, now, official = {}) => { api._resetMem(); return await api
   console.log('  (신분당선 노선 길이≈' + sbSpan + '초, 역 ' + SBids.length + '개)');
   const sbMake = (env0) => {
     const kv = new Map(); let calls = 0; const feed = { gaps: [360, 360, 360, 360, 360] };
-    const env = { ROWS_KV: { async get(k) { return kv.has(k) ? JSON.parse(kv.get(k)) : null; }, async put(k, v) { kv.set(k, v); } }, BUSAPI: { async fetch(req) { calls++; return new Response(JSON.stringify({ errorMessage: { code: 'INFO-000' }, realtimePositionList: mkSb(feed.now, feed.gaps, { salt: feed.salt }) }), { status: 200 }); } } };
+    const env = { EST_ENABLED: '1', ROWS_KV: { async get(k) { return kv.has(k) ? JSON.parse(kv.get(k)) : null; }, async put(k, v) { kv.set(k, v); } }, BUSAPI: { async fetch(req) { calls++; return new Response(JSON.stringify({ errorMessage: { code: 'INFO-000' }, realtimePositionList: mkSb(feed.now, feed.gaps, { salt: feed.salt }) }), { status: 200 }); } } };
     Object.assign(env, env0 || {});
     return { env, kv, feed, calls: () => calls, st: () => JSON.parse(kv.get('est:v1:SBD')) };
   };
@@ -212,7 +212,33 @@ const run = async (m, now, official = {}) => { api._resetMem(); return await api
     const st2 = await api.estRefreshLine(m2.env, '신분당선', 'SBD', undefined, now, B);
     t('본문 없는 400(예전 중계)도 hold:http-400 + 10분 쉼', () => { assert.strictEqual(st2.hold, 'http-400'); assert.ok(st2.backoffUntil > now); });
   }
-  const noKv = await api.estimateNotices({ BUSAPI: {} }, undefined, {}, WD_NOON, B);
+  console.log('[EST_ENABLED 스위치 — 기본 꺼짐]');
+  {
+    const ops = { kv: 0, seoul: 0, t: WD_NOON };
+    const mkOff = (extra) => { const kv = new Map(); const env = Object.assign({ ROWS_KV: { async get(k) { ops.kv++; return kv.has(k) ? JSON.parse(kv.get(k)) : null; }, async put(k, v) { ops.kv++; kv.set(k, v); } }, BUSAPI: { async fetch() { ops.seoul++; return new Response(JSON.stringify({ errorMessage: { code: 'INFO-000' }, realtimePositionList: mk(ops.t, [hw, hw, 1500, hw, hw]) }), { status: 200 }); } } }, extra || {}); return { env, kv }; };
+    const reset = () => { ops.kv = 0; ops.seoul = 0; api._resetMem(); };
+    t('estEnabled: 기본(미설정)·"0"·""·"false" 는 꺼짐, "1"·"true" 는 켜짐', () => {
+      [undefined, '0', '', 'false', 'no'].forEach(v => assert.strictEqual(api.estEnabled({ EST_ENABLED: v }), false, String(v)));
+      ['1', 'true', 'TRUE', 1, true].forEach(v => assert.strictEqual(api.estEnabled({ EST_ENABLED: v }), true, String(v)));
+      assert.strictEqual(api.estEnabled({}), false); assert.strictEqual(api.estEnabled(undefined), false);
+    });
+    reset(); const off = mkOff();
+    const outOff = await api.estimateNotices(off.env, undefined, {}, WD_NOON, B);
+    t('꺼짐: estimateNotices 는 {} 이고 서울 호출·KV 접근이 0건', () => { assert.deepStrictEqual(outOff, {}); assert.strictEqual(ops.seoul, 0); assert.strictEqual(ops.kv, 0); });
+    reset(); const stOff = await api.estRefreshLine(off.env, '9호선', 'S09', undefined, WD_NOON, B);
+    t('꺼짐: estRefreshLine 도 아무것도 안 한다(서울·KV 0건, 상태 그대로)', () => { assert.strictEqual(ops.seoul, 0); assert.strictEqual(ops.kv, 0); assert.strictEqual(stOff.phase, 'none'); assert.strictEqual(stOff.lastTry, 0); });
+    // 켠 상태에서 의심 상태를 만들어 두고 → 끄면 보이지 않고 → 다시 켜면 보인다(로직 보존)
+    const on = mkOff({ EST_ENABLED: '1' }); let now = WD_NOON;
+    ops.t = now; api._resetMem(); await api.estimateNotices(on.env, undefined, {}, now, B);
+    now += 130e3; ops.t = now; api._resetMem(); const outOn = await api.estimateNotices(on.env, undefined, {}, now, B);
+    t('켜면 지연 의심이 나온다(기존 동작)', () => { assert.ok(outOn['9호선'] && outOn['9호선'].suspect === true); });
+    const offSame = Object.assign({}, on.env, { EST_ENABLED: undefined });
+    reset(); const outCached = await api.estimateCached(offSame, undefined, {}, now + 10e3);
+    t('꺼짐: 저장된 의심 상태·메모리 캐시가 남아 있어도 내보내지 않는다', () => { assert.deepStrictEqual(outCached, {}); assert.strictEqual(ops.seoul, 0); });
+    ops.t = now + 20e3; api._resetMem(); const outAgain = await api.estimateNotices(on.env, undefined, {}, now + 20e3, B);
+    t('다시 켜면 저장된 상태로 곧바로 동작한다(코드·기준선 로직 보존)', () => { assert.ok(outAgain['9호선'] && outAgain['9호선'].suspect === true); });
+  }
+  const noKv = await api.estimateNotices({ EST_ENABLED: '1', BUSAPI: {} }, undefined, {}, WD_NOON, B);
   t('KV 바인딩이 없으면 보류', () => assert.deepStrictEqual(noKv, {}));
   console.log('\n통과', pass, '건' + (process.exitCode ? ' — 실패 있음' : ''));
 })();
