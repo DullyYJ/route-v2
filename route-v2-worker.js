@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-04bt";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-04bu";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -5311,7 +5311,9 @@ async function lineNotices(env, ctx) {
 //   · 데이터: 서울 열린데이터광장 realtimePosition(열차 위치). 앱이 아니라 엔진이 BUSAPI(gentle-lab /seoul — SEOUL_API_KEY 는 거기 시크릿)로 부른다. 이 워커에 새 시크릿은 없다.
 //   · 판정: 같은 방향 인접 열차 간격(역간 소요시간 seg 로 환산) ≥ min(2×배차간격, 배차간격+6분) 이 '연속 2회' → 지연 의심, 연속 2회 정상 → 해제.
 //   · 배차간격 = 번들 시간표(SUBWAY_BUNDLE.lines[*].tt, 요일·시간대별). tt 가 없는 노선(공항철도·신분당·경의중앙·수인분당은 hw:300 이라는 고정 기본값뿐)은
-//     근거가 없으니 판단 보류 — 호출도 하지 않고 아무것도 표시하지 않는다. tt 가 채워지면 코드 변경 없이 자동으로 판정 대상이 된다.
+//     ★ 2026-10-04(YJ): '최근 관측된 배차간격의 중앙값'을 기준선으로 쓴다 — 관측마다 방향별 인접 열차 간격의 중앙값을 한 표본으로 모아(최근 3시간·최대 60개),
+//     표본 20개 이상이고 30분 이상에 걸쳐 쌓이기 전에는 보류(baseline-warmup). 지연 의심인 관측·상태에서는 표본을 넣지 않아 기준선이 지연에 끌려가지 않게 한다.
+//     tt 가 채워지면 코드 변경 없이 시간표 기준으로 바뀐다. 첫·막차 자료(ft/lt)가 없는 노선은 고정 시간(06:30~22:30)만 판정한다.
 //   · 보류(=정상이라고 표시하지 않음): 첫차 후 30분 전·막차 60분 전 이후·23시 이후(심야), 막차 열차가 보이는 때, 위치 자료가 5분 넘게 오래됨/없음/오류,
 //     방향당 열차 3대 미만, 역 이름 매칭 30% 초과 실패, 노선이 가지 없는 한 줄(트리)이 아닌 경우.
 //   · 호출량: 노선별 2분에 1회 이하(KV 의 lastTry 로 isolate 사이에도 공유). 요청이 와도 응답을 막지 않고 백그라운드(waitUntil)로 갱신한다.
@@ -5324,6 +5326,13 @@ var EST_CLEARED_SHOW_MS = 30 * 60 * 1000;
 var EST_MIN_TRAINS = 3;                 // 방향당 최소 열차 수
 var EST_RUN = 2;                        // 연속 횟수
 var EST_PLUS_SEC = 360;                 // +6분
+var EST_BASE_MIN_N = 20;                // 기준선: 최소 표본 수
+var EST_BASE_MIN_SPAN_MS = 30 * 60 * 1000;   // 기준선: 표본이 걸쳐야 하는 최소 시간
+var EST_BASE_KEEP_MS = 3 * 3600 * 1000;      // 표본 보관 기간
+var EST_HIST_MAX = 60;
+var EST_GENERIC_START_MIN = 6 * 60 + 30;     // ft/lt 가 없는 노선의 고정 판정 시간
+var EST_GENERIC_END_MIN = 22 * 60 + 30;
+var EST_DAILY_CAP_DEFAULT = 400;             // 지연 추정이 하루에 쓸 서울 API 호출 상한(전 노선 합계). 앱 도착정보와 같은 키를 나눠 쓰므로 일부만 쓴다 — 환경변수 EST_DAILY_CAP 으로 조정
 var EST_LATE_CUTOFF_MIN = 23 * 60;      // 심야: 23시부터는 판정하지 않는다(막차 전 감차·종착 차례가 섞여 간격이 들쭉날쭉)
 var EST_QUIET_BACKOFF_MS = 30 * 60 * 1000;   // 일일 한도(ERROR-337) 등이면 이만큼 쉰다
 var EST_MEM_TTL_MS = 30 * 1000;
@@ -5352,6 +5361,26 @@ function estInServiceWindow(bundle, lineId, now) {
   var m = estKst(now).min;
   if (m < ft) m += 1440;
   return m >= ft + 30 && m <= Math.min(lt - 60, EST_LATE_CUTOFF_MIN);
+}
+// 판정해도 되는 시간대인가. 첫·막차 자료가 있으면 그것으로, 없으면 고정 시간(06:30~22:30)으로.
+function estWindowFor(bundle, lineId, now) {
+  var L = bundle && bundle.lines && bundle.lines[lineId];
+  if (L && L.ft && L.lt) return estInServiceWindow(bundle, lineId, now);
+  var m = estKst(now).min;
+  return m >= EST_GENERIC_START_MIN && m <= EST_GENERIC_END_MIN;
+}
+function estMedian(a) {
+  var b = a.slice().sort(function (x, y) { return x - y; }), n = b.length;
+  if (!n) return null;
+  return n % 2 ? b[(n - 1) / 2] : (b[n / 2 - 1] + b[n / 2]) / 2;
+}
+// 저장된 표본으로 기준선(초)을 만든다. 표본이 모자라거나 짧은 시간에 몰려 있으면 null(보류).
+function estBaseline(st, now) {
+  var h = (st && st.hist || []).filter(function (x) { return x && now - x[0] <= EST_BASE_KEEP_MS && x[1] > 0; });
+  if (h.length < EST_BASE_MIN_N) return null;
+  var span = h[h.length - 1][0] - h[0][0];
+  if (span < EST_BASE_MIN_SPAN_MS) return null;
+  return { sec: estMedian(h.map(function (x) { return x[1]; })), n: h.length, spanMs: span };
 }
 function estNormName(n) { return String(n == null ? "" : n).replace(/\(.*?\)/g, "").replace(/\s+/g, ""); }
 // 노선의 역 연결(seg)을 한 줄(트리)로 보고, 한쪽 끝에서부터의 누적 소요시간(초)을 좌표로 쓴다. 트리가 아니면 null(보류).
@@ -5421,15 +5450,15 @@ function estGaps(list, chain, now) {
   if (!newest) return { hold: "no-time" };
   if (now - newest > EST_STALE_MS) return { hold: "stale" };
   if (total && unmapped / total > 0.3) return { hold: "unmapped" };
-  var dirs = {}, any = false;
+  var dirs = {}, any = false, all = [];
   for (var d in byDir) {
     var cs = byDir[d].filter(function (x) { return isFinite(x); }).sort(function (a, b) { return a - b; });
     if (cs.length < EST_MIN_TRAINS) continue;
-    var mg = 0; for (var j = 1; j < cs.length; j++) if (cs[j] - cs[j - 1] > mg) mg = cs[j] - cs[j - 1];
+    var mg = 0; for (var j = 1; j < cs.length; j++) { var gp = cs[j] - cs[j - 1]; all.push(gp); if (gp > mg) mg = gp; }
     dirs[d] = { n: cs.length, maxGapSec: Math.round(mg) }; any = true;
   }
   if (!any) return { hold: "few-trains" };
-  return { dirs: dirs, obsTs: newest };
+  return { dirs: dirs, obsTs: newest, medGapSec: Math.round(estMedian(all)) };
 }
 // 한 번의 관측 → bad / good (보류는 여기서 오지 않는다)
 function estVerdict(gaps, hwSec) {
@@ -5441,7 +5470,7 @@ function estVerdict(gaps, hwSec) {
   }
   return { verdict: bad ? "bad" : "good", thresholdSec: thr, worst: worst, hwSec: hwSec };
 }
-function estNewState() { return { phase: "none", bad: 0, good: 0, obsTs: 0, at: 0, since: 0, clearedAt: 0, lastTry: 0, backoffUntil: 0, worst: null, hwSec: 0, hold: "" }; }
+function estNewState() { return { phase: "none", bad: 0, good: 0, obsTs: 0, at: 0, since: 0, clearedAt: 0, lastTry: 0, backoffUntil: 0, worst: null, hwSec: 0, hold: "", source: "", hist: [], histTs: 0 }; }
 // 연속 판정. obs = { verdict:'bad'|'good'|'hold', obsTs, worst, hwSec, reason }
 function estStep(st0, obs, now) {
   var st = Object.assign(estNewState(), st0 || {});
@@ -5450,7 +5479,7 @@ function estStep(st0, obs, now) {
   st.hold = "";
   if (obs.obsTs && obs.obsTs <= st.obsTs) return st;     // 같은 위치 자료는 한 번만 센다
   if (st.at && now - st.at > EST_RESET_MS) { st.bad = 0; st.good = 0; }   // 관측이 끊겼으면 '연속'이 아니다
-  st.obsTs = obs.obsTs || now; st.at = now; st.worst = obs.worst; st.hwSec = obs.hwSec;
+  st.obsTs = obs.obsTs || now; st.at = now; st.worst = obs.worst; st.hwSec = obs.hwSec; st.source = obs.source || st.source;
   if (obs.verdict === "bad") {
     st.bad++; st.good = 0;
     if (st.bad >= EST_RUN && st.phase !== "suspect") { st.phase = "suspect"; st.since = now; }
@@ -5465,7 +5494,7 @@ function estPublic(st, now) {
   if (!st) return null;
   if (st.phase === "suspect" && now - st.at <= EST_RESET_MS) {
     var normal = Math.round((st.hwSec || 0) / 60), gap = st.worst ? Math.round(st.worst.gapSec / 60) : 0;
-    return { estimated: true, suspect: true, title: "지연 의심 (도착 간격 기준 추정)", text: "같은 방향 열차 간격이 평소(약 " + normal + "분)보다 크게 벌어져 있어요 (지금 최대 약 " + gap + "분)", ts: st.since || st.at, normalMin: normal, gapMin: gap, nonstop: false, code: null };
+    return { estimated: true, suspect: true, title: "지연 의심 (도착 간격 기준 추정)", text: "같은 방향 열차 간격이 " + (st.source === "baseline" ? "최근 관측 평균(약 " : "평소(약 ") + normal + "분)보다 크게 벌어져 있어요 (지금 최대 약 " + gap + "분)", ts: st.since || st.at, normalMin: normal, gapMin: gap, baseline: st.source === "baseline", nonstop: false, code: null };
   }
   if (st.phase === "cleared" && now - st.clearedAt <= EST_CLEARED_SHOW_MS) {
     return { estimated: true, suspect: false, cleared: true, title: "정상 운행 중으로 보여요 (도착 간격 기준)", text: "", ts: st.clearedAt, nonstop: false, code: null };
@@ -5478,6 +5507,19 @@ async function estLoad(env, lineId) {
 }
 async function estSave(env, lineId, st) {
   try { await env.ROWS_KV.put("est:v1:" + lineId, JSON.stringify(st), { expirationTtl: 3 * 3600 }); } catch (e) {}
+}
+// 지연 추정이 쓰는 서울 API 호출을 하루 상한 안에서 하루 동안 고르게 쓰게 한다(앱의 도착정보가 같은 키를 쓰므로 키를 다 쓰면 안 된다).
+async function estBudget(env, now) {
+  var cap = parseInt(env && env.EST_DAILY_CAP, 10) || EST_DAILY_CAP_DEFAULT;
+  var kst = new Date(now + 9 * 3600 * 1000), ymd = kst.toISOString().slice(0, 10).replace(/-/g, "");
+  var key = "est:cnt:" + ymd, used = 0;
+  try { var v = await env.ROWS_KV.get(key, "json"); if (typeof v === "number") used = v; } catch (e) {}
+  var m = kst.getUTCHours() * 60 + kst.getUTCMinutes();
+  var frac = Math.min(1, Math.max(0, (m - 6 * 60) / (23 * 60 - 6 * 60)));   // 06시~23시에 걸쳐 고르게
+  var allowed = Math.min(cap, Math.floor(cap * frac) + 12);
+  if (used >= allowed) return { ok: false, used: used, cap: cap, allowed: allowed };
+  try { await env.ROWS_KV.put(key, JSON.stringify(used + 1), { expirationTtl: 36 * 3600 }); } catch (e) {}
+  return { ok: true, used: used + 1, cap: cap, allowed: allowed };
 }
 async function estFetchPositions(env, lineName) {
   var path = "realtimePosition/0/200/" + lineName;
@@ -5495,28 +5537,44 @@ async function estFetchPositions(env, lineName) {
   } catch (e) { return { err: "fetch" }; }
   finally { clearTimeout(to); }
 }
-// 한 노선을 한 번 관측해 상태를 갱신·저장한다. 호출은 (lastTry 로) 노선당 2분에 1회 이하.
+// 한 노선을 한 번 관측해 상태를 갱신·저장한다. 호출은 (lastTry 로) 노선당 2분에 1회 이하, 전 노선 합계는 하루 상한 안에서.
 async function estRefreshLine(env, lineName, lineId, st, now, bundle) {
-  var hw = estHeadwaySec(bundle, lineId, now);
+  var tt = estHeadwaySec(bundle, lineId, now);
   st = Object.assign(estNewState(), st);
   st.lastTry = now;
   await estSave(env, lineId, st);                       // 먼저 '시도함'을 남겨 동시 요청이 중복 호출하지 않게 한다
-  var obs;
-  if (hw == null) obs = { verdict: "hold", reason: "no-timetable" };
-  else if (!estInServiceWindow(bundle, lineId, now)) obs = { verdict: "hold", reason: "off-hours" };
+  var obs, sample = null;
+  if (!estWindowFor(bundle, lineId, now)) obs = { verdict: "hold", reason: "off-hours" };
   else if (!env.BUSAPI || typeof env.BUSAPI.fetch !== "function") obs = { verdict: "hold", reason: "no-binding" };
   else {
-    var r = await estFetchPositions(env, lineName);
-    if (r.err) {
-      if (r.err === "quota") st.backoffUntil = now + EST_QUIET_BACKOFF_MS;
-      obs = { verdict: "hold", reason: r.err };
-    } else {
-      var g = estGaps(r.list, estChain(bundle, lineId), now);
-      if (g.hold) obs = { verdict: "hold", reason: g.hold };
-      else { var v = estVerdict(g, hw); obs = { verdict: v.verdict, obsTs: g.obsTs, worst: v.worst, hwSec: hw }; }
+    var bud = await estBudget(env, now);
+    if (!bud.ok) obs = { verdict: "hold", reason: "budget" };
+    else {
+      var r = await estFetchPositions(env, lineName);
+      if (r.err) {
+        if (r.err === "quota") st.backoffUntil = now + EST_QUIET_BACKOFF_MS;
+        obs = { verdict: "hold", reason: r.err };
+      } else {
+        var g = estGaps(r.list, estChain(bundle, lineId), now);
+        if (g.hold) obs = { verdict: "hold", reason: g.hold };
+        else {
+          var hw = tt, source = "timetable";
+          if (hw == null) { var bl = estBaseline(st, now); hw = bl ? bl.sec : null; source = "baseline"; }   // 시간표가 없으면 최근 관측 중앙값
+          if (tt == null && g.obsTs > (st.histTs || 0) && g.medGapSec > 0) sample = { t: now, v: g.medGapSec, ts: g.obsTs };
+          if (hw == null) obs = { verdict: "hold", reason: "baseline-warmup" };
+          else { var v = estVerdict(g, hw); obs = { verdict: v.verdict, obsTs: g.obsTs, worst: v.worst, hwSec: hw, source: source }; }
+        }
+      }
     }
   }
   st = estStep(st, obs, now);
+  // 기준선 표본: 지연 의심인 관측·의심 상태에서는 넣지 않는다(기준선이 지연에 끌려가지 않게)
+  if (sample && obs.verdict !== "bad" && st.phase !== "suspect") {
+    st.hist = (st.hist || []).filter(function (x) { return x && now - x[0] <= EST_BASE_KEEP_MS; });
+    st.hist.push([sample.t, sample.v]);
+    if (st.hist.length > EST_HIST_MAX) st.hist = st.hist.slice(-EST_HIST_MAX);
+    st.histTs = sample.ts;
+  }
   await estSave(env, lineId, st);
   return st;
 }
@@ -5530,7 +5588,7 @@ async function estimateNotices(env, ctx, official, now, bundle) {
   names.forEach(function (n, i) {
     var id = EST_LINES[n], st = sts[i];
     var due = now - st.lastTry >= EST_OBS_MS - 5000 && now >= st.backoffUntil;
-    if (due && estHeadwaySec(bundle, id, now) != null && estInServiceWindow(bundle, id, now)) {
+    if (due && estWindowFor(bundle, id, now)) {
       var job = estRefreshLine(env, n, id, st, now, bundle).catch(function () {});
       if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(job); else sts[i] = job;
     }
@@ -6183,10 +6241,21 @@ if (url.pathname === "/line-notices") {
 // ★ 2026-10-04: 지연 의심(추정) 상태 확인용(읽기 전용, 키·원본 위치 자료 없음). 노선별 판정 가능 여부와 보류 이유, 연속 횟수를 보여준다.
 if (url.pathname === "/est-status") {
     const now = Date.now(), out = { now, dayType: ldDayTypeKST(now), kvBound: !!env.ROWS_KV, seoulBound: !!(env.BUSAPI && typeof env.BUSAPI.fetch === "function"), lines: {} };
+    try {
+      const kst = new Date(now + 9 * 3600 * 1000), ymd = kst.toISOString().slice(0, 10).replace(/-/g, "");
+      const used = env.ROWS_KV ? await env.ROWS_KV.get("est:cnt:" + ymd, "json") : null;
+      out.budget = { usedToday: typeof used === "number" ? used : 0, cap: parseInt(env.EST_DAILY_CAP, 10) || EST_DAILY_CAP_DEFAULT };
+    } catch (e) { out.budget = null; }
     for (const name of Object.keys(EST_LINES)) {
       const id = EST_LINES[name], st = env.ROWS_KV ? await estLoad(env, id) : estNewState();
-      const hw = estHeadwaySec(SUBWAY_BUNDLE, id, now);
-      out.lines[name] = { headwaySec: hw, thresholdSec: hw == null ? null : Math.min(hw * 2, hw + EST_PLUS_SEC), inWindow: estInServiceWindow(SUBWAY_BUNDLE, id, now), phase: st.phase, bad: st.bad, good: st.good, hold: st.hold || (hw == null ? "no-timetable" : ""), lastTryAgoSec: st.lastTry ? Math.round((now - st.lastTry) / 1000) : null, backoffSec: Math.max(0, Math.round((st.backoffUntil - now) / 1000)) };
+      const tt = estHeadwaySec(SUBWAY_BUNDLE, id, now), bl = tt == null ? estBaseline(st, now) : null;
+      const hw = tt != null ? tt : (bl ? bl.sec : null);
+      const hist = (st.hist || []).filter(function (x) { return x && now - x[0] <= EST_BASE_KEEP_MS; });
+      const L = SUBWAY_BUNDLE.lines[id];
+      out.lines[name] = { source: tt != null ? "timetable" : "baseline", headwaySec: hw, thresholdSec: hw == null ? null : Math.min(hw * 2, hw + EST_PLUS_SEC),
+        baseline: tt != null ? null : { samples: hist.length, need: EST_BASE_MIN_N, spanMin: hist.length ? Math.round((hist[hist.length - 1][0] - hist[0][0]) / 60000) : 0, needSpanMin: EST_BASE_MIN_SPAN_MS / 60000, medianSec: bl ? Math.round(bl.sec) : null },
+        windowMode: L && L.ft && L.lt ? "first-last" : "fixed-hours", inWindow: estWindowFor(SUBWAY_BUNDLE, id, now), phase: st.phase, bad: st.bad, good: st.good,
+        hold: st.hold || (hw == null ? "baseline-warmup" : ""), lastMaxGapSec: st.worst ? st.worst.gapSec : null, lastTryAgoSec: st.lastTry ? Math.round((now - st.lastTry) / 1000) : null, backoffSec: Math.max(0, Math.round((st.backoffUntil - now) / 1000)) };
     }
     return new Response(JSON.stringify(out), { status: 200, headers: CORS_H });
   }

@@ -46,7 +46,7 @@ function mkList() {
   assert.deepStrictEqual(Object.keys(r.lines), []);
   const stj = JSON.parse(await (await w.fetch(new Request('https://x.test/est-status'), env, {})).text());
   console.log('est-status:', JSON.stringify(stj.lines['9호선']), JSON.stringify(stj.lines['신분당선']));
-  assert.strictEqual(stj.lines['신분당선'].hold, 'no-timetable'); assert.strictEqual(stj.lines['9호선'].inWindow, true);
+  assert.strictEqual(stj.lines['신분당선'].source, 'baseline'); assert.strictEqual(stj.lines['신분당선'].baseline.samples, 0); assert.strictEqual(stj.lines['신분당선'].windowMode, 'fixed-hours'); assert.strictEqual(stj.lines['9호선'].source, 'timetable'); assert.strictEqual(stj.lines['9호선'].inWindow, true); assert.ok(stj.budget && stj.budget.usedToday > 0);
   console.log('PASS: /line-notices 통합(공식 우선·추정 합치기·필터) + /est-status');
 })().catch(e => { console.error('FAIL', e.message); process.exit(1); });
 // /est-status
