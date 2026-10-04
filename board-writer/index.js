@@ -39,7 +39,8 @@ async function reactAllowed(req, env) {
     return true;
   } catch (e) { return false; }
 }
-// ★ 2026-10-03 (개선안 4·5): 노선별 출퇴근 방 + 지연·혼잡 제보. 실제 사용자 글만 담는다(AI 가짜 대화 없음).
+// ★ 2026-10-03 (개선안 4·5): 노선별 출퇴근 방 + 지연·혼잡 제보.
+//   ★ 2026-10-04: 방의 일상 대화(chat)는 AI 가 채우기도 한다(generateLineTalks, ipk='ai'). 지연·혼잡 제보(delay/crowd)는 실제 사용자 것만 센다.
 //   · line_msgs: 노선(또는 버스번호)별 한 줄 대화(chat)와 제보(delay=지연, crowd=혼잡). IP 는 해시(ipk)만 저장한다.
 //   · 같은 사람이 같은 노선·역에 같은 제보를 20분 안에 또 보내도 한 번으로 센다(경보 부풀리기 방지).
 var LR_PER_IP_HR = 30;
@@ -1139,7 +1140,7 @@ function slotTopics(kst) {
 }
 __name(slotTopics, "slotTopics");
 var PERSONA_ROLES = ["직장인", "대학생", "고등학생", "취준생", "알바생", "대학원생", "신입사원"];
-async function geminiTalks(env, n, recentTalks, kst, w, wcat) {
+async function geminiTalks(env, n, recentTalks, kst, w, wcat, room) {
   if (!env.GEMINI_KEY) return null;
   try {
     const personas = NICKS.slice().sort(() => Math.random() - 0.5).slice(0, 8);
@@ -1149,10 +1150,12 @@ async function geminiTalks(env, n, recentTalks, kst, w, wcat) {
     const ctx = recentTalks.slice(-20).map((t) => t.nick + ": " + t.text).join("\n") || "(대화 시작)";
     const wtxt = w ? "기온 " + w.temp + "도" + (wcat === "rain" ? ", 비" : wcat === "hot" ? ", 폭염" : wcat === "cold" ? ", 한파" : wcat === "snow" ? ", 눈" : ", 맑은 편") : "보통";
     const tp = slotTopics(kst);
+    // ★ 2026-10-04 노선별 방: 그 노선 이용자 입장에서 말하되, 실시간 운행 상황은 지어내지 않는다(지연·혼잡은 이용자 제보 기능이 따로 다룬다).
+    const lineRule = room ? "\n이 방은 '" + room.name + "' 이용자 방이다. 이 노선을 자주 타는 사람들의 말투와 일상(자주 가는 역: " + room.stns.join("\xB7") + ")으로 쓴다. 이 노선의 지금 운행 상황(지연\xB7사고\xB7고장\xB7운행중단\xB7얼마나 붐비는지)을 사실처럼 말하거나 지어내지 마라." : "";
     const personaStr = personas.map(function(p, i) {
       return p + "(" + PERSONA_ROLES[i % PERSONA_ROLES.length] + ")";
     }).join(", ");
-    const prompt = "너는 한국의 지하철\xB7버스로 출퇴근하고 등하교하는 사람들이 모인 실시간 단체 오픈채팅방을 재현한다. 진짜 카톡 오픈채팅처럼 자연스럽게.\n지금: " + slotLabel(kst) + ", 날씨: " + wtxt + "\n방금 전 대화:\n" + ctx + "\n\n이 흐름을 자연스럽게 이어서 채팅 " + n + "개를 써라.\n참여자(역할 고정): " + personaStr + "\n규칙:\n1. 진짜 사람처럼. 완결된 문장 말고 실제 채팅투 — 짧게 툭툭, 오타틱한 줄임말(ㄱㄱ,ㅇㅇ,ㅇㅈ,ㄹㅇ,ㅋㅋ,ㅠ,ㄷㄷ,담,낼,걍,넘,쫌), 한 명이 두세 줄 연달아 치기도 함.\n2. 서로 진짜 대화. 앞사람 말에 대답/맞장구/되묻기/딴지/부러움/투정. 각자 혼잣말 나열 절대 금지.\n3. 직장인은 회사\xB7야근\xB7상사\xB7월급, 학생은 수업\xB7과제\xB7시험\xB7급식 얘기로 서로 티키타카 (부러워하거나 놀리거나).\n4. 지금 시간대 얘기만: " + tp.ok + ". 금지: " + tp.no + '\n5. 방금 전 대화에 나온 말\xB7소재는 절대 반복하지 마. 새 메시지에끼리도 같은 말 반복 금지.\n6. 가끔 새 화제를 누가 툭 던져서 주제가 자연스럽게 바뀌어도 됨.\n7. 정치 편들기\xB7욕설\xB7혐오\xB7실존인물 비방 금지. 이모지는 거의 안 씀.\nJSON 배열만: [{"n":"닉","t":"채팅내용","d":지연초(3~15)}]';
+    const prompt = "너는 한국의 지하철\xB7버스로 출퇴근하고 등하교하는 사람들이 모인 실시간 단체 오픈채팅방을 재현한다. 진짜 카톡 오픈채팅처럼 자연스럽게." + lineRule + "\n지금: " + slotLabel(kst) + ", 날씨: " + wtxt + "\n방금 전 대화:\n" + ctx + "\n\n이 흐름을 자연스럽게 이어서 채팅 " + n + "개를 써라.\n참여자(역할 고정): " + personaStr + "\n규칙:\n1. 진짜 사람처럼. 완결된 문장 말고 실제 채팅투 — 짧게 툭툭, 오타틱한 줄임말(ㄱㄱ,ㅇㅇ,ㅇㅈ,ㄹㅇ,ㅋㅋ,ㅠ,ㄷㄷ,담,낼,걍,넘,쫌), 한 명이 두세 줄 연달아 치기도 함.\n2. 서로 진짜 대화. 앞사람 말에 대답/맞장구/되묻기/딴지/부러움/투정. 각자 혼잣말 나열 절대 금지.\n3. 직장인은 회사\xB7야근\xB7상사\xB7월급, 학생은 수업\xB7과제\xB7시험\xB7급식 얘기로 서로 티키타카 (부러워하거나 놀리거나).\n4. 지금 시간대 얘기만: " + tp.ok + ". 금지: " + tp.no + '\n5. 방금 전 대화에 나온 말\xB7소재는 절대 반복하지 마. 새 메시지에끼리도 같은 말 반복 금지.\n6. 가끔 새 화제를 누가 툭 던져서 주제가 자연스럽게 바뀌어도 됨.\n7. 정치 편들기\xB7욕설\xB7혐오\xB7실존인물 비방 금지. 이모지는 거의 안 씀.\nJSON 배열만: [{"n":"닉","t":"채팅내용","d":지연초(3~15)}]';
     const r = await fetchT("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=" + env.GEMINI_KEY, 12e3, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1175,9 +1178,9 @@ async function geminiTalks(env, n, recentTalks, kst, w, wcat) {
   }
 }
 __name(geminiTalks, "geminiTalks");
-function fallbackTalks(n, kst, w, wcat) {
+function fallbackTalks(n, kst, w, wcat, room) {
   const out = [];
-  const L = rnd(LINES);
+  const L = room || rnd(LINES);
   const ctx = { line: L.name, stn: rnd(L.stns), stn2: "", temp: w ? String(w.temp) : "30" };
   while (out.length < n) {
     let key = pickDialogKey(kst, wcat) || slotDialogKey(kst);
@@ -1354,6 +1357,105 @@ async function generateTalks(env) {
   return { made, planned: n, ai: usedAi, weather: wcat || "normal" };
 }
 __name(generateTalks, "generateTalks");
+// ══════════════════════════════════════════════════════════════════════
+// ★ 2026-10-04 (YJ): 노선별 실시간소통 — 각 호선 방에 AI 가 대화를 올린다. 이용자가 많은 노선일수록 글이 많다.
+//   · 방별 비중(w)은 대략적인 노선 이용 규모다. 한 주기(20분)의 전체 줄 수(talkCount)를 비중대로 나눈다.
+//   · 저장은 line_msgs(kind='chat', ipk='ai'). 지연·혼잡 제보(kind delay/crowd)는 만들지 않는다 → 경보 집계(lrAlerts)에 섞이지 않는다.
+//   · 대화 내용에서도 그 노선의 '지금 운행 상황'을 지어내지 않도록 프롬프트에서 막는다(geminiTalks 의 lineRule).
+//   · 전체 탭(GET /talks)은 이 방들의 대화를 시간순으로 모아서 내려준다. AI 글은 2일 뒤 지운다(실제 이용자 글은 14일).
+//   · 6개월 중복 원장(talkLedgerFilter)은 방 구분 없이 함께 쓴다.
+// ══════════════════════════════════════════════════════════════════════
+var LR_AI_ROOMS = [
+  { name: "2호선", w: 10, stns: ["강남", "홍대입구", "신촌", "잠실", "성수", "사당", "건대입구"] },
+  { name: "1호선", w: 6, stns: ["서울역", "시청", "종각", "구로", "부평", "인천"] },
+  { name: "5호선", w: 6, stns: ["여의도", "광화문", "천호", "왕십리", "김포공항"] },
+  { name: "3호선", w: 5.5, stns: ["교대", "고속터미널", "압구정", "연신내", "양재"] },
+  { name: "4호선", w: 5.5, stns: ["사당", "명동", "동대문", "혜화", "서울역"] },
+  { name: "7호선", w: 5.5, stns: ["가산디지털단지", "건대입구", "상봉", "온수", "논현"] },
+  { name: "9호선", w: 4, stns: ["김포공항", "여의도", "노량진", "신논현", "가양"] },
+  { name: "6호선", w: 3.5, stns: ["공덕", "이태원", "합정", "월드컵경기장", "신내"] },
+  { name: "수인분당선", w: 3.5, stns: ["왕십리", "서울숲", "정자", "인하대", "수원"] },
+  { name: "경의중앙선", w: 3, stns: ["홍대입구", "공덕", "왕십리", "용산", "일산"] },
+  { name: "8호선", w: 2.5, stns: ["잠실", "천호", "가락시장", "복정", "암사"] },
+  { name: "신분당선", w: 2, stns: ["강남", "판교", "정자", "광교", "양재"] },
+  { name: "공항철도", w: 1.5, stns: ["서울역", "홍대입구", "김포공항", "검암", "계양"] },
+  { name: "인천1호선", w: 1.5, stns: ["부평", "인천시청", "계양", "송도"] },
+  { name: "김포골드라인", w: 1.5, stns: ["김포공항", "걸포북변", "구래", "풍무"] },
+  { name: "경춘선", w: 1, stns: ["청량리", "상봉", "평내호평", "가평", "춘천"] },
+  { name: "GTX-A", w: 1, stns: ["수서", "성남", "동탄", "운정", "서울역"] },
+  { name: "인천2호선", w: 1, stns: ["검단오류", "주안", "석남", "인천시청"] }
+];
+async function generateLineTalks(env) {
+  const kst = kstNow();
+  const total = talkCount(kst);
+  if (total === 0) return { made: 0, reason: "dawn-quiet" };
+  await ensureLineRoom(env);
+  const w = await getWeather();
+  const wcat = weatherCat(w);
+  const wsum = LR_AI_ROOMS.reduce((a, r) => a + r.w, 0);
+  const plan = [];
+  for (const room of LR_AI_ROOMS) {
+    const share = total * room.w / wsum;
+    const k = Math.floor(share) + (Math.random() < share - Math.floor(share) ? 1 : 0);
+    if (k > 0) plan.push({ room, k });
+  }
+  const scripts = [];
+  let usedAi = 0;
+  for (let i = 0; i < plan.length; i += 3) {
+    const part = await Promise.all(plan.slice(i, i + 3).map(async (p) => {
+      let recent = [];
+      try {
+        const rs = await env.DB.prepare("SELECT nick, text FROM line_msgs WHERE line=?1 AND kind='chat' ORDER BY id DESC LIMIT 30").bind(p.room.name).all();
+        recent = (rs.results || []).reverse();
+      } catch (e) {}
+      let script = [];
+      if (p.k >= 4) {
+        const g = await geminiTalks(env, Math.min(p.k, 40), recent, kst, w, wcat, p.room);
+        if (g && g.length) { script = g; usedAi++; }
+      }
+      if (script.length < p.k) script = script.concat(fallbackTalks(p.k - script.length, kst, w, wcat, p.room));
+      const seen = {};
+      recent.forEach((t) => { seen[String(t.text).replace(/[\s.,!?~…·ㅋㅎㅠㅜzZ]/g, "")] = 1; });
+      script = script.filter((m) => {
+        const k = String(m.text).replace(/[\s.,!?~…·ㅋㅎㅠㅜzZ]/g, "");
+        if (!k || seen[k] || containsBadWord(m.text) || containsBadWord(m.nick)) return false;
+        seen[k] = 1;
+        return true;
+      });
+      script.forEach((m) => { m.line = p.room.name; });
+      return script;
+    }));
+    part.forEach((sc) => sc.forEach((m) => scripts.push(m)));
+  }
+  let kept;
+  try {
+    kept = await talkLedgerFilter(env, scripts);
+  } catch (e) {
+    console.log("[board-writer][linetalks] 원장 처리 실패, 이번 주기는 건너뜀:", e.message);
+    return { made: 0, skipped: "ledger-failed" };
+  }
+  const SPAN = 19 * 60;
+  const byLine = {};
+  kept.forEach((m) => { (byLine[m.line] = byLine[m.line] || []).push(m); });
+  const stmts = [];
+  const t0 = Date.now();
+  for (const ln of Object.keys(byLine)) {
+    const arr = byLine[ln];
+    const perMsg = SPAN / arr.length;
+    let ts = t0 + rndInt(2, 6) * 1e3;
+    for (const m of arr) {
+      ts += Math.floor(Math.max(3, perMsg * (0.6 + Math.random() * 0.8)) * 1e3);
+      stmts.push(env.DB.prepare("INSERT INTO line_msgs (line,kind,nick,text,stn,ipk,ts) VALUES (?1,'chat',?2,?3,NULL,'ai',?4)").bind(ln, m.nick, m.text, ts));
+    }
+  }
+  let made = 0;
+  for (let i = 0; i < stmts.length; i += 50) {
+    try { await env.DB.batch(stmts.slice(i, i + 50)); made += Math.min(50, stmts.length - i); }
+    catch (e) { console.log("[board-writer][linetalks] INSERT 실패:", e.message); break; }
+  }
+  return { made, planned: total, rooms: Object.keys(byLine).length, aiRooms: usedAi, weather: wcat || "normal" };
+}
+__name(generateLineTalks, "generateLineTalks");
 var REACT_FALLBACK = [
   "ㅇㅈ",
   "ㄹㅇ?",
@@ -1367,10 +1469,12 @@ var REACT_FALLBACK = [
   "어디쪽인데?",
   "인정합니다"
 ];
-async function generateReaction(env, userNick, userText) {
+async function generateReaction(env, userNick, userText, line) {
   let recent = [];
   try {
-    const rs = await env.DB.prepare("SELECT nick, text FROM talks WHERE ts <= ? ORDER BY ts DESC, id DESC LIMIT 12").bind(Date.now()).all();   // 아직 화면에 안 나온(미래 시각) 줄은 문맥에서 뺀다
+    const rs = line
+      ? await env.DB.prepare("SELECT nick, text FROM line_msgs WHERE line=?1 AND kind='chat' AND ts <= ?2 ORDER BY ts DESC, id DESC LIMIT 12").bind(line, Date.now()).all()
+      : await env.DB.prepare("SELECT nick, text FROM talks WHERE ts <= ? ORDER BY ts DESC, id DESC LIMIT 12").bind(Date.now()).all();   // 아직 화면에 안 나온(미래 시각) 줄은 문맥에서 뺀다
     recent = (rs.results || []).reverse();
   } catch (e) {
   }
@@ -1423,6 +1527,13 @@ async function generateReaction(env, userNick, userText) {
   let ts = Date.now();
   for (const msg of replies) {
     ts += msg.d * 1e3;
+    if (line) {
+      try {
+        await env.DB.prepare("INSERT INTO line_msgs (line,kind,nick,text,stn,ipk,ts) VALUES (?1,'chat',?2,?3,NULL,'ai',?4)").bind(line, msg.nick, msg.text, ts).run();
+        made++;
+      } catch (e) { break; }
+      continue;
+    }
     try {
       const data = { nick: msg.nick, text: msg.text, ts };
       const use = Object.keys(data).filter((k) => cols.indexOf(k) >= 0);
@@ -1472,10 +1583,10 @@ __name(getCols, "getCols");
 var worker_default = {
   // 크론 (20분마다)
   async scheduled(event, env, ctx) {
-    ctx.waitUntil((async () => { try { await ensureLineRoom(env); await env.DB.prepare("DELETE FROM line_msgs WHERE ts < ?1").bind(Date.now() - 14 * 24 * 3600 * 1000).run(); await env.DB.prepare("DELETE FROM line_reports WHERE ts < ?1").bind(Date.now() - 14 * 24 * 3600 * 1000).run(); } catch (e) {} })());
+    ctx.waitUntil((async () => { try { await ensureLineRoom(env); await env.DB.prepare("DELETE FROM line_msgs WHERE ts < ?1").bind(Date.now() - 14 * 24 * 3600 * 1000).run(); await env.DB.prepare("DELETE FROM line_reports WHERE ts < ?1").bind(Date.now() - 14 * 24 * 3600 * 1000).run(); await env.DB.prepare("DELETE FROM line_msgs WHERE ipk = 'ai' AND ts < ?1").bind(Date.now() - 2 * 24 * 3600 * 1000).run(); } catch (e) {} })());
     ctx.waitUntil(Promise.all([
       generatePosts(env).then((r) => console.log("[board-writer][posts]", JSON.stringify(r))),
-      generateTalks(env).then((r) => console.log("[board-writer][talks]", JSON.stringify(r))),
+      generateLineTalks(env).then((r) => console.log("[board-writer][linetalks]", JSON.stringify(r))).catch((e) => console.log("[board-writer][linetalks] 실패:", e.message)),
       generateComments(env).then((r) => console.log("[board-writer][comments]", JSON.stringify(r))).catch((e) => console.log("[board-writer][comments] 실패:", e.message))
     ]));
   },
@@ -1654,7 +1765,11 @@ var worker_default = {
       }
       if (!snap) {
         try {
-          const rs = await env.DB.prepare("SELECT id, nick, text, ts FROM talks WHERE ts <= ? ORDER BY ts DESC, id DESC LIMIT 100").bind(Date.now()).all();
+          // ★ 2026-10-04: 전체 = 각 노선 방(line_msgs 의 chat)을 시간순으로 모은 것. 각 줄에 line(노선명)이 붙는다.
+          //   옛 talks(전체에서 노선 없이 보낸 말·예전 반응)도 최근 6시간분은 함께 섞는다(line 은 null).
+          await ensureLineRoom(env);
+          const nowT = Date.now();
+          const rs = await env.DB.prepare("SELECT * FROM (SELECT 'L' || id AS id, nick, text, ts, line FROM line_msgs WHERE kind='chat' AND ts <= ?1 AND ts > ?2" + LR_HIDDEN_SQL + " UNION ALL SELECT id, nick, text, ts, NULL AS line FROM talks WHERE ts <= ?1 AND ts > ?2) ORDER BY ts DESC LIMIT 100").bind(nowT, nowT - 6 * 3600 * 1000).all();
           snap = { talks: (rs.results || []).reverse() };
           try {
             await caches.default.put(snapKey, new Response(JSON.stringify(snap), { headers: { "Content-Type": "application/json", "Cache-Control": "public, s-maxage=5" } }));
@@ -1763,13 +1878,20 @@ var worker_default = {
       }
       const nick = String(body.nick || "나").slice(0, 16);
       const text = String(body.text || "").slice(0, 200).trim();
+      const rline = body.line == null ? "" : String(body.line).trim();   // ★ 2026-10-04: 노선 방에서 보낸 말이면 그 방에 저장하고 그 방에서 반응한다
+      if (rline && !lrLineOk(rline)) return new Response(JSON.stringify({ ok: false, error: "line" }), { status: 400, headers: cors });
       if (!text) return new Response(JSON.stringify({ ok: false, error: "empty" }), { status: 400, headers: cors });
       if (containsBadWord(nick) || containsBadWord(text)) return new Response(JSON.stringify({ ok: false, error: "filtered" }), { status: 400, headers: cors });
       // ★ 2026-10-03: 사용자가 친 말을 대화에 저장해야 다른 사용자에게도 보인다(전에는 AI 반응만 저장).
       //   욕설·비방은 저장하지 않는다. 사용자 말 저장은 AI 반응과 별도의 한도(IP당 시간당 40줄)를 쓴다.
       let stored = false;
       try {
-        if (!containsBadWord(nick) && !containsBadWord(text) && await msgAllowed(req, env)) {
+        if (rline && !containsBadWord(nick) && !containsBadWord(text) && await msgAllowed(req, env)) {
+          await ensureLineRoom(env);
+          const ipk = await lrIpHash(req);
+          await env.DB.prepare("INSERT INTO line_msgs (line,kind,nick,text,stn,ipk,ts) VALUES (?1,'chat',?2,?3,NULL,?4,?5)").bind(rline, nick, text.slice(0, 120), ipk, Date.now()).run();
+          stored = true;
+        } else if (!rline && !containsBadWord(nick) && !containsBadWord(text) && await msgAllowed(req, env)) {
           const info = await getCols(env, "talks");
           const data = { nick, text: text.slice(0, 120), ts: Date.now() };
           const use = Object.keys(data).filter((k) => info.indexOf(k) >= 0);
@@ -1782,7 +1904,7 @@ var worker_default = {
       }
       if (!await reactAllowed(req, env))
         return new Response(JSON.stringify({ ok: false, error: "rate limited", stored }), { status: 429, headers: cors });
-      const r = await generateReaction(env, nick, text);
+      const r = await generateReaction(env, nick, text, rline || null);
       return new Response(JSON.stringify({ ok: true, stored, result: r }), { headers: cors });
     }
     if (url.pathname === "/gentalk") {
