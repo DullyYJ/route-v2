@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-04bu";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-04bv";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -5335,6 +5335,7 @@ var EST_GENERIC_END_MIN = 22 * 60 + 30;
 var EST_DAILY_CAP_DEFAULT = 400;             // 지연 추정이 하루에 쓸 서울 API 호출 상한(전 노선 합계). 앱 도착정보와 같은 키를 나눠 쓰므로 일부만 쓴다 — 환경변수 EST_DAILY_CAP 으로 조정
 var EST_LATE_CUTOFF_MIN = 23 * 60;      // 심야: 23시부터는 판정하지 않는다(막차 전 감차·종착 차례가 섞여 간격이 들쭉날쭉)
 var EST_QUIET_BACKOFF_MS = 30 * 60 * 1000;   // 일일 한도(ERROR-337) 등이면 이만큼 쉰다
+var EST_REJECT_BACKOFF_MS = 10 * 60 * 1000;  // 서울/중계가 요청을 거절(HTTP 4xx)하면 두드리지 않고 이만큼 쉰다
 var EST_MEM_TTL_MS = 30 * 1000;
 var _estMem = { at: 0, out: null };
 var _estChains = {};
@@ -5530,6 +5531,7 @@ async function estFetchPositions(env, lineName) {
     var txt = await res.text();
     var j = null; try { j = JSON.parse(txt); } catch (e) {}
     if (!j) return { err: "http-" + res.status };
+    if (j.ok === false && j.upstream) return { err: "upstream-" + j.upstream };   // ★ 중계(gentle-lab)가 서울 업스트림의 거절을 JSON 으로 알려 준 경우
     var code = (j.errorMessage && j.errorMessage.code) || j.code || "";
     if (/ERROR-337|ERROR-336|INFO-100/.test(String(code))) return { err: "quota", code: String(code) };
     if (!Array.isArray(j.realtimePositionList)) return { err: String(code || "no-list") };
@@ -5553,6 +5555,7 @@ async function estRefreshLine(env, lineName, lineId, st, now, bundle) {
       var r = await estFetchPositions(env, lineName);
       if (r.err) {
         if (r.err === "quota") st.backoffUntil = now + EST_QUIET_BACKOFF_MS;
+        else if (/^(upstream|http)-4\d\d$/.test(r.err)) st.backoffUntil = now + EST_REJECT_BACKOFF_MS;
         obs = { verdict: "hold", reason: r.err };
       } else {
         var g = estGaps(r.list, estChain(bundle, lineId), now);

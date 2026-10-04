@@ -198,6 +198,20 @@ const run = async (m, now, official = {}) => { api._resetMem(); return await api
     t('9호선(시간표 있음)은 표본을 모으지 않고 시간표 기준으로 판정', () => { assert.strictEqual(st.source, 'timetable'); assert.strictEqual((st.hist || []).length, 0); assert.strictEqual(st.hwSec, hw); });
   }
 
+  {
+    // 중계가 서울 업스트림 거절을 JSON 으로 알려 주는 경우: 이유를 구분해 기록하고 10분 쉰다(두드리지 않음)
+    const m = sbMake(); const urls = []; m.env.BUSAPI.fetch = async (req) => { urls.push(decodeURIComponent(new URL(req.url).searchParams.get('path'))); return new Response(JSON.stringify({ ok: false, error: 'upstream 400 (empty body)', upstream: 400 }), { status: 400 }); };
+    let now = WD_NOON; const st1 = await api.estRefreshLine(m.env, '신분당선', 'SBD', undefined, now, B);
+    t('중계의 업스트림 거절(JSON)은 hold:upstream-400 + 10분 쉼, 정상 표시 없음', () => { assert.strictEqual(st1.hold, 'upstream-400'); assert.ok(st1.backoffUntil >= now + 9 * 60e3); assert.strictEqual(api.estPublic(st1, now), null); });
+    urls.length = 0; await api.estimateNotices(m.env, undefined, {}, now + 150e3, B);     // 신분당선은 쉬는 중, 나머지 노선은 평소대로 부른다
+    t('쉬는 동안(10분 안)에는 신분당선을 다시 부르지 않는다(다른 노선은 부른다)', () => { assert.ok(!urls.some(u => /신분당선/.test(u)), JSON.stringify(urls)); assert.ok(urls.some(u => /9호선/.test(u))); });
+    urls.length = 0; await api.estimateNotices(m.env, undefined, {}, now + 11 * 60e3, B);    // 10분이 지나면 다시 시도
+    t('10분이 지나면 다시 시도한다', () => assert.ok(urls.some(u => /신분당선/.test(u)), JSON.stringify(urls)));
+    // 본문 없는 4xx(예전 중계)도 같은 취급
+    const m2 = sbMake(); m2.env.BUSAPI.fetch = async () => new Response('', { status: 400 });
+    const st2 = await api.estRefreshLine(m2.env, '신분당선', 'SBD', undefined, now, B);
+    t('본문 없는 400(예전 중계)도 hold:http-400 + 10분 쉼', () => { assert.strictEqual(st2.hold, 'http-400'); assert.ok(st2.backoffUntil > now); });
+  }
   const noKv = await api.estimateNotices({ BUSAPI: {} }, undefined, {}, WD_NOON, B);
   t('KV 바인딩이 없으면 보류', () => assert.deepStrictEqual(noKv, {}));
   console.log('\n통과', pass, '건' + (process.exitCode ? ' — 실패 있음' : ''));
