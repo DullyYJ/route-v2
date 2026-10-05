@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-05i";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-05j";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -4471,7 +4471,8 @@ async function fetchStopArrivalsAny(cityCode, nodeId, env, deadline, budget, sta
     if (!c) return true;                     // 우리 표에 없는 id 는 판단 보류
     return hav(base[0], base[1], c[0], c[1]) <= SIBLING_MAX_M;
   };
-  const ids = stopSiblings(nodeId).filter(nearOk).slice(0, 3);   // 앱도 인접 등록분을 3곳까지만 합친다
+  // ★ 2026-10-05: 서울 stId(SEL+9자리)는 TAGO 인접 id 규칙(첫 자리 1·3·2·4 바꿈)이 맞지 않는다 — 다른 정류장을 부르게 되므로 그 id 하나만 쓴다.
+  const ids = (seoulStId(nodeId) ? [nodeId] : stopSiblings(nodeId)).filter(nearOk).slice(0, 3);   // 앱도 인접 등록분을 3곳까지만 합친다
   const want = (wantNos || []).map(noKey).filter(Boolean);
   const covered = (m) => {
     if (!want.length) return (m && (m.__names || []).length) ? true : false;
@@ -4518,11 +4519,121 @@ async function fetchStopArrivalsAny(cityCode, nodeId, env, deadline, budget, sta
 }
 __name(fetchStopArrivalsAny, "fetchStopArrivalsAny");
 
+// ★ 2026-10-05 (YJ: 서울 버스도 실제 도착시간으로 — 지금까지는 '예상'으로만 나왔다):
+//   TAGO 도착정보는 서울 정류장엔 항상 빈 응답이라 서울 버스는 한 번도 조회되지 않았다. 서울시 버스도착정보(ws.bus.go.kr,
+//   getLowArrInfoByStId)는 Cloudflare 에서 0.25초에 닿고(실측) 같은 공공데이터포털 키로 쓴다. 서울 정류장(SEL+9자리 = 서울 stId)만 부른다.
+//   · 응답: msgBody.itemList[] — 노선 busRouteAbrv(번호)·rtNm, 도착까지 traTime1/traTime2(초). 운행종료·출발대기는 0 이라 건너뛴다.
+//   · 호출량 한도(서울 하루 1만건): 한도 응답이 나오면 키2 로 넘기고, 둘 다 막히면 20분간 서울 조회를 쉰다(그동안은 '예상' — 원래와 같다).
+//   · 끄는 스위치: 환경변수 SEOUL_BUS_LIVE=0 (기본 켜짐)
+var SEOUL_BUS_URL = "http://ws.bus.go.kr/api/rest/arrive/getLowArrInfoByStId";
+var SEOUL_BRK = { n: 0, until: 0 };
+var SEOUL_QUOTA = { until: 0 };
+var SEOUL_QUOTA_REST_MS = 20 * 60 * 1000;
+function seoulStId(id) {
+  const m = /^SEL([0-9]{9})$/.exec(String(id || ""));
+  return m ? m[1] : null;
+}
+__name(seoulStId, "seoulStId");
+function seoulBusOn(env) {
+  if (!env || String(env.SEOUL_BUS_LIVE == null ? "1" : env.SEOUL_BUS_LIVE) === "0") return false;
+  return !!(env.TAGO_KEY || env.DATA_GO_KR_KEY || env.TAGO_KEY2);
+}
+__name(seoulBusOn, "seoulBusOn");
+function seoulParse(txt) {
+  let j = null;
+  try { j = JSON.parse(txt); } catch (e) {
+    return { ok: false, quota: /LIMITED_NUMBER|REQUESTS_EXCEEDS|EXCEEDS/i.test(String(txt)), why: "not-json: " + String(txt).replace(/\s+/g, " ").slice(0, 60) };
+  }
+  const h = j && j.msgHeader;
+  if (!h) return { ok: false, quota: false, why: "no-header" };
+  const cd = String(h.headerCd);
+  if (cd === "4") return { ok: true, items: [] };                      // 결과 없음(운행하는 차가 없다)
+  if (cd !== "0") return { ok: false, quota: cd === "7" || /LIMIT|EXCEED|한도/i.test(String(h.headerMsg || "")), why: "hdr " + cd + " " + String(h.headerMsg || "").slice(0, 40) };
+  let items = j.msgBody && j.msgBody.itemList;
+  items = items ? (Array.isArray(items) ? items : [items]) : [];
+  return { ok: true, items };
+}
+__name(seoulParse, "seoulParse");
+function seoulToArrivals(items) {
+  const m = { __via: "seoul" }, names = [];
+  const push2 = (k, t) => { if (!k) return; (m[k] = m[k] || []).push(t); };
+  for (const it of items) {
+    const ab = String(it && it.busRouteAbrv != null ? it.busRouteAbrv : "").trim();
+    const rn = String(it && it.rtNm != null ? it.rtNm : "").trim();
+    const no = ab || rn;
+    if (!no) continue;
+    for (const n of [1, 2]) {
+      const msg = String(it["arrmsg" + n] || "");
+      if (/운행종료|출발대기|운행대기/.test(msg)) continue;
+      let t = parseInt(it["traTime" + n], 10);
+      if (!isFinite(t)) continue;
+      if (t === 0 && (String(it["isArrive" + n]) === "1" || /곧 도착/.test(msg))) t = 5;
+      if (t <= 0 || t > 3600) continue;
+      if (names.indexOf(no) < 0) names.push(no);
+      push2(no, t);
+      const k = noKey(no);
+      if (k !== no) push2(k, t);
+      if (rn && rn !== no) { push2(rn, t); const k2 = noKey(rn); if (k2 !== rn && k2 !== k) push2(k2, t); }
+    }
+  }
+  for (const k in m) if (Array.isArray(m[k])) m[k].sort((a, b) => a - b);
+  m.__names = names;
+  return m;
+}
+__name(seoulToArrivals, "seoulToArrivals");
+async function fetchSeoulArrivals(stId, env, deadline, budget) {
+  if (SEOUL_QUOTA.until > Date.now()) throw new Error("seoul-quota");
+  if (SEOUL_BRK.until > Date.now()) throw new Error("seoul-breaker");
+  if (budget) {
+    if (budget.used >= LIVE_MAX_CALLS) throw new Error("조회 횟수 상한");
+    budget.used++;
+  }
+  const k1 = (env && (env.TAGO_KEY || env.DATA_GO_KR_KEY)) || "", k2 = (env && env.TAGO_KEY2) || "";
+  const keys = [k1, k2 && k2 !== k1 ? k2 : ""].filter(Boolean);
+  if (!keys.length) throw new Error("no seoul key");
+  await liveAcquire(deadline);
+  let parsed = null, why = "", quotaN = 0;
+  try {
+    for (const key of keys) {
+      let res, txt;
+      try {
+        const t = Math.max(200, Math.min(LIVE_TIMEOUT_MS, budgetLeft(deadline)));
+        res = await Promise.race([
+          fetch(SEOUL_BUS_URL + "?serviceKey=" + encodeURIComponent(key) + "&stId=" + encodeURIComponent(stId) + "&resultType=json"),
+          new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), t))
+        ]);
+        txt = await res.text();
+      } catch (e) {
+        if (String((e && e.message) || e) === "timeout" && ++SEOUL_BRK.n >= 3) { SEOUL_BRK.until = Date.now() + LIVE_BRK_MS; SEOUL_BRK.n = 0; }
+        throw e;
+      }
+      SEOUL_BRK.n = 0;
+      const p = seoulParse(txt);
+      if (p.ok) { parsed = p; break; }
+      why = p.why;
+      if (p.quota) { quotaN++; continue; }          // 호출량 초과만 다음 키로 — 다른 오류는 키 문제가 아니다
+      break;
+    }
+  } finally {
+    liveRelease();
+  }
+  if (!parsed) {
+    if (quotaN >= keys.length) SEOUL_QUOTA.until = Date.now() + SEOUL_QUOTA_REST_MS;
+    throw new Error("seoul: " + why);
+  }
+  return seoulToArrivals(parsed.items);
+}
+__name(fetchSeoulArrivals, "fetchSeoulArrivals");
+
 async function fetchStopArrivalsLive(cityCode, nodeId, env, deadline, budget) {
   // ★ 02an (실측 2026-10-02): TAGO 도착정보는 서울(cityCode 11) 정류장에 대해 항상 빈 응답이다(SEL 정류장 43곳 중 0곳, /live-test 도 3경로 모두
   //   resultCode 00 + totalCount 0 — 인천 ICB 는 18/18 응답). 그런데도 요청마다 서울 정류장 몇 곳을 부르느라 실시간 단계가 1.4~1.8초 걸리고
   //   공공API 호출 한도만 썼다. 서울용 실시간 출처(TOPIS 키)가 생기기 전까진 서울은 호출하지 않고 '정보 없음'으로 돌려준다(결과는 원래도 빈 값이었다).
-  if (String(cityCode) === "11" && !(env && env.SEOUL_LIVE_TAGO === "1")) return { __names: [], __via: "skip-seoul" };
+  if (String(cityCode) === "11" && !(env && env.SEOUL_LIVE_TAGO === "1")) {
+    const sid9 = seoulBusOn(env) ? seoulStId(nodeId) : null;
+    if (sid9) return await fetchSeoulArrivals(sid9, env, deadline, budget);   // 2026-10-05: 서울 정류장은 서울시 도착정보로
+    return { __names: [], __via: "skip-seoul" };
+  }
   // ★ 02ba (실측 2026-10-03 08시): 경기·인천 도착정보가 연달아 시간초과(1.8초×2단계=약 3.8초 낭비, 결과엔 반영 0건)인 때가 있다.
   //   isolate 안에서 시간초과가 3번 쌓이면 LIVE_BRK_MS(2026-10-05부터 8초)간 실시간 조회를 건너뛰어(가정치 사용 — 원래도 빈 응답과 같은 경로) 응답이 느려지지 않게 한다.
   if (LIVE_BRK.until > Date.now()) throw new Error("live-breaker");
@@ -5047,6 +5158,7 @@ async function applyLiveWaits(out, stat, env, deadline) {
   if (stat) {
     stat.keySet = !!(env && (env.TAGO_KEY || env.DATA_GO_KR_KEY));
     stat.binding = !!(env && env.BUSAPI && typeof env.BUSAPI.fetch === "function");
+    stat.seoulBus = seoulBusOn(env);
   }
   const targets = /* @__PURE__ */ new Map();
   // ★ 첫 버스 + 곳(15분 이내) 타는 환승 버스까지 대상으로 삼는다
@@ -5056,7 +5168,7 @@ async function applyLiveWaits(out, stat, env, deadline) {
       const L2 = e.leg;
       if (!L2 || !L2.boardStopId) continue;
       const cc2 = String(L2.line || "").split("_")[0];
-      if (!/^[0-9]{2,5}$/.test(cc2) || cc2 === "11" || cc2.charAt(0) === "3") continue;
+      if (!/^[0-9]{2,5}$/.test(cc2) || (cc2 === "11" && !(seoulBusOn(env) && seoulStId(L2.boardStopId))) || cc2.charAt(0) === "3") continue;
       targets.set(cc2 + "|" + stopNorm(L2.boardStopId), [cc2, L2.boardStopId]);
     }
   }
@@ -5064,8 +5176,8 @@ async function applyLiveWaits(out, stat, env, deadline) {
     const L = firstBusLeg(out[k]);
     if (!L || !L.boardStopId) continue;
     const cc = String(L.line || "").split("_")[0];
-    // 서울(11)·경기(31xxx)는 TAGO 도착정보 미지원 → 건드리지 않는다
-    if (!/^[0-9]{2,5}$/.test(cc) || cc === "11" || cc.charAt(0) === "3") continue;
+    // 경기(31xxx)는 TAGO 도착정보 미지원 → 건드리지 않는다. 서울(11)은 서울시 도착정보(SEL 정류장)만 2026-10-05부터 조회한다.
+    if (!/^[0-9]{2,5}$/.test(cc) || (cc === "11" && !(seoulBusOn(env) && seoulStId(L.boardStopId))) || cc.charAt(0) === "3") continue;
     targets.set(cc + "|" + stopNorm(L.boardStopId), [cc, L.boardStopId]);
   }
   if (stat) stat.liveStops = targets.size;
@@ -6367,36 +6479,6 @@ async function handleFetch(request, env, ctx) {
     } catch (e) {
       return new Response(JSON.stringify({ error: String((e && e.message) || e) }), { status: 500, headers: CORS_H });
     }
-  }
-
-  // ★ 2026-10-05 (서울 버스 도착 시험 — 확인 뒤 삭제할 것): /seoul-bus-test?stId=101000301[&op=getLowArrInfoByStId]
-  //   ws.bus.go.kr(서울시 버스도착정보) 가 Cloudflare 에서 닿는지·응답 모양이 어떤지 본다.
-  if (url.pathname === "/seoul-bus-test") {
-    const sid = String(url.searchParams.get("stId") || "101000301").replace(/[^0-9]/g, "").slice(0, 12);
-    const opq = url.searchParams.get("op");
-    const ops = opq ? [opq.replace(/[^A-Za-z]/g, "").slice(0, 40)] : ["getLowArrInfoByStId", "getLowArrInfoByStIdList"];
-    const keys = [["key", (env && (env.TAGO_KEY || env.DATA_GO_KR_KEY)) || ""], ["key2", (env && env.TAGO_KEY2) || ""]].filter((x) => x[1]);
-    const out3 = { stId: sid, haveKeys: keys.map((x) => x[0]), tries: [] };
-    const jobs = [];
-    for (const op of ops) for (const [kn, kv] of keys) for (const json of [false, true]) {
-      jobs.push((async () => {
-        const t0 = Date.now(), r = { op, key: kn, json, ms: null, status: null, head: null, err: null };
-        try {
-          const u = "http://ws.bus.go.kr/api/rest/arrive/" + op + "?serviceKey=" + encodeURIComponent(kv) + "&stId=" + sid + (json ? "&resultType=json" : "");
-          const res = await Promise.race([fetch(u), new Promise((_, rej) => setTimeout(() => rej(new Error("timeout6s")), 6000))]);
-          r.status = res.status; const _tx = await res.text(); r.head = _tx.slice(0, 300);
-          if (json && res.status === 200) {
-            try {
-              const _j = JSON.parse(_tx), _l = (_j.msgBody && _j.msgBody.itemList) || [];
-              r.rows = (Array.isArray(_l) ? _l : [_l]).slice(0, 30).map((x) => [x.busRouteAbrv, x.rtNm, x.arrmsg1, "tra=" + x.traTime1, "exps=" + x.exps1, "kals=" + x.kals1, "neus=" + x.neus1, "| " + x.arrmsg2, "tra2=" + x.traTime2, "exps2=" + x.exps2, "arr=" + x.isArrive1, "bt=" + x.busType1].join(" "));
-            } catch (e2) { r.rowsErr = String(e2).slice(0, 60); }
-          }
-        } catch (e) { r.err = String((e && e.message) || e).slice(0, 80); }
-        r.ms = Date.now() - t0; out3.tries.push(r);
-      })());
-    }
-    await Promise.all(jobs);
-    return new Response(JSON.stringify(out3, null, 1), { status: 200, headers: CORS_H });
   }
 
   if (url.pathname === "/live-test") {
