@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-05n";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-05o";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -4827,8 +4827,12 @@ function liveStaleSave(k, m) {
   } catch (e) {}
 }
 __name(liveStaleSave, "liveStaleSave");
-var LIVE_DIAG = { stale: 0, staleMiss: 0, queueRej: 0, maxLoadMs: 0, maxLiveMs: 0, slow: 0 };
-async function liveStaleLoad(k) {
+// ★ 2026-10-05 (사용자는 모르게 — 호출 수·한도·속도): 같은 정류장을 25초 안에 다시 조회하면(다른 사용자 요청 포함) 직전 성공값을 지난 시간만큼 빼서 그대로 쓴다.
+//   보관값은 위 직전 성공값 저장소(같은 데이터센터의 캐시 API)를 같이 쓴다. 공유값으로 메운 정류장은 '조회 실패'가 아니므로 liveMissing 에 세지 않는다(__via 가 share-).
+//   끄는 스위치: 환경변수 LIVE_SHARE=0
+var LIVE_SHARE_MS = 25000;
+var LIVE_DIAG = { stale: 0, share: 0, staleMiss: 0, queueRej: 0, maxLoadMs: 0, maxLiveMs: 0, slow: 0 };
+async function liveStaleLoad(k, maxMs, tag) {
   const t0 = Date.now();
   try {
     if (typeof caches === "undefined" || !caches.default) return null;
@@ -4837,16 +4841,20 @@ async function liveStaleLoad(k) {
     if (!r) return null;
     const j = await r.json();
     const ageMs = Date.now() - j.at;
-    if (!j || !j.m || !(ageMs >= 0) || ageMs > LIVE_STALE_MS) return null;
+    if (!j || !j.m || !(ageMs >= 0) || ageMs > (maxMs || LIVE_STALE_MS)) return null;
     const out = liveAgeFix(j.m, Math.floor(ageMs / 1000));
-    out.__via = "stale-" + Math.floor(ageMs / 1000) + "s";
-    LIVE_DIAG.stale++;
+    out.__via = (tag || "stale-") + Math.floor(ageMs / 1000) + "s";
+    if (tag) LIVE_DIAG.share++; else LIVE_DIAG.stale++;
     return out;
   } catch (e) { return null; } finally { LIVE_DIAG.maxLoadMs = Math.max(LIVE_DIAG.maxLoadMs, Date.now() - t0); }
 }
 __name(liveStaleLoad, "liveStaleLoad");
 async function fetchStopArrivals(cityCode, nodeId, env, deadline, budget) {
   const sk = String(cityCode) + "|" + String(nodeId), t0 = Date.now();
+  if (!(env && String(env.LIVE_SHARE) === "0")) {
+    const fr = await liveStaleLoad(sk, LIVE_SHARE_MS, "share-");
+    if (fr && (fr.__names || []).length) return fr;
+  }
   try {
     const m = await fetchStopArrivalsLive(cityCode, nodeId, env, deadline, budget);
     if (m && (m.__names || []).length) liveStaleSave(sk, m);
