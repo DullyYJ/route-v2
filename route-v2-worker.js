@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-05j";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-05k";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -4523,12 +4523,12 @@ __name(fetchStopArrivalsAny, "fetchStopArrivalsAny");
 //   TAGO 도착정보는 서울 정류장엔 항상 빈 응답이라 서울 버스는 한 번도 조회되지 않았다. 서울시 버스도착정보(ws.bus.go.kr,
 //   getLowArrInfoByStId)는 Cloudflare 에서 0.25초에 닿고(실측) 같은 공공데이터포털 키로 쓴다. 서울 정류장(SEL+9자리 = 서울 stId)만 부른다.
 //   · 응답: msgBody.itemList[] — 노선 busRouteAbrv(번호)·rtNm, 도착까지 traTime1/traTime2(초). 운행종료·출발대기는 0 이라 건너뛴다.
-//   · 호출량 한도(서울 하루 1만건): 한도 응답이 나오면 키2 로 넘기고, 둘 다 막히면 20분간 서울 조회를 쉰다(그동안은 '예상' — 원래와 같다).
+//   · 호출량 한도(서울 하루 1만건): 한도 응답이 나오면 키2 로 넘기고, 둘 다 막히면 5분간 서울 조회를 쉰다(그동안은 '예상' — 원래와 같다).
 //   · 끄는 스위치: 환경변수 SEOUL_BUS_LIVE=0 (기본 켜짐)
 var SEOUL_BUS_URL = "http://ws.bus.go.kr/api/rest/arrive/getLowArrInfoByStId";
 var SEOUL_BRK = { n: 0, until: 0 };
 var SEOUL_QUOTA = { until: 0 };
-var SEOUL_QUOTA_REST_MS = 20 * 60 * 1000;
+var SEOUL_QUOTA_REST_MS = 5 * 60 * 1000;
 function seoulStId(id) {
   const m = /^SEL([0-9]{9})$/.exec(String(id || ""));
   return m ? m[1] : null;
