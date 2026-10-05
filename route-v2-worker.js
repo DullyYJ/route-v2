@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-05d";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-05e";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -2478,8 +2478,8 @@ __name(rateLimited, "rateLimited");
 //   대기시간이 전부 배차 가정치(270s)로 밀려 실측이 하나도 안 붙었다는 뜻이다.
 //   TAGO 는 2.6초 안에 못 끝낼 때가 많다. 앱이 rtw 수집 1.5초와 동시요청 8건을
 //   더는 쓰지 않아 그만큼을 여기로 돌린다(앱 워치독은 15초).
-var LIVE_TIMEOUT_MS = 1800;    // 요청 하나의 상한 (형제 id 폴백으로 2번 부를 수 있음) — 2026-09-25 배포분
-var LIVE_BUDGET_MS = 4500;     // 실측 조회 전체 총시간 (앱 워치독 15초 안에서 쓴다) — 2026-09-25 배포분
+var LIVE_TIMEOUT_MS = 1500;    // 요청 하나의 상한 (형제 id 폴백으로 2번 부를 수 있음) — 2026-09-25 배포분
+var LIVE_BUDGET_MS = 2500;     // 실측 조회 전체 총시간 (앱 워치독 15초 안에서 쓴다) — 2026-09-25 배포분
 function budgetLeft(dl) { return dl ? dl - Date.now() : LIVE_TIMEOUT_MS; }
 __name(budgetLeft, "budgetLeft");
 var CATCH_BUFFER_SEC = 30;     // 정류장에 닿고 이 정도 여유는 있어야 탈 수 있다
@@ -2666,10 +2666,12 @@ __name(tagoParse, "tagoParse");
 // ★ 2026-10-05 (YJ: 버스가 실제로 조회되면 '예상'이 아니라 실제 시간으로):
 //   실측 — route-v2 에서 apis.data.go.kr 직접 호출이 522(연결 시간초과, 호출당 ~20초)로 막히는 때가 있다. 같은 시각
 //   바인딩(gentle-lab 경유)은 정상 응답이었다. 예전 tagoFetch 는 직접 호출 → 키2 → 바인딩을 '순서대로' 기다려서,
-//   실시간 단계 상한(1.8초)이 첫 시도에서 이미 지나가 바인딩에 닿지도 못한 채 시간초과 → 차단기(45초) → 전부 '예상'이 됐다.
-//   → 순서는 그대로(직접 먼저)이되 TAGO_HEDGE_MS 안에 안 끝나면 다음 경로를 '동시에' 출발시키고 먼저 성공한 쪽을 쓴다.
-//     직접 호출이 막혔다고 판명되면(실패/지연 뒤 다른 경로가 성공) 10분간 성공했던 경로를 앞에 둔다. 직접이 다시 되면 원래 순서로 돌아간다.
-var TAGO_HEDGE_MS = 350;
+//   실시간 단계 상한이 첫 시도에서 이미 지나가 바인딩에 닿지도 못한 채 시간초과 → 차단기 → 전부 '예상'이 됐다.
+// ★ 2026-10-05 (YJ 정정): 키2 는 '동시에 쓰라'고 둔 게 아니라 키1 호출량을 다 쓰면 쓰라고 둔 예비 키다.
+//   → 직접 호출이 느리면(TAGO_HEDGE_MS) 다른 '길'(바인딩 경유)만 추가로 부른다. 키2 는 키1 이 호출량 초과 같은 응답 오류를
+//     냈을 때만 순서대로 쓴다(연결 시간초과·5xx 는 키가 아니라 길의 문제라 키2 로 넘기지 않는다). 먼저 성공한 답을 쓴다.
+//     직접 호출이 막혔다고 판명되면 10분간 성공했던 길을 앞에 둔다. 직접이 다시 되면 원래 순서로 돌아간다.
+var TAGO_HEDGE_MS = 800;
 var TAGO_PREF = { via: null, until: 0 };
 function tagoOrder(list) {
   if (TAGO_PREF.via && TAGO_PREF.until > Date.now()) {
@@ -2684,13 +2686,21 @@ async function tagoFetch(env, qs) {
   const tried = [];
   const base = tagoAttempts(env);
   const list = tagoOrder(base);
-  if (!list.length) throw new Error("\uD638\uCD9C \uACBD\uB85C\uAC00 \uD558\uB098\uB3C4 \uC5C6\uC74C");
+  if (!list.length) throw new Error("no tago path");
   const first = list[0].via, nat = base[0].via;
+  const road = (v) => (v === "binding" ? "b" : "d");        // 직접 호출(키1·키2)은 같은 길, 바인딩 경유는 다른 길
   return await new Promise((resolve, reject) => {
-    let launched = 0, finished = 0, done = false, timer = null;
-    const launchNext = () => {
-      if (done || launched >= list.length) return;
-      const a = list[launched++];
+    let finished = 0, done = false, timer = null;
+    const started = new Array(list.length).fill(false), fin = new Array(list.length).fill(false);
+    const blocked = new Set();                                // 느리거나 연결 오류가 난 길 — 같은 길의 다른 키는 부르지 않는다
+    const pickNext = () => {
+      for (let i = 0; i < list.length; i++) if (!started[i] && !blocked.has(road(list[i].via))) return i;
+      return -1;
+    };
+    const launch = (i) => {
+      if (done || i < 0 || started[i]) return;
+      started[i] = true;
+      const a = list[i];
       (async () => {
         try {
           const res = await a.run(inner);
@@ -2698,26 +2708,44 @@ async function tagoFetch(env, qs) {
           const p = tagoParse(txt);
           if (p.ok) return { ok: true, items: p.items, via: a.via };
           tried.push(a.via + ": " + p.why.slice(0, 60));
+          return { ok: false, net: res.status >= 500 };
         } catch (e) {
           tried.push(a.via + ": " + String((e && e.message) || e).slice(0, 60));
+          return { ok: false, net: true };
         }
-        return { ok: false };
       })().then((r) => {
-        finished++;
+        finished++; fin[i] = true;
         if (done) return;
         if (r.ok) {
           done = true; if (timer) clearTimeout(timer);
           if (r.via === nat) { if (TAGO_PREF.via) TAGO_PREF = { via: null, until: 0 }; }   // 원래 1순위(직접)가 됐다 → 선호 해제
-          else if (r.via !== first) TAGO_PREF = { via: r.via, until: Date.now() + 600000 };   // 1순위가 막혀 다른 경로가 이겼다 → 10분간 앞에 둔다
+          else if (r.via !== first) TAGO_PREF = { via: r.via, until: Date.now() + 600000 };   // 1순위가 막혀 다른 길이 이겼다 → 10분간 앞에 둔다
           resolve({ items: r.items, via: r.via, tried });
           return;
         }
-        if (launched < list.length) { if (timer) clearTimeout(timer); launchNext(); arm(); }
-        else if (finished >= launched) { done = true; reject(new Error(tried.join(" | "))); }
+        if (r.net) blocked.add(road(a.via));       // 연결 시간초과·5xx 는 키가 아니라 길의 문제 → 같은 길의 다른 키로 넘기지 않는다
+        if (timer) { clearTimeout(timer); timer = null; }
+        const n = pickNext();
+        if (n >= 0) { launch(n); arm(); }
+        else if (started.every((st, k) => !st || fin[k])) { done = true; reject(new Error(tried.join(" | "))); }
       });
     };
-    const arm = () => { if (!done && launched < list.length) timer = setTimeout(() => { launchNext(); arm(); }, TAGO_HEDGE_MS); };
-    launchNext();
+    const arm = () => {
+      if (done || timer) return;
+      const pend = []; for (let i = 0; i < list.length; i++) if (started[i] && !fin[i]) pend.push(road(list[i].via));
+      if (!pend.length) return;
+      // 아직 응답 없는 길을 '느린 길'로 보고 다른 길만 추가로 부른다 — 그런 길이 없으면 기다리기만 한다
+      let any = false; for (let i = 0; i < list.length; i++) if (!started[i] && !blocked.has(road(list[i].via)) && pend.indexOf(road(list[i].via)) < 0) any = true;
+      if (!any) return;
+      timer = setTimeout(() => {
+        timer = null;
+        if (done) return;
+        for (let i = 0; i < list.length; i++) if (started[i] && !fin[i]) blocked.add(road(list[i].via));
+        const n = pickNext();
+        if (n >= 0) { launch(n); arm(); }
+      }, TAGO_HEDGE_MS);
+    };
+    launch(0);
     arm();
   });
 }
