@@ -6495,7 +6495,7 @@ async function handleFetch(request, env, ctx) {
         try {
           const u = base + "?serviceKey=" + encodeURIComponent(kv) + "&stationId=" + sid + "&format=json";
           const res = await Promise.race([fetch(u), new Promise((_, rej) => setTimeout(() => rej(new Error("timeout6s")), 6000))]);
-          r.status = res.status; r.head = (await res.text()).slice(0, 700);
+          r.status = res.status; const _gt = await res.text(); r.head = _gt.slice(0, 200); try { const _gj = JSON.parse(_gt), _gl = (_gj.response && _gj.response.msgBody && _gj.response.msgBody.busArrivalList) || []; r.rows = (Array.isArray(_gl) ? _gl : [_gl]).slice(0, 3).map((x) => JSON.stringify(x).slice(0, 700)); r.nrows = (Array.isArray(_gl) ? _gl : [_gl]).length; } catch (_e) {}
         } catch (e) { r.err = String((e && e.message) || e).slice(0, 80); }
         r.ms = Date.now() - t0; outg.tries.push(r);
       })());
