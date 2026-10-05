@@ -60,5 +60,25 @@ const mkEnv = (busapi) => ({ TAGO_KEY: 'K1', BUSAPI: { fetch: busapi } });
     const r = await api.tagoFetch(mkEnv(async () => ({ status: 500, text: async () => 'x' })), 'a=1');
     assert.strictEqual(r.via, 'env-key');
   });
+  const mkEnv2 = (busapi) => ({ TAGO_KEY: 'K1', TAGO_KEY2: 'K2', BUSAPI: { fetch: busapi } });
+  const keyOf = (u) => (/serviceKey=K2/.test(u) ? 'K2' : /serviceKey=K1/.test(u) ? 'K1' : '?');
+  await t('키1 이 멈춰도(느려도) 키2 를 동시에 부르지 않고 다른 길(바인딩)만 부른다', async () => {
+    const used = [];
+    const api = mk((u) => { used.push(keyOf(String(u))); return new Promise(() => {}); });
+    const r = await api.tagoFetch(mkEnv2(async () => { used.push('binding'); return { status: 200, text: async () => OKBODY('75', 5) }; }), 'a=1');
+    assert.strictEqual(r.via, 'binding'); assert.deepStrictEqual(used, ['K1', 'binding']);
+  });
+  await t('키1 이 호출량 초과 응답 오류를 내면 그때만 순서대로 키2 를 쓴다', async () => {
+    const used = [];
+    const api = mk(async (u) => { const k = keyOf(String(u)); used.push(k); if (k === 'K1') return { status: 200, text: async () => JSON.stringify({ OpenAPI_ServiceResponse: { cmmMsgHeader: { errMsg: 'SERVICE ERROR', returnAuthMsg: 'LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR' } } }) }; return { status: 200, text: async () => OKBODY('75', 7) }; });
+    const r = await api.tagoFetch(mkEnv2(async () => { used.push('binding'); throw new Error('안 불려야 함'); }), 'a=1');
+    assert.strictEqual(r.via, 'env-key2'); assert.deepStrictEqual(used, ['K1', 'K2']);
+  });
+  await t('키1 이 522 로 즉시 실패해도 키2 로 넘기지 않고 바인딩으로 간다', async () => {
+    const used = [];
+    const api = mk(async (u) => { used.push(keyOf(String(u))); return { status: 522, text: async () => 'error code: 522' }; });
+    const r = await api.tagoFetch(mkEnv2(async () => { used.push('binding'); return { status: 200, text: async () => OKBODY('75', 9) }; }), 'a=1');
+    assert.strictEqual(r.via, 'binding'); assert.deepStrictEqual(used, ['K1', 'binding']);
+  });
   console.log(pass + '개 통과');
 })();
