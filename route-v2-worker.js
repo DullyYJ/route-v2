@@ -6486,6 +6486,7 @@ async function handleFetch(request, env, ctx) {
   if (url.pathname === "/gg-bus-test") {
     const sid = String(url.searchParams.get("stationId") || "220000054").replace(/[^0-9]/g, "").slice(0, 12);
     const keys = [["key", (env && (env.TAGO_KEY || env.DATA_GO_KR_KEY)) || ""], ["key2", (env && env.TAGO_KEY2) || ""]].filter((x) => x[1]);
+    keys.push(["binding", "x"]);
     const outg = { stationId: sid, haveKeys: keys.map((x) => x[0]), tries: [] };
     const ops = ["https://apis.data.go.kr/6410000/busarrivalservice/v2/getBusArrivalListv2", "https://apis.data.go.kr/6410000/busarrivalservice/getBusArrivalList"];
     const jobs = [];
@@ -6493,8 +6494,8 @@ async function handleFetch(request, env, ctx) {
       jobs.push((async () => {
         const t0 = Date.now(), r = { op: base.split("/").slice(-2).join("/"), key: kn, ms: null, status: null, head: null, err: null };
         try {
-          const u = base + "?serviceKey=" + encodeURIComponent(kv) + "&stationId=" + sid + "&format=json";
-          const res = await Promise.race([fetch(u), new Promise((_, rej) => setTimeout(() => rej(new Error("timeout6s")), 6000))]);
+          const u = kn === "binding" ? (base + "?stationId=" + sid + "&format=json&serviceKey=") : (base + "?serviceKey=" + encodeURIComponent(kv) + "&stationId=" + sid + "&format=json");
+          const res = await Promise.race([(kn === "binding" ? env.BUSAPI.fetch(new Request("https://busapi.internal/tago?url=" + encodeURIComponent(u))) : fetch(u)), new Promise((_, rej) => setTimeout(() => rej(new Error("timeout6s")), 6000))]);
           r.status = res.status; const _gt = await res.text(); r.head = _gt.slice(0, 200); try { const _gj = JSON.parse(_gt), _gl = (_gj.response && _gj.response.msgBody && _gj.response.msgBody.busArrivalList) || []; r.rows = (Array.isArray(_gl) ? _gl : [_gl]).slice(0, 3).map((x) => JSON.stringify(x).slice(0, 700)); r.nrows = (Array.isArray(_gl) ? _gl : [_gl]).length; } catch (_e) {}
         } catch (e) { r.err = String((e && e.message) || e).slice(0, 80); }
         r.ms = Date.now() - t0; outg.tries.push(r);
