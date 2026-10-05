@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-05o";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-05p";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -5380,6 +5380,7 @@ async function applyLiveWaits(out, stat, env, deadline) {
         if (!L4 || !L4.boardStopId) continue;
         const key4 = String(L4.line || "").split("_")[0] + "|" + stopNorm(L4.boardStopId);
         if (!tried.has(key4)) continue;
+        if (key4.slice(0, 3) === "11|" && SEOUL_QUOTA.until > Date.now()) continue;   // 서울 한도 휴식 중 — 다시 물어도 같은 답이라 앱 재조회 대상에서 뺀다
         const m4 = got[key4];
         if (!m4 || String(m4.__via || "").indexOf("stale") === 0) miss++;
       }
@@ -6586,6 +6587,19 @@ async function handleFetch(request, env, ctx) {
     } catch (e) {
       return new Response(JSON.stringify({ error: String((e && e.message) || e) }), { status: 500, headers: CORS_H });
     }
+  }
+
+  // ★ 2026-10-05 (임시 — 확인 뒤 삭제): /seoul-bus-test?stId=101000290 — 서울 도착정보가 일반 버스도 주는지(busType·노선유형) 확인
+  if (url.pathname === "/seoul-bus-test") {
+    const sid = String(url.searchParams.get("stId") || "101000290").replace(/[^0-9]/g, "").slice(0, 12);
+    const kv = (env && (env.TAGO_KEY || env.DATA_GO_KR_KEY)) || "";
+    let rows = null, err = null;
+    try {
+      const res = await fetch("http://ws.bus.go.kr/api/rest/arrive/getLowArrInfoByStId?serviceKey=" + encodeURIComponent(kv) + "&stId=" + sid + "&resultType=json");
+      const j = JSON.parse(await res.text()), l = (j.msgBody && j.msgBody.itemList) || [];
+      rows = (Array.isArray(l) ? l : [l]).map((x) => [x.busRouteAbrv, x.rtNm, "type" + x.routeType, "bt1=" + x.busType1, "bt2=" + x.busType2, x.arrmsg1, "low1=" + x.isLast1].join(" "));
+    } catch (e) { err = String((e && e.message) || e).slice(0, 80); }
+    return new Response(JSON.stringify({ stId: sid, n: rows && rows.length, rows, err }, null, 1), { status: 200, headers: CORS_H });
   }
 
   if (url.pathname === "/live-test") {
