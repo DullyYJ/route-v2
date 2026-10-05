@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-05m";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-05n";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -2681,7 +2681,7 @@ function tagoOrder(list) {
   return list;
 }
 __name(tagoOrder, "tagoOrder");
-async function tagoFetch(env, qs, baseUrl, parseFn) {
+async function tagoFetch(env, qs, baseUrl, parseFn, hedgeMs) {
   const inner = (baseUrl || TAGO_BASE) + "?" + qs;
   const tried = [];
   const base = tagoAttempts(env);
@@ -2743,7 +2743,7 @@ async function tagoFetch(env, qs, baseUrl, parseFn) {
         for (let i = 0; i < list.length; i++) if (started[i] && !fin[i]) blocked.add(road(list[i].via));
         const n = pickNext();
         if (n >= 0) { launch(n); arm(); }
-      }, TAGO_HEDGE_MS);
+      }, hedgeMs || TAGO_HEDGE_MS);
     };
     launch(0);
     arm();
@@ -4630,6 +4630,8 @@ __name(fetchSeoulArrivals, "fetchSeoulArrivals");
 //   · 응답: response.msgBody.busArrivalList[] — routeName(번호), predictTime1/2(분), flag(PASS 운행·STOP 운행종료·WAIT 회차지 대기).
 //     초 단위 값(predictTimeSec1/2)이 오면 그것을 쓰고, 없으면 분×60 이다(분 단위라 최대 1분 오차 — 엔진의 CATCH_BUFFER_SEC 가 흡수).
 //   · 실패하면 예전 경로(TAGO)로 한 번 더 시도한다(기존 동작 보존). 끄는 스위치: 환경변수 GBIS_BUS_LIVE=0 (기본 켜짐)
+// 경기도 호출은 직접 호출이 0.3초 안에 안 끝나면 바로 다른 길(바인딩)도 부른다(직접 호출이 막히는 때 바인딩 응답이 1.5초 상한 안에 들어오게).
+var GBIS_HEDGE_MS = 300;
 var GBIS_BUS_URL = "https://apis.data.go.kr/6410000/busarrivalservice/v2/getBusArrivalListv2";
 function gbisStationId(id) {
   const m = /^GGB([0-9]{9})$/.exec(String(id || ""));
@@ -4712,7 +4714,7 @@ async function fetchStopArrivalsLive(cityCode, nodeId, env, deadline, budget) {
       let got;
       try {
         got = await Promise.race([
-          tagoFetch(env, "stationId=" + encodeURIComponent(gsid) + "&format=json", GBIS_BUS_URL, gbisParse),
+          tagoFetch(env, "stationId=" + encodeURIComponent(gsid) + "&format=json", GBIS_BUS_URL, gbisParse, GBIS_HEDGE_MS),
           new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")),
             Math.max(200, Math.min(LIVE_TIMEOUT_MS, budgetLeft(deadline)))))
         ]);
