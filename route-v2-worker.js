@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-05g";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-05h";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -6367,6 +6367,30 @@ async function handleFetch(request, env, ctx) {
     } catch (e) {
       return new Response(JSON.stringify({ error: String((e && e.message) || e) }), { status: 500, headers: CORS_H });
     }
+  }
+
+  // ★ 2026-10-05 (서울 버스 도착 시험 — 확인 뒤 삭제할 것): /seoul-bus-test?stId=101000301[&op=getLowArrInfoByStId]
+  //   ws.bus.go.kr(서울시 버스도착정보) 가 Cloudflare 에서 닿는지·응답 모양이 어떤지 본다.
+  if (url.pathname === "/seoul-bus-test") {
+    const sid = String(url.searchParams.get("stId") || "101000301").replace(/[^0-9]/g, "").slice(0, 12);
+    const opq = url.searchParams.get("op");
+    const ops = opq ? [opq.replace(/[^A-Za-z]/g, "").slice(0, 40)] : ["getLowArrInfoByStId", "getLowArrInfoByStIdList"];
+    const keys = [["key", (env && (env.TAGO_KEY || env.DATA_GO_KR_KEY)) || ""], ["key2", (env && env.TAGO_KEY2) || ""]].filter((x) => x[1]);
+    const out3 = { stId: sid, haveKeys: keys.map((x) => x[0]), tries: [] };
+    const jobs = [];
+    for (const op of ops) for (const [kn, kv] of keys) for (const json of [false, true]) {
+      jobs.push((async () => {
+        const t0 = Date.now(), r = { op, key: kn, json, ms: null, status: null, head: null, err: null };
+        try {
+          const u = "http://ws.bus.go.kr/api/rest/arrive/" + op + "?serviceKey=" + encodeURIComponent(kv) + "&stId=" + sid + (json ? "&resultType=json" : "");
+          const res = await Promise.race([fetch(u), new Promise((_, rej) => setTimeout(() => rej(new Error("timeout6s")), 6000))]);
+          r.status = res.status; r.head = (await res.text()).slice(0, 900);
+        } catch (e) { r.err = String((e && e.message) || e).slice(0, 80); }
+        r.ms = Date.now() - t0; out3.tries.push(r);
+      })());
+    }
+    await Promise.all(jobs);
+    return new Response(JSON.stringify(out3, null, 1), { status: 200, headers: CORS_H });
   }
 
   if (url.pathname === "/live-test") {
