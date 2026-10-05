@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-05h";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-05i";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -6384,7 +6384,13 @@ async function handleFetch(request, env, ctx) {
         try {
           const u = "http://ws.bus.go.kr/api/rest/arrive/" + op + "?serviceKey=" + encodeURIComponent(kv) + "&stId=" + sid + (json ? "&resultType=json" : "");
           const res = await Promise.race([fetch(u), new Promise((_, rej) => setTimeout(() => rej(new Error("timeout6s")), 6000))]);
-          r.status = res.status; r.head = (await res.text()).slice(0, 900);
+          r.status = res.status; const _tx = await res.text(); r.head = _tx.slice(0, 300);
+          if (json && res.status === 200) {
+            try {
+              const _j = JSON.parse(_tx), _l = (_j.msgBody && _j.msgBody.itemList) || [];
+              r.rows = (Array.isArray(_l) ? _l : [_l]).slice(0, 30).map((x) => [x.busRouteAbrv, x.rtNm, x.arrmsg1, "tra=" + x.traTime1, "exps=" + x.exps1, "kals=" + x.kals1, "neus=" + x.neus1, "| " + x.arrmsg2, "tra2=" + x.traTime2, "exps2=" + x.exps2, "arr=" + x.isArrive1, "bt=" + x.busType1].join(" "));
+            } catch (e2) { r.rowsErr = String(e2).slice(0, 60); }
+          }
         } catch (e) { r.err = String((e && e.message) || e).slice(0, 80); }
         r.ms = Date.now() - t0; out3.tries.push(r);
       })());
