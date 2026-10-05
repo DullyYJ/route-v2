@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-05q";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-05r";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -4835,7 +4835,7 @@ function liveStaleSave(k, m) {
 }
 __name(liveStaleSave, "liveStaleSave");
 // ★ 2026-10-05 (내부 진단 — 사용자 화면과 무관): 외부 도착정보 API 호출량을 하루 단위로 센다. 한도(서울 하루 1만건 등) 임박을 미리 보려는 것.
-//   호출마다 메모리 카운터만 올리고, 60초에 한 번 D1(api_usage: 날짜·항목·횟수)에 합쳐 올린다. 조회: /live-usage?days=3
+//   호출마다 메모리 카운터만 올리고, 60초에 한 번 D1(live_usage: 날짜·항목·횟수)에 합쳐 올린다. 조회: /live-usage?days=3
 //   항목: seoul.call/err/quota · gbis.<길>(.err) · tago.<길>(.err)(길 = env-key·env-key2·binding) · share.hit(공유 캐시로 호출 없이 메운 정류장)
 var USAGE = { n: {}, last: 0, ready: false };
 function usageAdd(k) { USAGE.n[k] = (USAGE.n[k] || 0) + 1; }
@@ -4854,8 +4854,8 @@ function usageFlush(env) {
     const day = usageDay();
     const run = (async () => {
       try {
-        if (!USAGE.ready) { await env.DB.prepare("CREATE TABLE IF NOT EXISTS api_usage (day TEXT, k TEXT, n INTEGER, PRIMARY KEY (day, k))").run(); USAGE.ready = true; }
-        await env.DB.batch(keys.map((k) => env.DB.prepare("INSERT INTO api_usage (day, k, n) VALUES (?, ?, ?) ON CONFLICT(day, k) DO UPDATE SET n = n + excluded.n").bind(day, k, snap[k])));
+        if (!USAGE.ready) { await env.DB.prepare("CREATE TABLE IF NOT EXISTS live_usage (day TEXT, k TEXT, n INTEGER, PRIMARY KEY (day, k))").run(); USAGE.ready = true; }
+        await env.DB.batch(keys.map((k) => env.DB.prepare("INSERT INTO live_usage (day, k, n) VALUES (?, ?, ?) ON CONFLICT(day, k) DO UPDATE SET n = n + excluded.n").bind(day, k, snap[k])));
       } catch (e) { for (const k of keys) USAGE.n[k] = (USAGE.n[k] || 0) + snap[k]; }   // 실패하면 다음 번에 합쳐 올린다
     })();
     if (_liveCtx && _liveCtx.waitUntil) _liveCtx.waitUntil(run);
@@ -6630,8 +6630,8 @@ async function handleFetch(request, env, ctx) {
     try {
       const days = Math.max(1, Math.min(14, parseInt(url.searchParams.get("days") || "3", 10) || 3));
       const since = new Date(Date.now() + 9 * 3600 * 1000 - (days - 1) * 86400000).toISOString().slice(0, 10);
-      await env.DB.prepare("CREATE TABLE IF NOT EXISTS api_usage (day TEXT, k TEXT, n INTEGER, PRIMARY KEY (day, k))").run();
-      const rs = await env.DB.prepare("SELECT day, k, n FROM api_usage WHERE day >= ? ORDER BY day DESC, k").bind(since).all();
+      await env.DB.prepare("CREATE TABLE IF NOT EXISTS live_usage (day TEXT, k TEXT, n INTEGER, PRIMARY KEY (day, k))").run();
+      const rs = await env.DB.prepare("SELECT day, k, n FROM live_usage WHERE day >= ? ORDER BY day DESC, k").bind(since).all();
       const usage = {};
       for (const r of (rs && rs.results) || []) (usage[r.day] = usage[r.day] || {})[r.k] = r.n;
       return new Response(JSON.stringify({ since, usage, pending: USAGE.n }, null, 1), { status: 200, headers: CORS_H });
