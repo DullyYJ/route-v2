@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-05p";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-05q";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -2701,15 +2701,19 @@ async function tagoFetch(env, qs, baseUrl, parseFn, hedgeMs) {
       if (done || i < 0 || started[i]) return;
       started[i] = true;
       const a = list[i];
+      const upfx = (baseUrl === GBIS_BUS_URL ? "gbis." : "tago.") + a.via;
+      usageAdd(upfx);
       (async () => {
         try {
           const res = await a.run(inner);
           const txt = await res.text();
           const p = (parseFn || tagoParse)(txt);
           if (p.ok) return { ok: true, items: p.items, via: a.via };
+          usageAdd(upfx + ".err");
           tried.push(a.via + ": " + p.why.slice(0, 60));
           return { ok: false, net: res.status >= 500 };
         } catch (e) {
+          usageAdd(upfx + ".err");
           tried.push(a.via + ": " + String((e && e.message) || e).slice(0, 60));
           return { ok: false, net: true };
         }
@@ -4598,12 +4602,14 @@ async function fetchSeoulArrivals(stId, env, deadline, budget) {
       let res, txt;
       try {
         const t = Math.max(200, Math.min(LIVE_TIMEOUT_MS, budgetLeft(deadline)));
+        usageAdd("seoul.call");
         res = await Promise.race([
           fetch(SEOUL_BUS_URL + "?serviceKey=" + encodeURIComponent(key) + "&stId=" + encodeURIComponent(stId) + "&resultType=json"),
           new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), t))
         ]);
         txt = await res.text();
       } catch (e) {
+        usageAdd("seoul.err");
         if (String((e && e.message) || e) === "timeout" && ++SEOUL_BRK.n >= 3) { SEOUL_BRK.until = Date.now() + LIVE_BRK_MS; SEOUL_BRK.n = 0; }
         throw e;
       }
@@ -4611,6 +4617,7 @@ async function fetchSeoulArrivals(stId, env, deadline, budget) {
       const p = seoulParse(txt);
       if (p.ok) { parsed = p; break; }
       why = p.why;
+      usageAdd(p.quota ? "seoul.quota" : "seoul.err");
       if (p.quota) { quotaN++; continue; }          // 호출량 초과만 다음 키로 — 다른 오류는 키 문제가 아니다
       break;
     }
@@ -4827,6 +4834,34 @@ function liveStaleSave(k, m) {
   } catch (e) {}
 }
 __name(liveStaleSave, "liveStaleSave");
+// ★ 2026-10-05 (내부 진단 — 사용자 화면과 무관): 외부 도착정보 API 호출량을 하루 단위로 센다. 한도(서울 하루 1만건 등) 임박을 미리 보려는 것.
+//   호출마다 메모리 카운터만 올리고, 60초에 한 번 D1(api_usage: 날짜·항목·횟수)에 합쳐 올린다. 조회: /live-usage?days=3
+//   항목: seoul.call/err/quota · gbis.<길>(.err) · tago.<길>(.err)(길 = env-key·env-key2·binding) · share.hit(공유 캐시로 호출 없이 메운 정류장)
+var USAGE = { n: {}, last: 0, ready: false };
+function usageAdd(k) { USAGE.n[k] = (USAGE.n[k] || 0) + 1; }
+__name(usageAdd, "usageAdd");
+function usageDay() { return new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10); }
+__name(usageDay, "usageDay");
+function usageFlush(env) {
+  try {
+    if (!env || !env.DB) return;
+    const now = Date.now();
+    if (now - USAGE.last < 60000) return;
+    const keys = Object.keys(USAGE.n);
+    if (!keys.length) return;
+    USAGE.last = now;
+    const snap = USAGE.n; USAGE.n = {};
+    const day = usageDay();
+    const run = (async () => {
+      try {
+        if (!USAGE.ready) { await env.DB.prepare("CREATE TABLE IF NOT EXISTS api_usage (day TEXT, k TEXT, n INTEGER, PRIMARY KEY (day, k))").run(); USAGE.ready = true; }
+        await env.DB.batch(keys.map((k) => env.DB.prepare("INSERT INTO api_usage (day, k, n) VALUES (?, ?, ?) ON CONFLICT(day, k) DO UPDATE SET n = n + excluded.n").bind(day, k, snap[k])));
+      } catch (e) { for (const k of keys) USAGE.n[k] = (USAGE.n[k] || 0) + snap[k]; }   // 실패하면 다음 번에 합쳐 올린다
+    })();
+    if (_liveCtx && _liveCtx.waitUntil) _liveCtx.waitUntil(run);
+  } catch (e) {}
+}
+__name(usageFlush, "usageFlush");
 // ★ 2026-10-05 (사용자는 모르게 — 호출 수·한도·속도): 같은 정류장을 25초 안에 다시 조회하면(다른 사용자 요청 포함) 직전 성공값을 지난 시간만큼 빼서 그대로 쓴다.
 //   보관값은 위 직전 성공값 저장소(같은 데이터센터의 캐시 API)를 같이 쓴다. 공유값으로 메운 정류장은 '조회 실패'가 아니므로 liveMissing 에 세지 않는다(__via 가 share-).
 //   끄는 스위치: 환경변수 LIVE_SHARE=0
@@ -4844,7 +4879,7 @@ async function liveStaleLoad(k, maxMs, tag) {
     if (!j || !j.m || !(ageMs >= 0) || ageMs > (maxMs || LIVE_STALE_MS)) return null;
     const out = liveAgeFix(j.m, Math.floor(ageMs / 1000));
     out.__via = (tag || "stale-") + Math.floor(ageMs / 1000) + "s";
-    if (tag) LIVE_DIAG.share++; else LIVE_DIAG.stale++;
+    if (tag) { LIVE_DIAG.share++; usageAdd("share.hit"); } else LIVE_DIAG.stale++;
     return out;
   } catch (e) { return null; } finally { LIVE_DIAG.maxLoadMs = Math.max(LIVE_DIAG.maxLoadMs, Date.now() - t0); }
 }
@@ -4867,6 +4902,7 @@ async function fetchStopArrivals(cityCode, nodeId, env, deadline, budget) {
     LIVE_DIAG.staleMiss++;
     throw e;
   } finally {
+    usageFlush(env);
     const d = Date.now() - t0;
     if (d > LIVE_DIAG.maxLiveMs) LIVE_DIAG.maxLiveMs = d;
     if (d > 3000) LIVE_DIAG.slow++;
@@ -6589,17 +6625,19 @@ async function handleFetch(request, env, ctx) {
     }
   }
 
-  // ★ 2026-10-05 (임시 — 확인 뒤 삭제): /seoul-bus-test?stId=101000290 — 서울 도착정보가 일반 버스도 주는지(busType·노선유형) 확인
-  if (url.pathname === "/seoul-bus-test") {
-    const sid = String(url.searchParams.get("stId") || "101000290").replace(/[^0-9]/g, "").slice(0, 12);
-    const kv = (env && (env.TAGO_KEY || env.DATA_GO_KR_KEY)) || "";
-    let rows = null, err = null;
+  // ★ 2026-10-05: 외부 도착정보 API 하루 호출량(내부 진단) — /live-usage?days=3
+  if (url.pathname === "/live-usage") {
     try {
-      const res = await fetch("http://ws.bus.go.kr/api/rest/arrive/getLowArrInfoByStId?serviceKey=" + encodeURIComponent(kv) + "&stId=" + sid + "&resultType=json");
-      const j = JSON.parse(await res.text()), l = (j.msgBody && j.msgBody.itemList) || [];
-      rows = (Array.isArray(l) ? l : [l]).map((x) => [x.busRouteAbrv, x.rtNm, "type" + x.routeType, "bt1=" + x.busType1, "bt2=" + x.busType2, x.arrmsg1, "low1=" + x.isLast1].join(" "));
-    } catch (e) { err = String((e && e.message) || e).slice(0, 80); }
-    return new Response(JSON.stringify({ stId: sid, n: rows && rows.length, rows, err }, null, 1), { status: 200, headers: CORS_H });
+      const days = Math.max(1, Math.min(14, parseInt(url.searchParams.get("days") || "3", 10) || 3));
+      const since = new Date(Date.now() + 9 * 3600 * 1000 - (days - 1) * 86400000).toISOString().slice(0, 10);
+      await env.DB.prepare("CREATE TABLE IF NOT EXISTS api_usage (day TEXT, k TEXT, n INTEGER, PRIMARY KEY (day, k))").run();
+      const rs = await env.DB.prepare("SELECT day, k, n FROM api_usage WHERE day >= ? ORDER BY day DESC, k").bind(since).all();
+      const usage = {};
+      for (const r of (rs && rs.results) || []) (usage[r.day] = usage[r.day] || {})[r.k] = r.n;
+      return new Response(JSON.stringify({ since, usage, pending: USAGE.n }, null, 1), { status: 200, headers: CORS_H });
+    } catch (e) {
+      return new Response(JSON.stringify({ error: String((e && e.message) || e).slice(0, 120) }), { status: 500, headers: CORS_H });
+    }
   }
 
   if (url.pathname === "/live-test") {
