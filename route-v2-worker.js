@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-04bw";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-05a";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -2663,23 +2663,63 @@ function tagoParse(txt) {
 }
 __name(tagoParse, "tagoParse");
 
+// ★ 2026-10-05 (YJ: 버스가 실제로 조회되면 '예상'이 아니라 실제 시간으로):
+//   실측 — route-v2 에서 apis.data.go.kr 직접 호출이 522(연결 시간초과, 호출당 ~20초)로 막히는 때가 있다. 같은 시각
+//   바인딩(gentle-lab 경유)은 정상 응답이었다. 예전 tagoFetch 는 직접 호출 → 키2 → 바인딩을 '순서대로' 기다려서,
+//   실시간 단계 상한(1.8초)이 첫 시도에서 이미 지나가 바인딩에 닿지도 못한 채 시간초과 → 차단기(45초) → 전부 '예상'이 됐다.
+//   → 순서는 그대로(직접 먼저)이되 TAGO_HEDGE_MS 안에 안 끝나면 다음 경로를 '동시에' 출발시키고 먼저 성공한 쪽을 쓴다.
+//     직접 호출이 막혔다고 판명되면(실패/지연 뒤 다른 경로가 성공) 10분간 성공했던 경로를 앞에 둔다. 직접이 다시 되면 원래 순서로 돌아간다.
+var TAGO_HEDGE_MS = 600;
+var TAGO_PREF = { via: null, until: 0 };
+function tagoOrder(list) {
+  if (TAGO_PREF.via && TAGO_PREF.until > Date.now()) {
+    const i = list.findIndex((a) => a.via === TAGO_PREF.via);
+    if (i > 0) return [list[i]].concat(list.slice(0, i), list.slice(i + 1));
+  }
+  return list;
+}
+__name(tagoOrder, "tagoOrder");
 async function tagoFetch(env, qs) {
   const inner = TAGO_BASE + "?" + qs;
   const tried = [];
-  const list = tagoAttempts(env);
+  const base = tagoAttempts(env);
+  const list = tagoOrder(base);
   if (!list.length) throw new Error("\uD638\uCD9C \uACBD\uB85C\uAC00 \uD558\uB098\uB3C4 \uC5C6\uC74C");
-  for (const a of list) {
-    try {
-      const res = await a.run(inner);
-      const txt = await res.text();
-      const p = tagoParse(txt);
-      if (p.ok) return { items: p.items, via: a.via, tried };
-      tried.push(a.via + ": " + p.why.slice(0, 60));
-    } catch (e) {
-      tried.push(a.via + ": " + String((e && e.message) || e).slice(0, 60));
-    }
-  }
-  throw new Error(tried.join(" | "));
+  const first = list[0].via, nat = base[0].via;
+  return await new Promise((resolve, reject) => {
+    let launched = 0, finished = 0, done = false, timer = null;
+    const launchNext = () => {
+      if (done || launched >= list.length) return;
+      const a = list[launched++];
+      (async () => {
+        try {
+          const res = await a.run(inner);
+          const txt = await res.text();
+          const p = tagoParse(txt);
+          if (p.ok) return { ok: true, items: p.items, via: a.via };
+          tried.push(a.via + ": " + p.why.slice(0, 60));
+        } catch (e) {
+          tried.push(a.via + ": " + String((e && e.message) || e).slice(0, 60));
+        }
+        return { ok: false };
+      })().then((r) => {
+        finished++;
+        if (done) return;
+        if (r.ok) {
+          done = true; if (timer) clearTimeout(timer);
+          if (r.via === nat) { if (TAGO_PREF.via) TAGO_PREF = { via: null, until: 0 }; }   // 원래 1순위(직접)가 됐다 → 선호 해제
+          else if (r.via !== first) TAGO_PREF = { via: r.via, until: Date.now() + 600000 };   // 1순위가 막혀 다른 경로가 이겼다 → 10분간 앞에 둔다
+          resolve({ items: r.items, via: r.via, tried });
+          return;
+        }
+        if (launched < list.length) { if (timer) clearTimeout(timer); launchNext(); arm(); }
+        else if (finished >= launched) { done = true; reject(new Error(tried.join(" | "))); }
+      });
+    };
+    const arm = () => { if (!done && launched < list.length) timer = setTimeout(() => { launchNext(); arm(); }, TAGO_HEDGE_MS); };
+    launchNext();
+    arm();
+  });
 }
 __name(tagoFetch, "tagoFetch");
 
