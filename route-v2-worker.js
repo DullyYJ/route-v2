@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-05c";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-05d";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -4590,31 +4590,41 @@ function liveStaleSave(k, m) {
   } catch (e) {}
 }
 __name(liveStaleSave, "liveStaleSave");
+var LIVE_DIAG = { stale: 0, staleMiss: 0, queueRej: 0, maxLoadMs: 0, maxLiveMs: 0, slow: 0 };
 async function liveStaleLoad(k) {
+  const t0 = Date.now();
   try {
     if (typeof caches === "undefined" || !caches.default) return null;
-    const r = await caches.default.match(liveStaleReq(k));
+    // 보관값 조회가 어떤 이유로든 느려도 요청 전체를 붙잡지 않도록 0.3초로 끊는다
+    const r = await Promise.race([caches.default.match(liveStaleReq(k)), new Promise((res) => setTimeout(() => res(null), 300))]);
     if (!r) return null;
     const j = await r.json();
     const ageMs = Date.now() - j.at;
     if (!j || !j.m || !(ageMs >= 0) || ageMs > LIVE_STALE_MS) return null;
     const out = liveAgeFix(j.m, Math.floor(ageMs / 1000));
     out.__via = "stale-" + Math.floor(ageMs / 1000) + "s";
+    LIVE_DIAG.stale++;
     return out;
-  } catch (e) { return null; }
+  } catch (e) { return null; } finally { LIVE_DIAG.maxLoadMs = Math.max(LIVE_DIAG.maxLoadMs, Date.now() - t0); }
 }
 __name(liveStaleLoad, "liveStaleLoad");
 async function fetchStopArrivals(cityCode, nodeId, env, deadline, budget) {
-  const sk = String(cityCode) + "|" + String(nodeId);
+  const sk = String(cityCode) + "|" + String(nodeId), t0 = Date.now();
   try {
     const m = await fetchStopArrivalsLive(cityCode, nodeId, env, deadline, budget);
     if (m && (m.__names || []).length) liveStaleSave(sk, m);
     return m;
   } catch (e) {
+    if (String((e && e.message) || e) === "live-queue") LIVE_DIAG.queueRej++;
     if (budget && budget.used >= LIVE_MAX_CALLS) throw e;   // 요청당 호출 상한은 장애가 아니다 — 보관값도 쓰지 않는다
     const st = await liveStaleLoad(sk);
     if (st) return st;
+    LIVE_DIAG.staleMiss++;
     throw e;
+  } finally {
+    const d = Date.now() - t0;
+    if (d > LIVE_DIAG.maxLiveMs) LIVE_DIAG.maxLiveMs = d;
+    if (d > 3000) LIVE_DIAG.slow++;
   }
 }
 __name(fetchStopArrivals, "fetchStopArrivals");
@@ -6176,6 +6186,7 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
     _od.engVer = ENGINE_VERSION;
     _od.rtwStat = G.rtwStat || null;
     _liveStat.cost = G.liveCost || null;
+    _liveStat.liveDiag = Object.assign({ conc: LIVE_CONC, run: _liveRun, q: _liveQ.length, brk: LIVE_BRK.until > Date.now(), pref: TAGO_PREF.via }, LIVE_DIAG);
     try {
       const wl = G.waitLog || {};
       _liveStat.waitLog = Object.keys(wl).slice(0, 12).map((k) => k + "=" + wl[k]);
