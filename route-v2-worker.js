@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-05e";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-05f";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -2479,7 +2479,7 @@ __name(rateLimited, "rateLimited");
 //   TAGO 는 2.6초 안에 못 끝낼 때가 많다. 앱이 rtw 수집 1.5초와 동시요청 8건을
 //   더는 쓰지 않아 그만큼을 여기로 돌린다(앱 워치독은 15초).
 var LIVE_TIMEOUT_MS = 1500;    // 요청 하나의 상한 (형제 id 폴백으로 2번 부를 수 있음) — 2026-09-25 배포분
-var LIVE_BUDGET_MS = 2500;     // 실측 조회 전체 총시간 (앱 워치독 15초 안에서 쓴다) — 2026-09-25 배포분
+var LIVE_BUDGET_MS = 3500;     // 실측 조회 전체 총시간 (앱 워치독 15초 안에서 쓴다) — 2026-09-25 배포분
 function budgetLeft(dl) { return dl ? dl - Date.now() : LIVE_TIMEOUT_MS; }
 __name(budgetLeft, "budgetLeft");
 var CATCH_BUFFER_SEC = 30;     // 정류장에 닿고 이 정도 여유는 있어야 탈 수 있다
