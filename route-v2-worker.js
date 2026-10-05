@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-05l";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-05m";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -4471,8 +4471,8 @@ async function fetchStopArrivalsAny(cityCode, nodeId, env, deadline, budget, sta
     if (!c) return true;                     // 우리 표에 없는 id 는 판단 보류
     return hav(base[0], base[1], c[0], c[1]) <= SIBLING_MAX_M;
   };
-  // ★ 2026-10-05: 서울 stId(SEL+9자리)는 TAGO 인접 id 규칙(첫 자리 1·3·2·4 바꿈)이 맞지 않는다 — 다른 정류장을 부르게 되므로 그 id 하나만 쓴다.
-  const ids = (seoulStId(nodeId) ? [nodeId] : stopSiblings(nodeId)).filter(nearOk).slice(0, 3);   // 앱도 인접 등록분을 3곳까지만 합친다
+  // ★ 2026-10-05: 서울 stId(SEL+9자리)와 경기 stationId(GGB+9자리, 서울·경기 조회가 켜진 때)는 TAGO 인접 id 규칙(첫 자리 1·3·2·4 바꿈)이 맞지 않는다 — 다른 정류장을 부르게 되므로 그 id 하나만 쓴다.
+  const ids = ((seoulStId(nodeId) || (gbisBusOn(env) && gbisStationId(nodeId))) ? [nodeId] : stopSiblings(nodeId)).filter(nearOk).slice(0, 3);   // 앱도 인접 등록분을 3곳까지만 합친다
   const want = (wantNos || []).map(noKey).filter(Boolean);
   const covered = (m) => {
     if (!want.length) return (m && (m.__names || []).length) ? true : false;
