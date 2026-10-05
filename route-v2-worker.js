@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-05f";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-05g";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -5070,7 +5070,7 @@ async function applyLiveWaits(out, stat, env, deadline) {
   }
   if (stat) stat.liveStops = targets.size;
   if (!targets.size) return 0;
-  if (budgetLeft(deadline) <= 300) { if (stat) stat.liveSkip = true; return 0; }
+  if (budgetLeft(deadline) <= 300) { if (stat) { stat.liveSkip = true; stat.liveMissing = targets.size; } return 0; }
   const entries = Array.from(targets.entries()).slice(0, LIVE_MAX_STOPS);
   const got = {};
   await Promise.race([
@@ -5147,6 +5147,25 @@ async function applyLiveWaits(out, stat, env, deadline) {
     r.totalMin = Math.max(0, Math.round(((r.totalMin || 0) * 60 + d) / 60));
     n++;
     }
+  }
+  // ★ 2026-10-05 (YJ: 예상으로 나온 버스는 10~20초 뒤 다시 조회해 실제값으로): 조회를 시도했는데 못 받았거나(막힘·시간초과)
+  //   4분 전 보관값으로 메운 구간 수. 앱이 이 값이 0보다 크면 10~20초 뒤 같은 요청을 다시 보낸다.
+  //   조회가 닿았는데 우리 노선만 없는 경우(운행 없음)는 세지 않는다 — 다시 물어도 같은 답이다.
+  if (stat) {
+    let miss = 0;
+    const tried = new Set(entries.map((e) => e[0]));
+    for (const k in out) {
+      for (const e of busLegsWithOffset(out[k])) {
+        if (e.at > LIVE_TRANSFER_HORIZON) break;
+        const L4 = e.leg;
+        if (!L4 || !L4.boardStopId) continue;
+        const key4 = String(L4.line || "").split("_")[0] + "|" + stopNorm(L4.boardStopId);
+        if (!tried.has(key4)) continue;
+        const m4 = got[key4];
+        if (!m4 || String(m4.__via || "").indexOf("stale") === 0) miss++;
+      }
+    }
+    stat.liveMissing = miss;
   }
   if (stat) stat.liveApplied = n;
   return n;
