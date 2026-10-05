@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-05a";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-05b";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -2669,7 +2669,7 @@ __name(tagoParse, "tagoParse");
 //   실시간 단계 상한(1.8초)이 첫 시도에서 이미 지나가 바인딩에 닿지도 못한 채 시간초과 → 차단기(45초) → 전부 '예상'이 됐다.
 //   → 순서는 그대로(직접 먼저)이되 TAGO_HEDGE_MS 안에 안 끝나면 다음 경로를 '동시에' 출발시키고 먼저 성공한 쪽을 쓴다.
 //     직접 호출이 막혔다고 판명되면(실패/지연 뒤 다른 경로가 성공) 10분간 성공했던 경로를 앞에 둔다. 직접이 다시 되면 원래 순서로 돌아간다.
-var TAGO_HEDGE_MS = 600;
+var TAGO_HEDGE_MS = 350;
 var TAGO_PREF = { via: null, until: 0 };
 function tagoOrder(list) {
   if (TAGO_PREF.via && TAGO_PREF.until > Date.now()) {
@@ -4426,6 +4426,9 @@ function mergeArr(dst, src) {
 __name(mergeArr, "mergeArr");
 
 var SIBLING_HEDGE_MS = 200;
+// ★ 2026-10-05: 차단 45초 → 8초. 실측 — TAGO 는 처음 붙을 때만 20초 걸려 522 가 나고, 한 번 붙으면 0.3초에 응답한다. 45초 차단은
+//   그 사이 모든 요청을 '예상'으로 만들었다(6번 중 2번). 이제 경로 경쟁(tagoFetch)이 있으니 짧게만 쉬고 곧 다시 시도한다(연결이 데워진다).
+var LIVE_BRK_MS = 8000;
 var LIVE_BRK = { n: 0, until: 0 };   // 02ba: 실시간 조회 연속 시간초과 차단기
 async function fetchStopArrivalsAny(cityCode, nodeId, env, deadline, budget, stat, wantNos, coordOf) {
   // 2026-09-08: id 패턴만 보고 합치면 안 된다.
@@ -4493,7 +4496,7 @@ async function fetchStopArrivals(cityCode, nodeId, env, deadline, budget) {
   //   공공API 호출 한도만 썼다. 서울용 실시간 출처(TOPIS 키)가 생기기 전까진 서울은 호출하지 않고 '정보 없음'으로 돌려준다(결과는 원래도 빈 값이었다).
   if (String(cityCode) === "11" && !(env && env.SEOUL_LIVE_TAGO === "1")) return { __names: [], __via: "skip-seoul" };
   // ★ 02ba (실측 2026-10-03 08시): 경기·인천 도착정보가 연달아 시간초과(1.8초×2단계=약 3.8초 낭비, 결과엔 반영 0건)인 때가 있다.
-  //   isolate 안에서 시간초과가 3번 쌓이면 45초간 실시간 조회를 건너뛰어(가정치 사용 — 원래도 빈 응답과 같은 경로) 응답이 느려지지 않게 한다.
+  //   isolate 안에서 시간초과가 3번 쌓이면 LIVE_BRK_MS(2026-10-05부터 8초)간 실시간 조회를 건너뛰어(가정치 사용 — 원래도 빈 응답과 같은 경로) 응답이 느려지지 않게 한다.
   if (LIVE_BRK.until > Date.now()) throw new Error("live-breaker");
   if (budget) {
     if (budget.used >= LIVE_MAX_CALLS) throw new Error("\uC870\uD68C \uD69F\uC218 \uC0C1\uD55C");
@@ -4509,7 +4512,7 @@ async function fetchStopArrivals(cityCode, nodeId, env, deadline, budget) {
         Math.max(200, Math.min(LIVE_TIMEOUT_MS, budgetLeft(deadline)))))
     ]);
   } catch (e) {
-    if (String((e && e.message) || e) === "timeout" && ++LIVE_BRK.n >= 3) { LIVE_BRK.until = Date.now() + 45000; LIVE_BRK.n = 0; }
+    if (String((e && e.message) || e) === "timeout" && ++LIVE_BRK.n >= 3) { LIVE_BRK.until = Date.now() + LIVE_BRK_MS; LIVE_BRK.n = 0; }
     throw e;
   }
   LIVE_BRK.n = 0;
