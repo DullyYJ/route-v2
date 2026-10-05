@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-05b";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-05c";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -4490,7 +4490,7 @@ async function fetchStopArrivalsAny(cityCode, nodeId, env, deadline, budget, sta
 }
 __name(fetchStopArrivalsAny, "fetchStopArrivalsAny");
 
-async function fetchStopArrivals(cityCode, nodeId, env, deadline, budget) {
+async function fetchStopArrivalsLive(cityCode, nodeId, env, deadline, budget) {
   // ★ 02an (실측 2026-10-02): TAGO 도착정보는 서울(cityCode 11) 정류장에 대해 항상 빈 응답이다(SEL 정류장 43곳 중 0곳, /live-test 도 3경로 모두
   //   resultCode 00 + totalCount 0 — 인천 ICB 는 18/18 응답). 그런데도 요청마다 서울 정류장 몇 곳을 부르느라 실시간 단계가 1.4~1.8초 걸리고
   //   공공API 호출 한도만 썼다. 서울용 실시간 출처(TOPIS 키)가 생기기 전까진 서울은 호출하지 않고 '정보 없음'으로 돌려준다(결과는 원래도 빈 값이었다).
@@ -4504,6 +4504,7 @@ async function fetchStopArrivals(cityCode, nodeId, env, deadline, budget) {
   }
   const qs = "cityCode=" + encodeURIComponent(cityCode)
     + "&nodeId=" + encodeURIComponent(nodeId) + "&numOfRows=60&_type=json";
+  await liveAcquire(deadline);
   let got;
   try {
     got = await Promise.race([
@@ -4514,6 +4515,8 @@ async function fetchStopArrivals(cityCode, nodeId, env, deadline, budget) {
   } catch (e) {
     if (String((e && e.message) || e) === "timeout" && ++LIVE_BRK.n >= 3) { LIVE_BRK.until = Date.now() + LIVE_BRK_MS; LIVE_BRK.n = 0; }
     throw e;
+  } finally {
+    liveRelease();
   }
   LIVE_BRK.n = 0;
   const items = got.items;
@@ -4532,6 +4535,87 @@ async function fetchStopArrivals(cityCode, nodeId, env, deadline, budget) {
   for (const k in m) if (Array.isArray(m[k])) m[k].sort((a, b) => a - b);
   m.__names = names;
   return m;
+}
+__name(fetchStopArrivalsLive, "fetchStopArrivalsLive");
+
+// ★ 2026-10-05 (YJ: 버스는 클라우드플레어만으로 — NCP 중계 없이):
+//   (1) 동시 호출 상한(LIVE_CONC): 한 요청이 정류장 십여 곳을 한꺼번에 부르면 TAGO 동시세션(30개, 앱과 공유)을 한 번에 채운다.
+//       상한을 두고 줄을 세워 '조금씩 나눠' 보낸다(건강할 때 호출 하나 0.3~0.7초 → 13곳도 약 1~2초). 줄에서 오래 기다리면 그 호출은 포기한다.
+//   (2) 직전 성공값 보관(캐시 API, 같은 데이터센터 안에서 요청 사이에 공유): 호출이 막히는 순간엔 4분 안의 직전 성공값을
+//       지난 시간만큼 빼서 쓴다(버스는 오는 중이라 남은 초가 줄어드는 게 사실에 가깝다). 4분을 넘으면 쓰지 않는다('예상' 유지).
+var LIVE_CONC = 6;
+var _liveRun = 0, _liveQ = [];
+function liveAcquire(deadline) {
+  return new Promise((resolve, reject) => {
+    if (_liveRun < LIVE_CONC) { _liveRun++; resolve(); return; }
+    const w = { go: () => { _liveRun++; resolve(); } };
+    w.t = setTimeout(() => {
+      const i = _liveQ.indexOf(w); if (i >= 0) _liveQ.splice(i, 1);
+      reject(new Error("live-queue"));
+    }, Math.max(100, Math.min(LIVE_TIMEOUT_MS, budgetLeft(deadline) - 250)));
+    _liveQ.push(w);
+  });
+}
+__name(liveAcquire, "liveAcquire");
+function liveRelease() {
+  _liveRun = Math.max(0, _liveRun - 1);
+  const w = _liveQ.shift();
+  if (w) { clearTimeout(w.t); w.go(); }
+}
+__name(liveRelease, "liveRelease");
+var LIVE_STALE_MS = 240000;
+var LIVE_STALE_SAVE_GAP_MS = 15000;
+var _liveStaleSaved = /* @__PURE__ */ new Map();
+var _liveCtx = null;
+function liveAgeFix(m, ageSec) {
+  if (ageSec <= 0) return m;
+  const out = {};
+  for (const key in m) {
+    if (key.slice(0, 2) === "__") { out[key] = m[key]; continue; }
+    out[key] = m[key].map((t) => t - ageSec).filter((t) => t >= 0);
+  }
+  return out;
+}
+__name(liveAgeFix, "liveAgeFix");
+function liveStaleReq(k) { return new Request("https://live-cache.invalid/" + encodeURIComponent(k)); }
+function liveStaleSave(k, m) {
+  try {
+    if (typeof caches === "undefined" || !caches.default) return;
+    const now = Date.now(), last = _liveStaleSaved.get(k) || 0;
+    if (now - last < LIVE_STALE_SAVE_GAP_MS) return;
+    if (_liveStaleSaved.size > 300) _liveStaleSaved.clear();
+    _liveStaleSaved.set(k, now);
+    const pr = caches.default.put(liveStaleReq(k), new Response(JSON.stringify({ at: now, m }), { headers: { "Cache-Control": "public, max-age=600" } })).catch(() => {});
+    if (_liveCtx && _liveCtx.waitUntil) _liveCtx.waitUntil(pr);
+  } catch (e) {}
+}
+__name(liveStaleSave, "liveStaleSave");
+async function liveStaleLoad(k) {
+  try {
+    if (typeof caches === "undefined" || !caches.default) return null;
+    const r = await caches.default.match(liveStaleReq(k));
+    if (!r) return null;
+    const j = await r.json();
+    const ageMs = Date.now() - j.at;
+    if (!j || !j.m || !(ageMs >= 0) || ageMs > LIVE_STALE_MS) return null;
+    const out = liveAgeFix(j.m, Math.floor(ageMs / 1000));
+    out.__via = "stale-" + Math.floor(ageMs / 1000) + "s";
+    return out;
+  } catch (e) { return null; }
+}
+__name(liveStaleLoad, "liveStaleLoad");
+async function fetchStopArrivals(cityCode, nodeId, env, deadline, budget) {
+  const sk = String(cityCode) + "|" + String(nodeId);
+  try {
+    const m = await fetchStopArrivalsLive(cityCode, nodeId, env, deadline, budget);
+    if (m && (m.__names || []).length) liveStaleSave(sk, m);
+    return m;
+  } catch (e) {
+    if (budget && budget.used >= LIVE_MAX_CALLS) throw e;   // 요청당 호출 상한은 장애가 아니다 — 보관값도 쓰지 않는다
+    const st = await liveStaleLoad(sk);
+    if (st) return st;
+    throw e;
+  }
 }
 __name(fetchStopArrivals, "fetchStopArrivals");
 
@@ -5661,6 +5745,7 @@ async function estimateCached(env, ctx, official, now) {
   return out;
 }
 async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
+  _liveCtx = ctx || null;
   const _tReq = Date.now(), _djC0 = DJ_STAT.calls, _djP0 = DJ_STAT.pops;
   const p = url.searchParams;
   const SX = parseFloat(p.get("SX")), SY = parseFloat(p.get("SY")), EX = parseFloat(p.get("EX")), EY = parseFloat(p.get("EY"));
