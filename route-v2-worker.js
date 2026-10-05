@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-05j";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-05l";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -2681,8 +2681,8 @@ function tagoOrder(list) {
   return list;
 }
 __name(tagoOrder, "tagoOrder");
-async function tagoFetch(env, qs) {
-  const inner = TAGO_BASE + "?" + qs;
+async function tagoFetch(env, qs, baseUrl, parseFn) {
+  const inner = (baseUrl || TAGO_BASE) + "?" + qs;
   const tried = [];
   const base = tagoAttempts(env);
   const list = tagoOrder(base);
@@ -2705,7 +2705,7 @@ async function tagoFetch(env, qs) {
         try {
           const res = await a.run(inner);
           const txt = await res.text();
-          const p = tagoParse(txt);
+          const p = (parseFn || tagoParse)(txt);
           if (p.ok) return { ok: true, items: p.items, via: a.via };
           tried.push(a.via + ": " + p.why.slice(0, 60));
           return { ok: false, net: res.status >= 500 };
@@ -4523,12 +4523,12 @@ __name(fetchStopArrivalsAny, "fetchStopArrivalsAny");
 //   TAGO 도착정보는 서울 정류장엔 항상 빈 응답이라 서울 버스는 한 번도 조회되지 않았다. 서울시 버스도착정보(ws.bus.go.kr,
 //   getLowArrInfoByStId)는 Cloudflare 에서 0.25초에 닿고(실측) 같은 공공데이터포털 키로 쓴다. 서울 정류장(SEL+9자리 = 서울 stId)만 부른다.
 //   · 응답: msgBody.itemList[] — 노선 busRouteAbrv(번호)·rtNm, 도착까지 traTime1/traTime2(초). 운행종료·출발대기는 0 이라 건너뛴다.
-//   · 호출량 한도(서울 하루 1만건): 한도 응답이 나오면 키2 로 넘기고, 둘 다 막히면 20분간 서울 조회를 쉰다(그동안은 '예상' — 원래와 같다).
+//   · 호출량 한도(서울 하루 1만건): 한도 응답이 나오면 키2 로 넘기고, 둘 다 막히면 5분간 서울 조회를 쉰다(그동안은 '예상' — 원래와 같다).
 //   · 끄는 스위치: 환경변수 SEOUL_BUS_LIVE=0 (기본 켜짐)
 var SEOUL_BUS_URL = "http://ws.bus.go.kr/api/rest/arrive/getLowArrInfoByStId";
 var SEOUL_BRK = { n: 0, until: 0 };
 var SEOUL_QUOTA = { until: 0 };
-var SEOUL_QUOTA_REST_MS = 20 * 60 * 1000;
+var SEOUL_QUOTA_REST_MS = 5 * 60 * 1000;
 function seoulStId(id) {
   const m = /^SEL([0-9]{9})$/.exec(String(id || ""));
   return m ? m[1] : null;
@@ -4625,6 +4625,71 @@ async function fetchSeoulArrivals(stId, env, deadline, budget) {
 }
 __name(fetchSeoulArrivals, "fetchSeoulArrivals");
 
+// ★ 2026-10-05 (YJ: 경기 버스도 실제 도착시간으로): 경기도_버스도착정보 조회(공공데이터포털 15080346, v2) — 같은 공공데이터포털 키(키1, 한도 응답이면 키2).
+//   TAGO 와 같은 길 경쟁(직접 호출 vs 서비스 바인딩)을 그대로 쓴다(tagoFetch 에 주소·해석 함수를 넘긴다). 정류장 id GGB+9자리 = 경기 stationId.
+//   · 응답: response.msgBody.busArrivalList[] — routeName(번호), predictTime1/2(분), flag(PASS 운행·STOP 운행종료·WAIT 회차지 대기).
+//     초 단위 값(predictTimeSec1/2)이 오면 그것을 쓰고, 없으면 분×60 이다(분 단위라 최대 1분 오차 — 엔진의 CATCH_BUFFER_SEC 가 흡수).
+//   · 실패하면 예전 경로(TAGO)로 한 번 더 시도한다(기존 동작 보존). 끄는 스위치: 환경변수 GBIS_BUS_LIVE=0 (기본 켜짐)
+var GBIS_BUS_URL = "https://apis.data.go.kr/6410000/busarrivalservice/v2/getBusArrivalListv2";
+function gbisStationId(id) {
+  const m = /^GGB([0-9]{9})$/.exec(String(id || ""));
+  return m ? m[1] : null;
+}
+__name(gbisStationId, "gbisStationId");
+function gbisBusOn(env) {
+  if (!env || String(env.GBIS_BUS_LIVE == null ? "1" : env.GBIS_BUS_LIVE) === "0") return false;
+  return !!(env.TAGO_KEY || env.DATA_GO_KR_KEY || env.TAGO_KEY2 || (env.BUSAPI && typeof env.BUSAPI.fetch === "function"));
+}
+__name(gbisBusOn, "gbisBusOn");
+// 도시별 실시간 조회 가능 여부(서울 11 = SEL 정류장, 경기 3xxxx = GGB 정류장, 그 밖은 TAGO)
+function liveCityOk(env, cc, id) {
+  if (cc === "11") return !!(seoulBusOn(env) && seoulStId(id));
+  if (cc.charAt(0) === "3") return !!(gbisBusOn(env) && gbisStationId(id));
+  return true;
+}
+__name(liveCityOk, "liveCityOk");
+function gbisParse(txt) {
+  let j = null;
+  try { j = JSON.parse(txt); } catch (e) { return { ok: false, why: "not-json: " + String(txt).replace(/\s+/g, " ").slice(0, 60) }; }
+  const cm = j && j.OpenAPI_ServiceResponse && j.OpenAPI_ServiceResponse.cmmMsgHeader;
+  if (cm) return { ok: false, why: (cm.errMsg || "") + " / " + (cm.returnAuthMsg || "") };
+  const r = j && j.response, h = r && r.msgHeader;
+  if (!h) return { ok: false, why: "no-header" };
+  const rc = String(h.resultCode);
+  if (rc === "4") return { ok: true, items: [] };                     // 결과 없음
+  if (rc !== "0") return { ok: false, why: "gbis " + rc + " " + String(h.resultMessage || "").slice(0, 40) };
+  let items = r.msgBody && r.msgBody.busArrivalList;
+  items = items ? (Array.isArray(items) ? items : [items]) : [];
+  return { ok: true, items };
+}
+__name(gbisParse, "gbisParse");
+function gbisToArrivals(items, via) {
+  const m = { __via: via || "gbis" }, names = [];
+  const push2 = (k, t) => { if (!k) return; (m[k] = m[k] || []).push(t); };
+  for (const it of items) {
+    const no = String(it && it.routeName != null ? it.routeName : "").trim();
+    if (!no) continue;
+    if (String(it.flag || "").toUpperCase() === "STOP") continue;      // 운행종료
+    for (const n of [1, 2]) {
+      let t = parseInt(it["predictTimeSec" + n], 10);
+      if (!(t > 0)) {
+        const mn = parseInt(it["predictTime" + n], 10);
+        if (!isFinite(mn) || mn < 0) continue;
+        t = mn === 0 ? 20 : mn * 60;
+      }
+      if (t <= 0 || t > 3600) continue;
+      if (names.indexOf(no) < 0) names.push(no);
+      push2(no, t);
+      const k = noKey(no);
+      if (k !== no) push2(k, t);
+    }
+  }
+  for (const k in m) if (Array.isArray(m[k])) m[k].sort((a, b) => a - b);
+  m.__names = names;
+  return m;
+}
+__name(gbisToArrivals, "gbisToArrivals");
+
 async function fetchStopArrivalsLive(cityCode, nodeId, env, deadline, budget) {
   // ★ 02an (실측 2026-10-02): TAGO 도착정보는 서울(cityCode 11) 정류장에 대해 항상 빈 응답이다(SEL 정류장 43곳 중 0곳, /live-test 도 3경로 모두
   //   resultCode 00 + totalCount 0 — 인천 ICB 는 18/18 응답). 그런데도 요청마다 서울 정류장 몇 곳을 부르느라 실시간 단계가 1.4~1.8초 걸리고
@@ -4633,6 +4698,37 @@ async function fetchStopArrivalsLive(cityCode, nodeId, env, deadline, budget) {
     const sid9 = seoulBusOn(env) ? seoulStId(nodeId) : null;
     if (sid9) return await fetchSeoulArrivals(sid9, env, deadline, budget);   // 2026-10-05: 서울 정류장은 서울시 도착정보로
     return { __names: [], __via: "skip-seoul" };
+  }
+  // ★ 2026-10-05: 경기 정류장(GGB+9자리)은 경기도 버스도착정보로 먼저 — 실패하면 아래 예전 경로(TAGO)로 간다.
+  const gsid = (String(cityCode) !== "11" && gbisBusOn(env)) ? gbisStationId(nodeId) : null;
+  if (gsid) {
+    try {
+      if (LIVE_BRK.until > Date.now()) throw new Error("live-breaker");
+      if (budget) {
+        if (budget.used >= LIVE_MAX_CALLS) throw new Error("\uC870\uD68C \uD69F\uC218 \uC0C1\uD55C");
+        budget.used++;
+      }
+      await liveAcquire(deadline);
+      let got;
+      try {
+        got = await Promise.race([
+          tagoFetch(env, "stationId=" + encodeURIComponent(gsid) + "&format=json", GBIS_BUS_URL, gbisParse),
+          new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")),
+            Math.max(200, Math.min(LIVE_TIMEOUT_MS, budgetLeft(deadline)))))
+        ]);
+      } catch (e) {
+        if (String((e && e.message) || e) === "timeout" && ++LIVE_BRK.n >= 3) { LIVE_BRK.until = Date.now() + LIVE_BRK_MS; LIVE_BRK.n = 0; }
+        throw e;
+      } finally {
+        liveRelease();
+      }
+      LIVE_BRK.n = 0;
+      return gbisToArrivals(got.items, "gbis-" + got.via);
+    } catch (e) {
+      const msg = String((e && e.message) || e);
+      if (msg === "live-queue" || msg === "live-breaker" || msg === "timeout" || /\uC870\uD68C \uD69F\uC218/.test(msg)) throw e;   // 길·시간 문제는 TAGO 로 또 가도 같다
+      // 그 밖의 오류(승인·해석)는 아래 예전 경로로 한 번 더
+    }
   }
   // ★ 02ba (실측 2026-10-03 08시): 경기·인천 도착정보가 연달아 시간초과(1.8초×2단계=약 3.8초 낭비, 결과엔 반영 0건)인 때가 있다.
   //   isolate 안에서 시간초과가 3번 쌓이면 LIVE_BRK_MS(2026-10-05부터 8초)간 실시간 조회를 건너뛰어(가정치 사용 — 원래도 빈 응답과 같은 경로) 응답이 느려지지 않게 한다.
@@ -5159,6 +5255,7 @@ async function applyLiveWaits(out, stat, env, deadline) {
     stat.keySet = !!(env && (env.TAGO_KEY || env.DATA_GO_KR_KEY));
     stat.binding = !!(env && env.BUSAPI && typeof env.BUSAPI.fetch === "function");
     stat.seoulBus = seoulBusOn(env);
+    stat.gbisBus = gbisBusOn(env);
   }
   const targets = /* @__PURE__ */ new Map();
   // ★ 첫 버스 + 곳(15분 이내) 타는 환승 버스까지 대상으로 삼는다
@@ -5168,7 +5265,7 @@ async function applyLiveWaits(out, stat, env, deadline) {
       const L2 = e.leg;
       if (!L2 || !L2.boardStopId) continue;
       const cc2 = String(L2.line || "").split("_")[0];
-      if (!/^[0-9]{2,5}$/.test(cc2) || (cc2 === "11" && !(seoulBusOn(env) && seoulStId(L2.boardStopId))) || cc2.charAt(0) === "3") continue;
+      if (!/^[0-9]{2,5}$/.test(cc2) || !liveCityOk(env, cc2, L2.boardStopId)) continue;
       targets.set(cc2 + "|" + stopNorm(L2.boardStopId), [cc2, L2.boardStopId]);
     }
   }
@@ -5176,8 +5273,8 @@ async function applyLiveWaits(out, stat, env, deadline) {
     const L = firstBusLeg(out[k]);
     if (!L || !L.boardStopId) continue;
     const cc = String(L.line || "").split("_")[0];
-    // 경기(31xxx)는 TAGO 도착정보 미지원 → 건드리지 않는다. 서울(11)은 서울시 도착정보(SEL 정류장)만 2026-10-05부터 조회한다.
-    if (!/^[0-9]{2,5}$/.test(cc) || (cc === "11" && !(seoulBusOn(env) && seoulStId(L.boardStopId))) || cc.charAt(0) === "3") continue;
+    // 서울(11)은 서울시 도착정보(SEL 정류장), 경기(3xxxx)는 경기도 도착정보(GGB 정류장)만 2026-10-05부터 조회한다(liveCityOk).
+    if (!/^[0-9]{2,5}$/.test(cc) || !liveCityOk(env, cc, L.boardStopId)) continue;
     targets.set(cc + "|" + stopNorm(L.boardStopId), [cc, L.boardStopId]);
   }
   if (stat) stat.liveStops = targets.size;
@@ -6479,30 +6576,6 @@ async function handleFetch(request, env, ctx) {
     } catch (e) {
       return new Response(JSON.stringify({ error: String((e && e.message) || e) }), { status: 500, headers: CORS_H });
     }
-  }
-
-  // ★ 2026-10-05 (경기 버스 도착 시험 — 확인 뒤 삭제할 것): /gg-bus-test?stationId=220000054
-  //   경기도_버스도착정보 조회(15080346)가 같은 공공데이터포털 키로 승인돼 있는지·응답 모양을 본다. 키 값은 응답에 싣지 않는다.
-  if (url.pathname === "/gg-bus-test") {
-    const sid = String(url.searchParams.get("stationId") || "220000054").replace(/[^0-9]/g, "").slice(0, 12);
-    const keys = [["key", (env && (env.TAGO_KEY || env.DATA_GO_KR_KEY)) || ""], ["key2", (env && env.TAGO_KEY2) || ""]].filter((x) => x[1]);
-    keys.push(["binding", "x"]);
-    const outg = { stationId: sid, haveKeys: keys.map((x) => x[0]), tries: [] };
-    const ops = ["https://apis.data.go.kr/6410000/busarrivalservice/v2/getBusArrivalListv2", "https://apis.data.go.kr/6410000/busarrivalservice/getBusArrivalList"];
-    const jobs = [];
-    for (const base of ops) for (const [kn, kv] of keys) {
-      jobs.push((async () => {
-        const t0 = Date.now(), r = { op: base.split("/").slice(-2).join("/"), key: kn, ms: null, status: null, head: null, err: null };
-        try {
-          const u = kn === "binding" ? (base + "?stationId=" + sid + "&format=json&serviceKey=") : (base + "?serviceKey=" + encodeURIComponent(kv) + "&stationId=" + sid + "&format=json");
-          const res = await Promise.race([(kn === "binding" ? env.BUSAPI.fetch(new Request("https://busapi.internal/tago?url=" + encodeURIComponent(u))) : fetch(u)), new Promise((_, rej) => setTimeout(() => rej(new Error("timeout6s")), 6000))]);
-          r.status = res.status; const _gt = await res.text(); r.head = _gt.slice(0, 200); try { const _gj = JSON.parse(_gt), _gl = (_gj.response && _gj.response.msgBody && _gj.response.msgBody.busArrivalList) || []; r.rows = (Array.isArray(_gl) ? _gl : [_gl]).slice(0, 3).map((x) => JSON.stringify(x).slice(0, 700)); r.nrows = (Array.isArray(_gl) ? _gl : [_gl]).length; } catch (_e) {}
-        } catch (e) { r.err = String((e && e.message) || e).slice(0, 80); }
-        r.ms = Date.now() - t0; outg.tries.push(r);
-      })());
-    }
-    await Promise.all(jobs);
-    return new Response(JSON.stringify(outg, null, 1), { status: 200, headers: CORS_H });
   }
 
   if (url.pathname === "/live-test") {
