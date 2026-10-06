@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-06a";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-06b";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -1613,7 +1613,10 @@ __name(stnNameHit, "stnNameHit");
 //   보정 전 느린 시간 기준으로 경로를 고를 수 있다 — 다만 경의중앙선은 대부분 단일 선형노선이라
 //   실제 영향은 제한적일 것으로 본다. 추후 진짜 정차역 그래프로 교체하는 것이 더 정확하다.
 var KRIC_LMAP = {"KR|1":"S01","S1|1":"S01","KR|3":"S03","S1|3":"S03","KR|4":"S04","S1|4":"S04","S1|2":"S02","S1|5":"S05","S1|6":"S06","S1|7":"S07","IC|7":"S07","S1|8":"S08","S9|9":"S09","AR|A1":"ARX","GM|G1":"GIM","KR|K4":"GJC","KR|K2":"GCC","KR|WS":"SHS","SW|WS":"SHS","GX|A":"GXA","SR|A":"GXA","IC|I2":"IN2","IC|I1":"IN1","DX|D1":"SBD","UI|UI":"UIS","UL|U1":"UJB","KR|K5":"GGN","KR|K1":"SUI","EV|E1":"EVL","SL|L1":"SLL","BS|1":"BS1","BS|2":"BS2","BS|3":"BS3","BS|4":"BS4","DG|1":"DG1","DG|2":"DG2","DG|3":"DG3","GJ|1":"GJ1","DJ|1":"DJ1"};
-function kricNN(s) { s = String(s || "").replace(/\(.*?\)/g, "").replace(/[^0-9A-Za-z가-힣]/g, ""); if (s.length > 2 && s.slice(-1) === "역") s = s.slice(0, -1); return s; }
+// ★ 2026-10-06: KRIC 시간표가 쓰는 새 이름 ↔ 번들(옛) 이름. 2026-07 서구가 서해구로 바뀌면서 KRIC 쪽 인천2호선 '서구청'이 '서해구청'이 됐다.
+//   이름이 안 맞으면 그 역이 시간표에서 통째로 빠져(unmatched) 아시아드경기장→가정 가짜 직행 구간(kric_seg)이 생기고 경로에서 서구청이 사라진다.
+var KRIC_NAME_ALIAS = { "서해구청": "서구청" };
+function kricNN(s) { s = String(s || "").replace(/\(.*?\)/g, "").replace(/[^0-9A-Za-z가-힣]/g, ""); if (s.length > 2 && s.slice(-1) === "역") s = s.slice(0, -1); return KRIC_NAME_ALIAS[s] || s; }
 function kricIn(s) { var m = /\((.*?)\)/.exec(String(s || "")); return m ? kricNN(m[1]) : ""; } function kricTm(s) { return s ? (+s.slice(0, 2)) * 3600 + (+s.slice(2, 4)) * 60 + (+s.slice(4, 6)) : null; }
 function kricAdj(v, wrap) { return v == null ? null : (wrap && v < 14400 ? v + 86400 : v); }
 function kricMed(a) { a = a.slice().sort(function (x, y) { return x - y; }); return a[Math.floor(a.length / 2)]; }
@@ -1719,7 +1722,7 @@ async function kricLoad(env, G) {
   var xres; try { xres = await env.DB.prepare("SELECT line, a, b, hop, wk, we, hk, he FROM kric_xp").all(); } catch (e) { xres = await env.DB.prepare("SELECT line, a, b, hop, wk, we FROM kric_xp").all(); }
   var ns = 0, nx = 0, i, j, r, L;
   var srows = sres.results || [], xrows = xres.results || [];
-  for (i = 0; i < srows.length; i++) { r = srows[i]; if (!G.ST[r.a] || !G.ST[r.b]) continue; L = G.adj["S|" + r.a] = G.adj["S|" + r.a] || []; var hit = false; for (j = 0; j < L.length; j++) if (L[j].to === "S|" + r.b && L[j].kind === "ride") { L[j].w = r.sec; hit = true; } if (!hit) L.push({ to: "S|" + r.b, w: r.sec, kind: "ride", line: r.line }); ns++; }
+  for (i = 0; i < srows.length; i++) { r = srows[i]; if (!G.ST[r.a] || !G.ST[r.b]) continue; L = G.adj["S|" + r.a] = G.adj["S|" + r.a] || []; var hit = false; for (j = 0; j < L.length; j++) if (L[j].to === "S|" + r.b && L[j].kind === "ride") { L[j].w = r.sec; hit = true; } if (!hit) { if (KRIC_NO_EXPRESS[r.line]) continue; /* ★ 급행 없는 노선에서 번들에 없는 비인접 구간 = 시간표 누락이 만든 가짜 직행(예: 아시아드경기장→가정, 서구청 건너뜀) */ L.push({ to: "S|" + r.b, w: r.sec, kind: "ride", line: r.line }); } ns++; }
   for (var k in G.adj) { L = G.adj[k]; for (j = L.length - 1; j >= 0; j--) if (L[j].kind === "xpress") L.splice(j, 1); }
   for (i = 0; i < xrows.length; i++) { r = xrows[i]; if (!G.ST[r.a] || !G.ST[r.b] || KRIC_NO_EXPRESS[r.line]) continue; (G.adj["S|" + r.a] = G.adj["S|" + r.a] || []).push({ to: "S|" + r.b, w: r.hop, kind: "xpress", line: r.line, dep: xpBits(r.wk), depW: xpBits(r.we), hp: xpHops(r.hk), hpW: xpHops(r.he), bw: ((G.LN[r.line] && G.LN[r.line].hw) || 420) / 2 }); nx++; }
   var gm = null; for (var id in G.ST) if (G.ST[id].l === "S01" && G.ST[id].n === "광명") gm = id;
