@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-06e";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-06f";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -1270,6 +1270,25 @@ function accessNodesCached(G, busCoord, lat, lng, allowBus, stat) {
 }
 __name(accessNodesCached, "accessNodesCached");
 var DJ_STAT = { calls: 0, pops: 0, ms: 0 };   // ★ 02ac: 길찾기가 몇 번·얼마나 도는지 센다(워커 시계는 계산 중엔 멈춰서 ms 로는 CPU 를 못 잰다 → 횟수로 잰다)
+// ★ 2026-10-06f: 경로의 간선을 다시 찾을 때 '같은 노선'의 간선을 고른다.
+//   버스는 같은 두 정류장 사이를 여러 노선이 지나서 (to, kind) 가 같은 간선이 노선 수만큼 있다.
+//   예전엔 find 로 첫 간선을 집어서, 다익스트라가 고른 노선이 아닌 다른 노선의 주행시간·배차대기가
+//   총시간(real)과 구간(legs)에 들어갔다 — 두 곳이 같은 잘못된 간선을 집으니 서로는 맞지만,
+//   승차 대기는 real 쪽이 e.line(엉뚱한 노선)으로, leg 쪽이 실제 노선으로 계산돼 총시간과 타임라인 끝이
+//   버스 경로에서 3~6분 어긋났다. 같은 노선 중에는 다익스트라가 쓴 최소 가중치를 고른다(급행은 종전처럼 첫 간선).
+function pickEdge(list, to, kind, line) {
+  if (!list) return void 0;
+  let best, any;
+  for (let i = 0; i < list.length; i++) {
+    const x = list[i];
+    if (x.to !== to || x.kind !== kind) continue;
+    if (any === void 0) { any = x; if (line === void 0) return x; }
+    if (x.line !== line) continue;
+    if (best === void 0 || (kind !== "xpress" && x.w < best.w)) best = x;
+  }
+  return best !== void 0 ? best : any;
+}
+
 function dijkstra(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
   DJ_STAT.calls++;
   const adj = G.adj;
@@ -1379,7 +1398,7 @@ function dijkstra(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
   }
   for (let i = 0; i + 1 < path.length; i++) {
     const a = dec(path[i]), b = dec(path[i + 1]);
-    const e = (adj[a] || []).find((x) => x.to === b && x.kind === pk[path[i + 1]]);
+    const e = pickEdge(adj[a], b, pk[path[i + 1]], pl[path[i + 1]]);
     if (e) {
       let _ew = e.w, _xw2 = null; if (e.kind === "xpress") { _xw2 = xpWait(G, e, dist[path[i]]); if (_xw2 != null) _ew = XP_LAST_HOP; }
       real += _ew;
@@ -1390,8 +1409,8 @@ function dijkstra(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
   if (gmap[dec(best)] !== void 0) real += gmap[dec(best)];
   const legs = [];
   let cur = null, xf = 0;
-  const edgeW = /* @__PURE__ */ __name((u, v, kind, dSec) => {
-    const e = (adj[u] || []).find((x) => x.to === v && x.kind === kind);
+  const edgeW = /* @__PURE__ */ __name((u, v, kind, dSec, line) => {
+    const e = pickEdge(adj[u], v, kind, line);
     if (e && kind === "xpress" && dSec !== void 0 && xpWait(G, e, dSec) != null) return XP_LAST_HOP;
     return e ? e.w : 0;
   }, "edgeW");
@@ -1419,13 +1438,13 @@ function dijkstra(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
       cur.coordList.push(s.y == null ? null : [s.y, s.x]);
       cur.to = s.n;
       {
-        const _dw = edgeW(prev2, n, k, prev2 === void 0 ? void 0 : dist[path[i - 1]]); if (k === "xpress") cur.hasExpress = true;
+        const _dw = edgeW(prev2, n, k, prev2 === void 0 ? void 0 : dist[path[i - 1]], l); if (k === "xpress") cur.hasExpress = true;
         // ★ 2026-10-03: 급행을 기다리는 시간(위 real 합산의 xpWait - 기준대기)을 구간에도 넣는다.
         //   예전엔 총시간(totalTime)에만 들어가고 구간(타임라인)에는 없어서, 급행이 있는 경로는
         //   도착 시각(타임라인)이 총시간보다 2~14분 빨랐다(예: 서울→평택 totalTime 100분, 구간합 87분).
         let _xe = 0;
         if (k === "xpress" && prev2 !== void 0) {
-          const _ee = (adj[prev2] || []).find((x) => x.to === n && x.kind === "xpress");
+          const _ee = pickEdge(adj[prev2], n, "xpress", l);
           if (_ee) { const _xw = xpWait(G, _ee, dist[path[i - 1]]); if (_xw != null) _xe = Math.max(0, _xw - (_ee.bw || XP_BASE_WAIT)); }
         }
         cur.sec += _dw + _xe; if (_xe > 0) cur.xpWait = (cur.xpWait || 0) + _xe;   // ★ 03bi: 앱이 '대기'와 '승차'를 나눠 보여줄 수 있게 급행 대기초를 따로 둔다(값은 그대로)
@@ -1455,7 +1474,7 @@ function dijkstra(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
       cur.coordList.push(busCoord[id] || null);
       cur.to = nm;
       {
-        const _dw = edgeW(prev2, n, "bus");
+        const _dw = edgeW(prev2, n, "bus", void 0, l);
         cur.sec += _dw;
         cur.secList.push((cur.secList.length ? cur.secList[cur.secList.length - 1] : 0) + _dw);
       }
@@ -1463,12 +1482,12 @@ function dijkstra(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
       xf++;
       const s = G.ST[n.slice(2)];
       const toLn = G.LN[l] && G.LN[l].n || l;
-      cur = { mode: "transfer", at: s ? s.n : "", toLine: toLn, sec: edgeW(prev2, n, "sub-xfer"), xferWaitSec: (G.LN[l] && G.LN[l].hw || 300) / 2 };   // ★ 03bm: 환승 시간 안의 배차 대기(=배차간격/2) — 합계는 그대로, 앱이 대기로 나눠 보여 준다
+      cur = { mode: "transfer", at: s ? s.n : "", toLine: toLn, sec: edgeW(prev2, n, "sub-xfer", void 0, l), xferWaitSec: (G.LN[l] && G.LN[l].hw || 300) / 2 };   // ★ 03bm: 환승 시간 안의 배차 대기(=배차간격/2) — 합계는 그대로, 앱이 대기로 나눠 보여 준다
       legs.push(cur);
       cur = null;
     } else if (k === "walk") {
       xf++;
-      const w = edgeW(prev2, n, "walk");
+      const w = edgeW(prev2, n, "walk", void 0, l);
       legs.push({ mode: "walk", sec: w });
       cur = null;
     } else if (k === "access" && i === 0) {
