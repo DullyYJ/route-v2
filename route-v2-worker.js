@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-06d";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-06e";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -1480,7 +1480,7 @@ function dijkstra(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
   //   leg 는 환승마다 대기를 이미 넣고 있으므로 그 값을 그대로 더하면 둘이 일치한다.
   for (const _bl of legs) if (_bl._busXfer) real += (_bl.waitSec || 0);
   real -= applyExpressDiscount(legs); // ★ 2026-09-28d: 경의중앙선 등 급행 구간 보정(위 설명 참조)
-  optimizeAlight(legs);          // ★ 하차 정류장을 엔진에서 정한다
+  real += optimizeAlight(legs);  // ★ 하차 정류장을 엔진에서 정한다 (06e: 바뀐 시간 차이를 총시간에도 반영)
   real += extendAlight(legs, G); // ★ 역 정류장이 몇 정거장 뒤에 있으면 거기까지 타고 간다
   real += fixBusLegs(legs, G);   // ★ 2026-09-04: 깨진 버스 구간을 바로잡고 총시간에도 반영
   let accessSec = 0;
@@ -1907,8 +1907,12 @@ function applyExpressDiscount(legs) {
 }
 __name(applyExpressDiscount, "applyExpressDiscount");
 
+// ★ 2026-10-06e: 반환값 = 총시간에 반영해야 할 초 차이(= 하차를 바꾼 뒤 구간합 - 바꾸기 전 구간합).
+//   예전엔 legs 만 바꾸고 real(총시간)은 그대로 둬서, 하차를 앞당긴 경로는 총시간이 타임라인 끝보다
+//   3~7분 길었다(예: 상계→청평 totalTime 60분, 타임라인 끝 53분). extendAlight 와 같은 방식으로 차이를 돌려준다.
 function optimizeAlight(legs) {
-  if (!legs || legs.length < 2) return legs;
+  if (!legs || legs.length < 2) return 0;
+  let delta = 0;
   for (let i = 0; i < legs.length; i++) {
     const bs = legs[i];
     if (!bs || bs.mode !== "bus" || !bs.coordList || bs.coordList.length < 3) continue;
@@ -1955,6 +1959,7 @@ function optimizeAlight(legs) {
     if (best < 0 || best === last) continue;
     if (!(curCost - bestCost >= ALIGHT_MIN_GAIN)) continue;
 
+    const _oldSec = bs.sec || 0, _oldWalk = legs[wIdx].sec || 0;
     bs.stopList  = bs.stopList.slice(0, best + 1);
     bs.coordList = bs.coordList.slice(0, best + 1);
     if (bs.secList) bs.secList = bs.secList.slice(0, best + 1);
@@ -1962,8 +1967,9 @@ function optimizeAlight(legs) {
     bs.sec       = _wait + Math.max(60, Math.round(costAt(best)));   // 대기는 그대로 남긴다
     legs[wIdx].sec = Math.max(0, Math.round(bestWalk));
     bs.alightNamed = nameHit(bs.stopList[bs.stopList.length - 1]);
+    delta += (bs.sec - _oldSec) + (legs[wIdx].sec - _oldWalk);
   }
-  return legs;
+  return delta;
 }
 __name(optimizeAlight, "optimizeAlight");
 
