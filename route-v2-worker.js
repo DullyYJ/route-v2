@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-06c";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-06d";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -1615,7 +1615,8 @@ __name(stnNameHit, "stnNameHit");
 var KRIC_LMAP = {"KR|1":"S01","S1|1":"S01","KR|3":"S03","S1|3":"S03","KR|4":"S04","S1|4":"S04","S1|2":"S02","S1|5":"S05","S1|6":"S06","S1|7":"S07","IC|7":"S07","S1|8":"S08","S9|9":"S09","AR|A1":"ARX","GM|G1":"GIM","KR|K4":"GJC","KR|K2":"GCC","KR|WS":"SHS","SW|WS":"SHS","GX|A":"GXA","SR|A":"GXA","IC|I2":"IN2","IC|I1":"IN1","DX|D1":"SBD","UI|UI":"UIS","UL|U1":"UJB","KR|K5":"GGN","KR|K1":"SUI","EV|E1":"EVL","SL|L1":"SLL","BS|1":"BS1","BS|2":"BS2","BS|3":"BS3","BS|4":"BS4","DG|1":"DG1","DG|2":"DG2","DG|3":"DG3","GJ|1":"GJ1","DJ|1":"DJ1"};
 // ★ 2026-10-06: KRIC 시간표가 쓰는 새 이름 ↔ 번들(옛) 이름. 2026-07 서구가 서해구로 바뀌면서 KRIC 쪽 인천2호선 '서구청'이 '서해구청'이 됐다.
 //   이름이 안 맞으면 그 역이 시간표에서 통째로 빠져(unmatched) 아시아드경기장→가정 가짜 직행 구간(kric_seg)이 생기고 경로에서 서구청이 사라진다.
-var KRIC_NAME_ALIAS = { "서해구청": "서구청" };
+//   에버라인은 KRIC 이 옛 이름 '운동장.송담대'를 쓰는 역이 번들엔 '용인중앙시장'이다(같은 역) — 안 맞으면 그 역이 빠져 구간 하나가 직행으로 이어진다.
+var KRIC_NAME_ALIAS = { "서해구청": "서구청", "운동장송담대": "용인중앙시장" };
 function kricNN(s) { s = String(s || "").replace(/\(.*?\)/g, "").replace(/[^0-9A-Za-z가-힣]/g, ""); if (s.length > 2 && s.slice(-1) === "역") s = s.slice(0, -1); return KRIC_NAME_ALIAS[s] || s; }
 function kricIn(s) { var m = /\((.*?)\)/.exec(String(s || "")); return m ? kricNN(m[1]) : ""; } function kricTm(s) { return s ? (+s.slice(0, 2)) * 3600 + (+s.slice(2, 4)) * 60 + (+s.slice(4, 6)) : null; }
 function kricAdj(v, wrap) { return v == null ? null : (wrap && v < 14400 ? v + 86400 : v); }
