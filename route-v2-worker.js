@@ -8,7 +8,7 @@ var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
 var ACCESS_WALK = 900;
-var ENGINE_VERSION = "route-v2-2026-10-05r";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
+var ENGINE_VERSION = "route-v2-2026-10-06a";   // ★ 배포하면 루트 URL 응답의 version 이 이것으로 바뀐다 — 실제 수정을 전달할 때마다 그 날짜로 갱신할 것(YJ 지시, 2026-09-29)
 // ★ 2026-09-27a: 캐시 나이 보정(liveCacheGet) + TAGO 두 번째 키 지원(tagoAttempts, env.TAGO_KEY2)
 //   + 클라이언트 요청제한(rateLimited, /route-v2 계열) 추가.
 // ★ 2026-09-27b: legsToSubPath 구간명(startName/endName) 빈칸 보정 추가
@@ -1708,6 +1708,12 @@ function kricDeriveCore(B, L, dayRows) {
   for (key in PX) if (PX[key].h.length >= 3) xp.push([key, kricMed(PX[key].h), PX[key].h.length, kricHex(PX[key]["8"]), kricHex(PX[key]["9"]), kricHopStr(PX[key].s8), kricHopStr(PX[key].s9)]);
   return { seg: seg, xp: xp, unmatched: unmatched, trains: trains.length, express: nEx, kc: kc, ks: ks, tdump: tdump0 };
 }
+// ★ 2026-10-06: 급행(역을 건너뛰는 열차)이 실제로 없는 노선 — 이 노선들의 kric_xp 는 쓰지 않는다.
+//   증상: 인천2호선 검단오류→주안이 왕길>검바위>아시아드경기장>가정… 처럼 검단사거리·마전·완정·독정·검암·서구청을 건너뛴 채 내려왔다.
+//   원인: KRIC 역별 시간표는 일부 역의 행이 빠져 있는데, 파생 로직(kricDerive)이 '빠진 역 = 급행 통과'로 읽어
+//   인천2호선에 가짜 급행 간선 82개(예: 검단오류→검암 11분 30초)를 저장했다. 최단경로가 이 간선을 타서 중간 역이 사라졌다.
+//   엔진 규칙: 어느 역에 서는지는 엔진이 정한다(앱은 그냥 그린다). 급행이 있는 노선만 xpress 간선을 둔다.
+var KRIC_NO_EXPRESS = { S02: 1, S03: 1, S05: 1, S06: 1, S07: 1, S08: 1, IN1: 1, IN2: 1, GIM: 1, SBD: 1, UIS: 1, UJB: 1, GGN: 1, EVL: 1, SLL: 1, BS1: 1, BS2: 1, BS3: 1, BS4: 1, DG1: 1, DG2: 1, DG3: 1, GJ1: 1, DJ1: 1 };
 async function kricLoad(env, G) {
   var sres = await env.DB.prepare("SELECT line, a, b, sec FROM kric_seg").all();
   var xres; try { xres = await env.DB.prepare("SELECT line, a, b, hop, wk, we, hk, he FROM kric_xp").all(); } catch (e) { xres = await env.DB.prepare("SELECT line, a, b, hop, wk, we FROM kric_xp").all(); }
@@ -1715,7 +1721,7 @@ async function kricLoad(env, G) {
   var srows = sres.results || [], xrows = xres.results || [];
   for (i = 0; i < srows.length; i++) { r = srows[i]; if (!G.ST[r.a] || !G.ST[r.b]) continue; L = G.adj["S|" + r.a] = G.adj["S|" + r.a] || []; var hit = false; for (j = 0; j < L.length; j++) if (L[j].to === "S|" + r.b && L[j].kind === "ride") { L[j].w = r.sec; hit = true; } if (!hit) L.push({ to: "S|" + r.b, w: r.sec, kind: "ride", line: r.line }); ns++; }
   for (var k in G.adj) { L = G.adj[k]; for (j = L.length - 1; j >= 0; j--) if (L[j].kind === "xpress") L.splice(j, 1); }
-  for (i = 0; i < xrows.length; i++) { r = xrows[i]; if (!G.ST[r.a] || !G.ST[r.b]) continue; (G.adj["S|" + r.a] = G.adj["S|" + r.a] || []).push({ to: "S|" + r.b, w: r.hop, kind: "xpress", line: r.line, dep: xpBits(r.wk), depW: xpBits(r.we), hp: xpHops(r.hk), hpW: xpHops(r.he), bw: ((G.LN[r.line] && G.LN[r.line].hw) || 420) / 2 }); nx++; }
+  for (i = 0; i < xrows.length; i++) { r = xrows[i]; if (!G.ST[r.a] || !G.ST[r.b] || KRIC_NO_EXPRESS[r.line]) continue; (G.adj["S|" + r.a] = G.adj["S|" + r.a] || []).push({ to: "S|" + r.b, w: r.hop, kind: "xpress", line: r.line, dep: xpBits(r.wk), depW: xpBits(r.we), hp: xpHops(r.hk), hpW: xpHops(r.he), bw: ((G.LN[r.line] && G.LN[r.line].hw) || 420) / 2 }); nx++; }
   var gm = null; for (var id in G.ST) if (G.ST[id].l === "S01" && G.ST[id].n === "광명") gm = id;
   if (gm) { for (var k0 in G.adj) { L = G.adj[k0]; for (j = L.length - 1; j >= 0; j--) if (L[j].kind === "ride" && (k0 === "S|" + gm ? L[j].to !== "S|" + gm && G.ST[L[j].to.slice(2)] && G.ST[L[j].to.slice(2)].n === "영등포" : L[j].to === "S|" + gm && G.ST[k0.slice(2)] && G.ST[k0.slice(2)].n === "영등포")) L.splice(j, 1); } }
   G.__kricStat = { seg: ns, xp: nx };
@@ -1741,6 +1747,7 @@ async function kricDerive(env, B, L) {
   return { line: L, rows8: dayRows["8"].length, rows9: dayRows["9"].length, trains: out.trains, express: out.express, seg: out.seg.length, xp: out.xp.length, unmatched: out.unmatched, kc: out.kc, ks: out.ks, tdump: out.tdump };
 }
 var KRIC_CRON_N = 320;
+var KRIC_DAILY_MAX = 320;   // KRIC 하루 호출 상한(공공API 일일 한도 보호). kric_state.ingest_quota = "YYYY-MM-DD|사용량"
 var KRIC_DERIVE_CRON = "5,15,25,35,45,55 17-18 * * *";
 var KRIC_TEST_DERIVE_CRON = "*/7 * * * *";
 async function kricStateInit(env) {
@@ -1754,12 +1761,18 @@ function kricSortedLines(s) {
 }
 async function kricRefresh(env, limit) {
   await kricStateInit(env);
+  var kqDay = new Date().toISOString().slice(0, 10), kqRow = await env.DB.prepare("SELECT v FROM kric_state WHERE k='ingest_quota'").first(), kqUsed = 0;
+  if (kqRow && kqRow.v && String(kqRow.v).slice(0, 10) === kqDay) kqUsed = +String(kqRow.v).slice(11) || 0;
+  if (kqUsed >= KRIC_DAILY_MAX) return { t: Date.now(), picked: 0, skipped: "daily-cap", used: kqUsed };
+  limit = Math.min(limit, KRIC_DAILY_MAX - kqUsed);
+  await kricStateSet(env, "ingest_quota", kqDay + "|" + (kqUsed + limit));
   var t0 = Date.now();
   var rs = await env.DB.prepare("SELECT opr, ln, st, day, nm, n, data FROM kric_tt WHERE nm<>'' ORDER BY ts ASC LIMIT ?").bind(limit).all();
   var rows = rs.results || [];
   var stat = { t: t0, picked: rows.length, same: 0, changed: 0, suspect: 0, fail: 0, ok: 0, abort: "", lastErr: "" };
   var idx = 0, stop = false, upd = [], dirty = {};
   async function one(r) {
+    usageAdd("kric.stationTimetable");
     var kr = await fetch("https://openapi.kric.go.kr/openapi/convenientInfo/stationTimetable?serviceKey=" + encodeURIComponent(env.KRIC_KEY) + "&format=json&railOprIsttCd=" + r.opr + "&lnCd=" + r.ln + "&stinCd=" + r.st + "&dayCd=" + r.day, { signal: AbortSignal.timeout(15000) });
     var kt = await kr.text();
     var kj = null;
@@ -2963,12 +2976,15 @@ async function tagoFetchAny(env, innerNoKey) {
   function runOne(a) {
     return (async function () {
       try {
+        usageAdd("ld." + _svc + "." + a.via);
         var res = await a.run(innerNoKey);
         var txt = await res.text();
         var p = tagoParse(txt);
-        if (p.ok) { delete TAGO_BAD[_svc + "|" + a.via]; return { items: p.items, via: a.via }; }
+        if (p.ok) { usageFlush(env); delete TAGO_BAD[_svc + "|" + a.via]; return { items: p.items, via: a.via }; }
         tried.push(a.via + ": " + p.why.slice(0, 80));
       } catch (e) { tried.push(a.via + ": " + String((e && e.message) || e).slice(0, 80)); }
+      usageAdd("ld." + _svc + "." + a.via + ".err");
+      usageFlush(env);
       TAGO_BAD[_svc + "|" + a.via] = Date.now();
       return null;
     })();
@@ -4603,6 +4619,7 @@ async function fetchSeoulArrivals(stId, env, deadline, budget) {
       try {
         const t = Math.max(200, Math.min(LIVE_TIMEOUT_MS, budgetLeft(deadline)));
         usageAdd("seoul.call");
+        usageAdd("seoul.k" + (keys.indexOf(key) + 1));
         res = await Promise.race([
           fetch(SEOUL_BUS_URL + "?serviceKey=" + encodeURIComponent(key) + "&stId=" + encodeURIComponent(stId) + "&resultType=json"),
           new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), t))
@@ -4837,6 +4854,15 @@ __name(liveStaleSave, "liveStaleSave");
 // ★ 2026-10-05 (내부 진단 — 사용자 화면과 무관): 외부 도착정보 API 호출량을 하루 단위로 센다. 한도(서울 하루 1만건 등) 임박을 미리 보려는 것.
 //   호출마다 메모리 카운터만 올리고, 60초에 한 번 D1(live_usage: 날짜·항목·횟수)에 합쳐 올린다. 조회: /live-usage?days=3
 //   항목: seoul.call/err/quota · gbis.<길>(.err) · tago.<길>(.err)(길 = env-key·env-key2·binding) · share.hit(공유 캐시로 호출 없이 메운 정류장)
+function xferKeyName(env, k) {
+  if (!k || !env) return "other";
+  if (k === (env.TAGO_KEY || env.DATA_GO_KR_KEY || "")) return "env-key";
+  if (k === (env.TAGO_KEY2 || "")) return "env-key2";
+  if (k === (env.DATA_GO_KR_KEY || "")) return "data-go-kr";
+  if (k === (env.XFER_KEY || "")) return "xfer-key";
+  if (k === (env.XFER_KEY2 || "")) return "xfer-key2";
+  return "other";
+}
 var USAGE = { n: {}, last: 0, ready: false };
 function usageAdd(k) { USAGE.n[k] = (USAGE.n[k] || 0) + 1; }
 __name(usageAdd, "usageAdd");
@@ -5496,6 +5522,7 @@ async function xferFetchAll(env, kind) {
         var u = kind === "xfer"
           ? XFER_URL + "?page=" + page + "&perPage=1000&returnType=JSON&serviceKey=" + encodeURIComponent(keys[ki])
           : EXIT_URL + "?pageNo=" + page + "&numOfRows=1000&dataType=JSON&serviceKey=" + encodeURIComponent(keys[ki]);
+        usageAdd("xfer." + kind + "." + xferKeyName(env, keys[ki]));
         var res = await fetch(u);
         var txt = await res.text();
         var j = null;
@@ -5701,6 +5728,7 @@ async function ntceFetch(env) {
   let last = "";
   for (let i = 0; i < keys.length; i++) {
     try {
+      usageAdd("ntce." + xferKeyName(env, keys[i]));
       const res = await fetch(NTCE_URL + "?pageNo=1&numOfRows=100&dataType=JSON&srchStartNoftOcrnYmd=" + since + "&serviceKey=" + encodeURIComponent(keys[i]));
       const txt = await res.text();
       const j = JSON.parse(txt);
@@ -5975,6 +6003,7 @@ async function estFetchPositions(env, lineName) {
   var ctl = typeof AbortController !== "undefined" ? new AbortController() : null;
   var to = setTimeout(function () { try { if (ctl) ctl.abort(); } catch (e) {} }, 5000);
   try {
+    usageAdd("est.seoul-position");
     var res = await env.BUSAPI.fetch(new Request("https://busapi.internal/seoul?path=" + encodeURIComponent(path), ctl ? { signal: ctl.signal } : undefined));
     var txt = await res.text();
     var j = null; try { j = JSON.parse(txt); } catch (e) {}
@@ -6505,7 +6534,7 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
   return new Response(JSON.stringify({ result: out, busStopsInCorridor: Object.keys(busCoord).length, rtwApplied: _rtwApplied, engVer: ENGINE_VERSION, rtwStat: G.rtwStat || null, liveStat: _liveStat, _src: "route-v2" }), { status: 200, headers: CORS });
 }
 __name(handleRouteV2, "handleRouteV2");
-var route_v2_worker_default = { async scheduled(event, env, ctx) { ctx.waitUntil(kricCron(event, env)); ctx.waitUntil(ldTTWarm(env).catch(function () {})); ctx.waitUntil(ldPairsCron(env, ctx).catch(function () {})); }, async fetch(request, env, ctx) {
+var route_v2_worker_default = { async scheduled(event, env, ctx) { _liveCtx = ctx; ctx.waitUntil(new Promise(function (r) { setTimeout(r, 25e3); }).then(function () { usageFlush(env); })); ctx.waitUntil(kricCron(event, env)); ctx.waitUntil(ldTTWarm(env).catch(function () {})); ctx.waitUntil(ldPairsCron(env, ctx).catch(function () {})); }, async fetch(request, env, ctx) {
   // ★ 2026-09-05: 어떤 예외도 1101 페이지로 새지 않게 한다.
   //   HTML 오류 페이지는 원인을 감추고, 앱쪽에선 'JSON 아님'로만 보인다.
   try {
@@ -6628,7 +6657,7 @@ async function handleFetch(request, env, ctx) {
   // ★ 2026-10-05: 외부 도착정보 API 하루 호출량(내부 진단) — /live-usage?days=3
   if (url.pathname === "/live-usage") {
     try {
-      const days = Math.max(1, Math.min(14, parseInt(url.searchParams.get("days") || "3", 10) || 3));
+      const days = Math.max(1, Math.min(120, parseInt(url.searchParams.get("days") || "3", 10) || 3));
       const since = new Date(Date.now() + 9 * 3600 * 1000 - (days - 1) * 86400000).toISOString().slice(0, 10);
       await env.DB.prepare("CREATE TABLE IF NOT EXISTS live_usage (day TEXT, k TEXT, n INTEGER, PRIMARY KEY (day, k))").run();
       const rs = await env.DB.prepare("SELECT day, k, n FROM live_usage WHERE day >= ? ORDER BY day DESC, k").bind(since).all();
