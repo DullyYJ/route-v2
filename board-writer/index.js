@@ -47,7 +47,7 @@ var LR_PER_IP_HR = 30;
 // ★ 2026-10-03: 신고가 서로 다른 3명 이상 모인 글은 보이지 않게 한다(자동 숨김). 신고한 기기 식별 코드도 14일 뒤 같이 지운다.
 var LR_HIDE_N = 3;
 var LR_HIDDEN_SQL = " AND id NOT IN (SELECT msg_id FROM line_reports GROUP BY msg_id HAVING COUNT(*) >= " + LR_HIDE_N + ")";
-var LR_KINDS_OK = ["chat", "delay", "crowd"];
+var LR_KINDS_OK = ["chat"];   // ★ 2026-10-05 (YJ): 지연·붐벼요 제보 버튼 삭제(악용 우려) — 서버도 일반 대화만 받는다
 // ★ 2026-10-03 (익명 정확도 기록): 앱이 예상한 '탑승~하차' 분과 실제로 걸린 분을 목적지 도착 때 한 번 보낸다.
 //   저장하는 것: 날짜(일 단위), 예상분, 실제분, 환승 횟수, 노선명, 시간대(시), 평일 여부, 수단 구분, 앱 버전.
 //   저장하지 않는 것: 역 이름·좌표·사용자 식별값·IP. IP 는 시간당 횟수 제한에만 쓰고 제한표는 24시간 뒤 지운다. 기록은 1년 뒤 삭제.
@@ -358,6 +358,39 @@ var NEWS_FEEDS = [
     "https://rss.etnews.com/Section901.xml"
   ] }
 ];
+var _gemStat = { ok: 0, fail: 0, last: "", model: "", ctxRej: 0 };
+// ★ 2026-10-05: Gemini 무료 한도 대응. 모델마다 하루 한도가 따로라서, flash-lite 가 429(한도)면 다음 모델로 넘어간다.
+//   한도에 걸린 모델은 20분(404 면 6시간) 동안 건너뛴다 → 한도 난 뒤에도 20분마다 헛호출을 쏟아붓지 않는다.
+var GEM_MODELS = ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.0-flash"];
+var _gemDownUntil = {};
+var _gemLast = { status: 0, model: "", tried: "" };
+async function gemFetch(env, ms, init) {
+  let last = null, attempted = 0;
+  const tried = [];
+  for (const m of GEM_MODELS) {
+    if ((_gemDownUntil[m] || 0) > Date.now()) continue;
+    attempted++;
+    let r;
+    try {
+      r = await fetchT("https://generativelanguage.googleapis.com/v1beta/models/" + m + ":generateContent?key=" + env.GEMINI_KEY, ms, init);
+    } catch (e) {
+      _gemDownUntil[m] = Date.now() + 30e3;
+      tried.push(m.replace("gemini-", "") + ":timeout");
+      continue;
+    }
+    tried.push(m.replace("gemini-", "") + ":" + r.status);
+    if (r.ok) { _gemStat.model = m; _gemLast = { status: 200, model: m, tried: tried.join(",") }; return r; }
+    last = r;
+    // ★ 2026-10-05: 503(과부하)도 다음 모델로 넘어간다 — 16:00 에 flash-lite 가 503 이라 13개 방이 비었다. 5xx 는 1분만 쉰다.
+    if (r.status === 429) _gemDownUntil[m] = Date.now() + 20 * 60e3;
+    else if (r.status === 404) _gemDownUntil[m] = Date.now() + 6 * 3600e3;
+    else if (r.status >= 500) _gemDownUntil[m] = Date.now() + 60e3;
+    else { _gemLast = { status: r.status, model: "", tried: tried.join(",") }; return r; }
+  }
+  _gemLast = { status: last ? last.status : (attempted ? 504 : 429), model: "", tried: tried.join(",") };
+  return last || { ok: false, status: attempted ? 504 : 429, json: async () => ({}), text: async () => "" };
+}
+__name(gemFetch, "gemFetch");
 function fetchT(url, ms, opts) {
   const o = opts || { headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Accept": "application/rss+xml, application/xml, text/xml, */*" }, redirect: "follow" };
   return Promise.race([
@@ -464,34 +497,192 @@ function kstNow() {
   return new Date(Date.now() + 9 * 3600 * 1e3);
 }
 __name(kstNow, "kstNow");
-var HOLIDAYS = [
-  "2026-01-01",
-  "2026-02-16",
-  "2026-02-17",
-  "2026-02-18",
-  "2026-03-01",
-  "2026-03-02",
-  "2026-05-05",
-  "2026-05-24",
-  "2026-05-25",
-  "2026-06-06",
-  "2026-08-15",
-  "2026-08-17",
-  "2026-09-24",
-  "2026-09-25",
-  "2026-09-26",
-  "2026-10-03",
-  "2026-10-05",
-  "2026-10-09",
-  "2026-12-25"
-];
+// ══════════════════════════════════════════════════════════════════════
+// ★ 2026-10-05 (YJ): 글·댓글·대화가 '오늘이 무슨 날인지'와 어긋나는 문제 — 개천절 대체공휴일(월요일)인데 일요일 밤에 "낼 월요일 출근"이라고
+//   쓰고, 게시판엔 "내일부터 월요일 시작"이라고 썼다. 요일 이름과 쉬는 날 여부를 따로 계산하던 것이 원인(슬롯 라벨은 '월요일 (평일)').
+//   고친 것: ① 공휴일 표(대체공휴일 포함)로 오늘·내일·다음 출근일·가까운 공휴일을 계산(dayCtx) ② 모든 Gemini 프롬프트에 그 사실과 계절·날씨를
+//   넣는다(ctxBlock) ③ 템플릿(정해진 문구)과 Gemini 결과 모두 요일·휴일·계절·기온·비/눈과 어긋나면 버린다(ctxReject).
+//   공휴일 표는 매년 갱신해야 한다 — 표에 없는 해는 고정일 공휴일(신정·삼일절·어린이날·현충일·광복절·개천절·한글날·성탄절)만 적용한다.
+//   임시공휴일이 생기면 HOLIDAY_NAMES 에 한 줄 추가.
+// ══════════════════════════════════════════════════════════════════════
+var HOLIDAY_NAMES = {
+  "2026-01-01": "신정", "2026-02-16": "설날 연휴", "2026-02-17": "설날", "2026-02-18": "설날 연휴", "2026-03-01": "삼일절", "2026-03-02": "삼일절 대체공휴일",
+  "2026-05-05": "어린이날", "2026-05-24": "부처님오신날", "2026-05-25": "부처님오신날 대체공휴일", "2026-06-03": "지방선거일", "2026-06-06": "현충일",
+  "2026-08-15": "광복절", "2026-08-17": "광복절 대체공휴일", "2026-09-24": "추석 연휴", "2026-09-25": "추석", "2026-09-26": "추석 연휴",
+  "2026-10-03": "개천절", "2026-10-05": "개천절 대체공휴일", "2026-10-09": "한글날", "2026-12-25": "성탄절",
+  // 2027 — 미리 계산한 값(확정 공고가 나오면 확인)
+  "2027-01-01": "신정", "2027-02-05": "설날 연휴", "2027-02-06": "설날", "2027-02-07": "설날 연휴", "2027-02-08": "설날 대체공휴일", "2027-03-01": "삼일절",
+  "2027-05-05": "어린이날", "2027-05-13": "부처님오신날", "2027-06-06": "현충일", "2027-08-15": "광복절", "2027-08-16": "광복절 대체공휴일",
+  "2027-09-14": "추석 연휴", "2027-09-15": "추석", "2027-09-16": "추석 연휴", "2027-10-03": "개천절", "2027-10-04": "개천절 대체공휴일",
+  "2027-10-09": "한글날", "2027-10-11": "한글날 대체공휴일", "2027-12-25": "성탄절", "2027-12-27": "성탄절 대체공휴일"
+};
+var HOLIDAY_FIXED = { "01-01": "신정", "03-01": "삼일절", "05-05": "어린이날", "06-06": "현충일", "08-15": "광복절", "10-03": "개천절", "10-09": "한글날", "12-25": "성탄절" };
+var HOLIDAY_TABLE_YEARS = { "2026": 1, "2027": 1 };
+var HOLIDAYS = Object.keys(HOLIDAY_NAMES);
+var DOW_KO = ["일", "월", "화", "수", "목", "금", "토"];
+function _p2(n) { return ("0" + n).slice(-2); }
+function ymdOf(d) { return d.getUTCFullYear() + "-" + _p2(d.getUTCMonth() + 1) + "-" + _p2(d.getUTCDate()); }
+function holidayName(ymd) {
+  if (HOLIDAY_NAMES[ymd]) return HOLIDAY_NAMES[ymd];
+  if (HOLIDAY_TABLE_YEARS[ymd.slice(0, 4)]) return "";
+  return HOLIDAY_FIXED[ymd.slice(5)] || "";
+}
+__name(holidayName, "holidayName");
 function isRestDay(kst) {
   const day = kst.getUTCDay();
   if (day === 0 || day === 6) return true;
-  const ymd = kst.getUTCFullYear() + "-" + ("0" + (kst.getUTCMonth() + 1)).slice(-2) + "-" + ("0" + kst.getUTCDate()).slice(-2);
-  return HOLIDAYS.indexOf(ymd) >= 0;
+  return !!holidayName(ymdOf(kst));
 }
 __name(isRestDay, "isRestDay");
+function dayShift(kst, n) { return new Date(kst.getTime() + n * 86400e3); }
+function dayInfo(d) {
+  const dow = d.getUTCDay(), ymd = ymdOf(d), hol = holidayName(ymd);
+  return { ymd: ymd, dow: dow, m: d.getUTCMonth() + 1, d: d.getUTCDate(), md: (d.getUTCMonth() + 1) * 100 + d.getUTCDate(), hol: hol, rest: dow === 0 || dow === 6 || !!hol };
+}
+__name(dayInfo, "dayInfo");
+function dayCtx(kst) {
+  const t = dayInfo(kst), tm = dayInfo(dayShift(kst, 1)), y = dayInfo(dayShift(kst, -1));
+  let nw = null, nm = null, i;
+  for (i = 1; i <= 14 && !nw; i++) { const x = dayInfo(dayShift(kst, i)); if (!x.rest) { nw = x; nw.after = i; } }   // 다음 출근·등교일
+  for (i = 1; i <= 7 && !nm; i++) { const x = dayInfo(dayShift(kst, i)); if (x.dow === 1) { nm = x; nm.after = i; } }   // 다음 월요일(오늘 제외)
+  const hols = [];
+  for (i = 1; i <= 14; i++) { const x = dayInfo(dayShift(kst, i)); if (x.hol && x.dow >= 1 && x.dow <= 5) { x.after = i; hols.push(x); } }   // 평일에 낀 공휴일
+  return { t: t, tm: tm, y: y, nw: nw, nm: nm, hols: hols, hw: !!(t.hol && t.dow >= 1 && t.dow <= 5) };
+}
+__name(dayCtx, "dayCtx");
+function seasonText(md) {
+  if (md >= 301 && md <= 320) return "초봄(아직 쌀쌀, 꽃샘추위)";
+  if (md >= 321 && md <= 430) return "봄(벚꽃철, 일교차 큼)";
+  if (md >= 501 && md <= 531) return "늦봄·초여름(신록, 낮엔 더움)";
+  if (md >= 601 && md <= 620) return "초여름(더워지는 중)";
+  if (md >= 621 && md <= 720) return "장마철(덥고 습함)";
+  if (md >= 721 && md <= 820) return "한여름(무더위·열대야)";
+  if (md >= 821 && md <= 920) return "늦여름~초가을(늦더위 남아 있음)";
+  if (md >= 921 && md <= 1020) return "가을(선선함, 단풍이 들기 시작, 일교차 큼)";
+  if (md >= 1021 && md <= 1120) return "늦가을(쌀쌀, 단풍·낙엽, 겨울옷 꺼내는 시기)";
+  if (md >= 1121 && md <= 1220) return "초겨울(추워지는 중, 첫눈·붕어빵 철)";
+  return "한겨울(추위)";
+}
+__name(seasonText, "seasonText");
+function tempWord(t) {
+  if (t <= -5) return "매우 추움(한파)";
+  if (t <= 2) return "한겨울 추위";
+  if (t <= 9) return "춥다";
+  if (t <= 15) return "쌀쌀하다";
+  if (t <= 21) return "선선하고 활동하기 좋다";
+  if (t <= 25) return "포근하거나 약간 따뜻하다";
+  if (t <= 29) return "덥다";
+  return "무더위(폭염)";
+}
+__name(tempWord, "tempWord");
+function skyWord(w) {
+  const c = w.code || 0;
+  if (c === 0) return "맑음";
+  if (c <= 3) return "구름 조금~흐림(비·눈 없음)";
+  if (c === 45 || c === 48) return "안개";
+  if (c >= 51 && c <= 57) return "이슬비(비 옴)";
+  if (c >= 61 && c <= 67) return "비 옴";
+  if (c >= 71 && c <= 77 || c === 85 || c === 86) return "눈 옴";
+  if (c >= 80 && c <= 82) return "소나기(비 옴)";
+  if (c >= 95) return "천둥번개·비";
+  return "보통(비·눈 없음)";
+}
+__name(skyWord, "skyWord");
+var DAY_RULES = "규칙: ① 요일·휴일을 정확히. 쉬는 날(주말·공휴일)에는 '출근길·등교·회사·수업·월요병' 같은 말을 오늘의 일상으로 쓰지 마라(휴일 출근·특근·알바를 일부러 말하는 경우만 가능). ② 내일이 쉬는 날이면 '내일 출근·내일 월요일·월요병' 금지, 내일이 평일이면 '내일도 쉼' 금지. 월요일이어도 공휴일이면 월요일 출근 얘기 금지. ③ 계절·기온에 안 맞는 소재 금지(가을에 장마·빙수·한겨울 패딩 같은 것). ④ 비·눈이 안 오면 비·눈 얘기 금지, 비가 오면 '날씨 좋다' 금지. ⑤ 오늘이 평일 공휴일이면 '주말' 대신 '휴일·공휴일'이라고 말한다.";
+function ctxBlock(kst, w, wcat) {
+  const c = dayCtx(kst), t = c.t, tm = c.tm;
+  const dn = function(x) { return x.m + "월 " + x.d + "일 " + DOW_KO[x.dow] + "요일"; };
+  const kindOf = function(x) { return x.hol ? (x.dow >= 1 && x.dow <= 5 ? x.hol + "이라 평일이지만 쉬는 날(출근·등교 없음)" : x.hol + "(쉬는 날)") : x.dow === 0 || x.dow === 6 ? "주말(쉬는 날)" : "평일(출근·등교하는 날)"; };
+  const today = "오늘: " + dn(t) + " — " + kindOf(t);
+  const tomo = "내일: " + DOW_KO[tm.dow] + "요일 — " + kindOf(tm);
+  const nw = c.nw ? "다음 출근·등교일: " + (c.nw.after === 1 ? "내일" : c.nw.after + "일 뒤") + " " + DOW_KO[c.nw.dow] + "요일" : "";
+  const up = c.hols.length ? "가까운 공휴일: " + c.hols.slice(0, 2).map(function(h) { return h.m + "/" + h.d + "(" + DOW_KO[h.dow] + ") " + h.hol + " — " + h.after + "일 뒤"; }).join(", ") : "";
+  const wx = w ? "서울 현재 " + w.temp + "도(" + tempWord(w.temp) + "), 하늘: " + skyWord(w) : "날씨 정보 없음(날씨 얘기는 하지 마라)";
+  return "\n[날짜·계절·날씨 — 사실이다. 이와 어긋나는 말은 쓰지 마라]\n" + [today, tomo, nw, up, "계절: " + seasonText(t.md), wx].filter(Boolean).join("\n") + "\n" + DAY_RULES;
+}
+__name(ctxBlock, "ctxBlock");
+// 평일 공휴일에 '주말'이라고 쓴 것은 '휴일'로 바꾼다(이번 주말·다음 주말처럼 다른 주말을 가리키는 말은 그대로).
+function holFix(text, kst) {
+  const s = String(text == null ? "" : text);
+  if (!dayCtx(kst).hw) return s;
+  return s.replace(/(이번 |다음 |담 |지난 |다가오는 )?주말/g, function(m, pre) { return pre ? m : "휴일"; });
+}
+__name(holFix, "holFix");
+// 계절어 — [정규식, [[시작 MMDD, 끝 MMDD], ...]] 이 기간 밖에서 나오면 어색하다
+var SEASON_RULES = [
+  [/장마/, [[615, 731]]], [/폭염|열대야|무더위|찜통|삼복|복날/, [[601, 915]]], [/빙수|물놀이|워터파크|해수욕/, [[501, 930]]],
+  [/에어컨/, [[501, 1015]]], [/모기/, [[601, 1010]]], [/히터/, [[1020, 415]]], [/붕어빵|호빵|군고구마/, [[1001, 430]]],
+  [/패딩|목도리|장갑|핫팩|털장화/, [[1020, 415]]], [/한파|혹한/, [[1115, 315]]], [/첫눈|눈사람|폭설|눈길|빙판/, [[1101, 331]]],
+  [/벚꽃|꽃구경/, [[320, 515]]], [/황사/, [[301, 531]]], [/단풍|낙엽/, [[925, 1205]]], [/은행잎/, [[1001, 1130]]],
+  [/크리스마스|산타|캐롤/, [[1115, 1231]]], [/송년|연말/, [[1201, 1231]]], [/새해|신년|새해복/, [[1226, 131]]],
+  [/개강/, [[225, 325], [825, 925]]], [/종강/, [[610, 705], [1205, 1231]]], [/방학/, [[620, 831], [1215, 229]]],
+  [/수능/, [[1001, 1130]]], [/중간고사/, [[405, 505], [1005, 1031]]], [/기말고사/, [[601, 701], [1201, 1231]]]
+];
+// 명절·기념일어 — 그 공휴일 앞뒤 10일 안에서만
+var HOLIDAY_WORDS = [
+  [/추석|한가위|귀성|귀경/, ["추석"]], [/설날|세배|세뱃돈/, ["설날"]], [/명절/, ["추석", "설날"]], [/개천절/, ["개천절"]], [/한글날/, ["한글날"]],
+  [/어린이날/, ["어린이날"]], [/광복절/, ["광복절"]], [/삼일절/, ["삼일절"]], [/현충일/, ["현충일"]], [/부처님오신날|석가탄신일/, ["부처님오신날"]]
+];
+function _inRange(md, r) { return r[0] <= r[1] ? (md >= r[0] && md <= r[1]) : (md >= r[0] || md <= r[1]); }
+// 어긋나는 점이 있으면 이유(짧은 문자열), 없으면 "" — 템플릿을 고를 때와 Gemini 결과를 거를 때 모두 쓴다.
+function ctxReject(text, kst, w, cOpt) {
+  const s = String(text == null ? "" : text);
+  if (!s) return "";
+  const c = cOpt || dayCtx(kst), t = c.t, tm = c.tm;
+  let m;
+  const NEG = /아니|없|안 ?(가|해|하|간|나|와|갈)|쉬|쉰|휴일|공휴일|연휴|대체|노는|놀|부럽/;
+  // 내일이 쉬는 날인데 내일 출근·월요일·수업 얘기
+  const re1 = /(내일|낼)[^.!?\n]{0,10}?(출근|등교|월요|월욜|회사|학교|수업|일가|일 가|근무|야근|지각|개강|일 해|일해)/g;
+  while ((m = re1.exec(s))) { if (tm.rest && !NEG.test(s.slice(m.index, m.index + m[0].length + 8))) return "내일은 쉬는 날인데 출근·월요일 얘기"; }
+  // 내일이 평일인데 내일도 쉰다고
+  if (!tm.rest && /(내일|낼)(도|까지)? ?(하루 더 )?(쉬는|쉰다|쉼|휴일|공휴일|연휴)/.test(s) && !/안 ?쉬|못 ?쉬/.test(s)) return "내일은 평일인데 쉰다고 함";
+  // '내일 X요일'·'오늘 X요일' 이 실제와 다름
+  m = /(내일|낼)(부터|은|도|이)?\s*([일월화수목금토])(요일|욜)/.exec(s);
+  if (m && DOW_KO.indexOf(m[3]) !== tm.dow) return "내일 요일이 틀림";
+  m = /오늘\s*(은|도)?\s*([일월화수목금토])(요일|욜)/.exec(s);
+  if (m && DOW_KO.indexOf(m[2]) !== t.dow) return "오늘 요일이 틀림";
+  // 요일 이름 — 어제·오늘·내일 요일이 아니면 '이번·다음·지난' 같은 말이 붙어야 한다(화요일에 "금요일 오후의 설렘" 같은 글 방지)
+  if (!/이번|다음|담주|담 |지난|저번|주 /.test(s)) {
+    const reD = /([일월화수목금토])(요일|욜)/g;
+    while ((m = reD.exec(s))) { const d = DOW_KO.indexOf(m[1]); if (d !== t.dow && d !== tm.dow && d !== c.y.dow) return "요일 안 맞음:" + m[1]; }
+    if (/불금/.test(s) && t.dow !== 5 && t.dow !== 4) return "불금인데 금요일이 아님";
+  }
+  // 다음 월요일이 공휴일인데 '담주 월요일'
+  if (c.nm && c.nm.rest && /(담|다음)\s*주?\s*(월요일|월욜|월요)/.test(s)) return "다음 월요일은 휴일";
+  // 월요병 — 다음 출근일이 월요일(또는 오늘이 근무하는 월요일)일 때만
+  if (/월요병/.test(s)) {
+    const ok = (t.dow === 1 && !t.rest) || (c.nw && c.nw.dow === 1 && c.nw.after <= 3);
+    if (!ok) return "월요병인데 다음 출근일이 월요일이 아님";
+  }
+  // 쉬는 날에 출퇴근·수업 일상
+  if (t.rest && /출근길|퇴근길|출근 ?시간|퇴근 ?시간|출근 ?러시|퇴근 ?러시|등굣길|하굣길|등교|급식|1교시|야자|지옥철|월급루팡/.test(s) && !/휴일|공휴일|주말|특근|알바|내일|낼|담|다음|연휴|어제|지난|부럽|쉬/.test(s)) return "쉬는 날에 출퇴근 얘기";
+  // 월요일이 공휴일인데 평소 월요일처럼 말함
+  if (t.dow === 1 && t.rest && /월요일|월욜|월요병/.test(s) && !/휴일|공휴일|대체|쉬|연휴|개천절|담|다음|지난/.test(s)) return "휴일인 월요일을 평소 월요일처럼 말함";
+  // 평일인데 '오늘 주말/휴일'
+  if (!t.rest && /(오늘|지금)[^.!?\n]{0,6}(주말|휴일|공휴일|연휴)/.test(s) && !/내일|낼|담|다음|이번|언제|처럼|같/.test(s)) return "평일에 휴일 얘기";
+  // 계절어
+  for (let i = 0; i < SEASON_RULES.length; i++) {
+    if (SEASON_RULES[i][0].test(s) && !SEASON_RULES[i][1].some(function(r) { return _inRange(t.md, r); })) return "계절 안 맞음:" + SEASON_RULES[i][0].source.slice(0, 8);
+  }
+  // 명절·기념일어
+  for (let i = 0; i < HOLIDAY_WORDS.length; i++) {
+    if (!HOLIDAY_WORDS[i][0].test(s)) continue;
+    let near = false;
+    for (let k = -10; k <= 10 && !near; k++) { const h = holidayName(ymdOf(dayShift(kst, k))); if (h && HOLIDAY_WORDS[i][1].some(function(n) { return h.indexOf(n) >= 0; })) near = true; }
+    if (!near) return "기념일 안 맞음:" + HOLIDAY_WORDS[i][0].source.slice(0, 8);
+  }
+  // 기온·날씨
+  if (w && typeof w.temp === "number") {
+    if (w.temp >= 24 && /한파|패딩|핫팩|목도리|장갑|붕어빵|호빵|군고구마|히터/.test(s)) return "기온이 높은데 추위 얘기";
+    if (w.temp <= 10 && /폭염|열대야|무더위|찜통|땀 ?(뻘뻘|줄줄|범벅)|에어컨 ?(빵빵|세|켜)|빙수|덥다|더워|더운/.test(s)) return "기온이 낮은데 더위 얘기";
+    const cat = weatherCat(w);
+    if (cat !== "rain" && /비\s?(가\s?)?(오|와|옴|온다|내려|내리|쏟)|빗길|빗소리|장대비|소나기|우산/.test(s)) return "비가 안 오는데 비 얘기";
+    if (cat !== "snow" && /눈\s?(이\s?)?(오|와|옴|온다|내려|내리)|첫눈|폭설/.test(s)) return "눈이 안 오는데 눈 얘기";
+    if ((cat === "rain" || cat === "snow") && /맑|화창|햇빛|햇살|날씨 ?(가 )?(너무 |진짜 )?좋/.test(s)) return "비·눈이 오는데 맑다고 함";
+  }
+  return "";
+}
+__name(ctxReject, "ctxReject");
 function pickPool(kst) {
   const h = kst.getUTCHours();
   const weekend = isRestDay(kst);
@@ -504,16 +695,20 @@ function pickPool(kst) {
   return weekend ? { key: "nightWe", prob: 0.7, extra: 0 } : { key: "nightWd", prob: 0.8, extra: 0 };
 }
 __name(pickPool, "pickPool");
+var _wxCache = { at: 0, v: null };
 async function getWeather() {
+  // ★ 2026-10-05: 10분 캐시 — 글·댓글·대화·반응이 모두 날씨를 쓰게 됐다(호출이 몰리지 않게). 실패하면 3시간 안의 옛 값을 쓴다.
+  if (_wxCache.v && Date.now() - _wxCache.at < 10 * 60e3) return _wxCache.v;
   try {
     const u = "https://api.open-meteo.com/v1/forecast?latitude=37.57&longitude=126.98&current=temperature_2m,weather_code&timezone=Asia%2FSeoul";
     const r = await fetch(u, { signal: AbortSignal.timeout(5e3) });
-    if (!r.ok) return null;
+    if (!r.ok) throw new Error("http");
     const d = await r.json();
-    if (!d || !d.current) return null;
-    return { temp: Math.round(d.current.temperature_2m), code: d.current.weather_code || 0 };
+    if (!d || !d.current) throw new Error("nodata");
+    _wxCache = { at: Date.now(), v: { temp: Math.round(d.current.temperature_2m), code: d.current.weather_code || 0 } };
+    return _wxCache.v;
   } catch (e) {
-    return null;
+    return (_wxCache.v && Date.now() - _wxCache.at < 3 * 3600e3) ? _wxCache.v : null;
   }
 }
 __name(getWeather, "getWeather");
@@ -549,8 +744,8 @@ async function geminiPosts(env, n, recentTitles, kst, w, wcat, topics, hotWords)
     const tp = (topics && topics.length) ? topics.slice(0, n) : [];
     const topicTxt = tp.length ? "\n각 글의 소재(순서대로 하나씩, 반드시 이 소재로): " + tp.map(function(t, i) { return (i + 1) + ") " + t; }).join(" ") : "";
     const hotTxt = (hotWords && hotWords.length) ? "\n최근 너무 많이 쓴 단어(이번엔 쓰지 마): " + hotWords.join(", ") : "";
-    const prompt = "너는 한국 지하철\xB7버스로 출퇴근\xB7통학하는 사람들이 모인 온라인 커뮤니티 게시판에 글을 쓰는 여러 명의 평범한 이용자다.\n지금: " + slotLabel(kst) + (wtxt ? ", 날씨: " + wtxt : "") + topicTxt + hotTxt + "\n서로 다른 사람이 쓴 것처럼, 짧은 게시글 " + n + "개를 새로 써라.\n규칙:\n1. 실제 커뮤니티 게시글투 — 제목은 15~40자, 본문은 2~4문장(줄바꿈은 \\n으로 구분), 반말\xB7편한 말투, 가끔 ㅋㅋ\xB7ㅠㅠ\xB7줄임말.\n2. 지하철\xB7버스\xB7통근\xB7통학뿐 아니라 카페\xB7음식\xB7운동\xB7취미\xB7날씨\xB7계절 등 생활 소재도 섞어라.\n3. 아래 '최근에 나온 글 제목'과 겹치는 주제\xB7표현\xB7문장 틀은 피하고 매번 새로운 각도로 써라. 특히 \"날씨 한마디 + 왠지 ○○ 땡긴다\" 같은 공식 금지, 글마다 문장 구조와 첫 단어를 다르게: " + avoid + "\n4. 날씨\xB7기온\xB7요일 언급은 꼭 필요할 때만, 전체 글의 1/5 이하로. 숫자 기온을 제목에 쓰지 마라.\n5. 정치\xB7선거\xB7혐오\xB7욕설\xB7실존인물 비방 금지. 역\xB7노선 이름은 자유롭게 지어내도 됨.\nJSON 배열만 출력: [{\"t\":\"제목\",\"b\":\"본문\"}]";
-    const r = await fetchT("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=" + env.GEMINI_KEY, 12e3, {
+    const prompt = "너는 한국 지하철\xB7버스로 출퇴근\xB7통학하는 사람들이 모인 온라인 커뮤니티 게시판에 글을 쓰는 여러 명의 평범한 이용자다.\n지금: " + slotLabel(kst) + (wtxt ? ", 날씨: " + wtxt : "") + ctxBlock(kst, w, wcat) + topicTxt + hotTxt + "\n서로 다른 사람이 쓴 것처럼, 짧은 게시글 " + n + "개를 새로 써라.\n규칙:\n1. 실제 커뮤니티 게시글투 — 제목은 15~40자, 본문은 2~4문장(줄바꿈은 \\n으로 구분), 반말\xB7편한 말투, 가끔 ㅋㅋ\xB7ㅠㅠ\xB7줄임말.\n2. 지하철\xB7버스\xB7통근\xB7통학뿐 아니라 카페\xB7음식\xB7운동\xB7취미\xB7날씨\xB7계절 등 생활 소재도 섞어라.\n3. 아래 '최근에 나온 글 제목'과 겹치는 주제\xB7표현\xB7문장 틀은 피하고 매번 새로운 각도로 써라. 특히 \"날씨 한마디 + 왠지 ○○ 땡긴다\" 같은 공식 금지, 글마다 문장 구조와 첫 단어를 다르게: " + avoid + "\n4. 날씨\xB7기온\xB7요일 언급은 꼭 필요할 때만, 전체 글의 1/5 이하로. 숫자 기온을 제목에 쓰지 마라.\n5. 정치\xB7선거\xB7혐오\xB7욕설\xB7실존인물 비방 금지. 역\xB7노선 이름은 자유롭게 지어내도 됨.\nJSON 배열만 출력: [{\"t\":\"제목\",\"b\":\"본문\"}]";
+    const r = await gemFetch(env, 12e3, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 1.1, maxOutputTokens: 4e3 } })
@@ -566,7 +761,11 @@ async function geminiPosts(env, n, recentTitles, kst, w, wcat, topics, hotWords)
     txt = txt.replace(/```json|```/g, "").trim();
     const arr = JSON.parse(txt);
     if (!Array.isArray(arr) || !arr.length) return null;
-    return arr.filter((x) => x && x.t && x.b).slice(0, n).map((x) => ({ t: String(x.t).slice(0, 60), b: String(x.b).slice(0, 400) }));
+    const rej = [];
+    const out = arr.filter((x) => x && x.t && x.b).map((x) => ({ t: holFix(String(x.t).slice(0, 60), kst), b: holFix(String(x.b).slice(0, 400), kst) }))
+      .filter((x) => { const why = ctxReject(x.t + "\n" + x.b, kst, w); if (why) { rej.push("ctx:" + why); return false; } return true; }).slice(0, n);
+    out.rej = rej;
+    return out;
   } catch (e) {
     return null;
   }
@@ -743,6 +942,7 @@ function pickTopics(n) {
 __name(pickTopics, "pickTopics");
 async function generatePosts(env) {
   const kst = kstNow();
+  const dc = dayCtx(kst);
   const slot = pickPool(kst);
   let count = 0;
   if (Math.random() < slot.prob) count++;
@@ -798,15 +998,16 @@ async function generatePosts(env) {
   });
   // ★ 2026-09-24: Gemini(설정돼 있으면)로 먼저 새 글을 시도한다. 실패/미설정이면
   //   아래 기존 분기(CHAT_POSTS 60% / POOLS·WEATHER_POOLS 40%)로 그대로 폴백한다.
-  let aiPosts = null;
+  let aiPosts = null, aiAsked = 0;
   try {
     // 후보를 넉넉히(필요한 수의 3배, 최대 9) 받아 원장 검사를 통과한 것만 쓴다
     const want = Math.min(9, count * 3);
+    aiAsked = want;
     aiPosts = await geminiPosts(env, want, ledger.rows.slice(0, 60).map(function(r) { return r.title; }), kst, w, wcat, pickTopics(want), hotTokens(ledger.idx));
   } catch (e) {
     aiPosts = null;
   }
-  let made = 0, kinds = [], rejected = [];
+  let made = 0, kinds = [], rejected = (aiPosts && aiPosts.rej) ? aiPosts.rej.slice() : [];
   const aiQ = aiPosts ? aiPosts.slice() : [];
   for (let i = 0; i < count; i++) {
     let title = "", body = "", kind = "", usedStn = "";
@@ -827,7 +1028,7 @@ async function generatePosts(env) {
       var order = CHAT_POSTS.slice().sort(() => Math.random() - 0.5);
       var pick = null;
       for (const c of order) {
-        if (!seen[norm(c.t)]) {
+        if (!seen[norm(c.t)] && !ctxReject(holFix(c.t + "\n" + c.b, kst), kst, w, dc)) {
           pick = c;
           break;
         }
@@ -836,8 +1037,8 @@ async function generatePosts(env) {
       //   골라서 이미 썼던 글을 그대로 다시 올렸다(YJ 제보 원인 1). 억지로 반복해서
       //   보여주느니, 이번 주기엔 그냥 건너뛴다 — 20분 뒤 다음 주기에 다시 시도된다.
       if (!pick) { continue; }
-      title = pick.t;
-      body = pick.b;
+      title = holFix(pick.t, kst);
+      body = holFix(pick.b, kst);
     } else {
       kind = "daily:" + slot.key;
       let pool = POOLS[slot.key] || POOLS.lunch;
@@ -855,15 +1056,15 @@ async function generatePosts(env) {
       const ord2 = pool.slice().sort(() => Math.random() - 0.5);
       for (const cand of ord2) {
         const rx = tplRegex(cand.t);
-        if (!recent.some((t) => rx.test(t || ""))) {
+        if (!recent.some((t) => rx.test(t || "")) && !ctxReject(holFix(fill(cand.t, ctx) + "\n" + fill(cand.b, ctx), kst), kst, w, dc)) {
           tpl = cand;
           break;
         }
       }
       // ★ 2026-09-22: 여기도 동일 — 억지 rnd(pool) 반복 대신 이번엔 건너뛴다(YJ 제보 원인 2).
       if (!tpl) { continue; }
-      title = fill(tpl.t, ctx);
-      body = fill(tpl.b, ctx);
+      title = holFix(fill(tpl.t, ctx), kst);
+      body = holFix(fill(tpl.b, ctx), kst);
     }
     if (!title) continue;
     if (seen[norm(title)]) {
@@ -922,7 +1123,9 @@ async function generatePosts(env) {
     await env.DB.prepare("DELETE FROM posts WHERE id NOT IN (SELECT id FROM posts ORDER BY id DESC LIMIT " + MAX_POSTS + ")").run();
   } catch (e) {
   }
-  return { made, slot: slot.key, weather: wcat || "normal", kinds, rejected };
+  const pres = { made, slot: slot.key, weather: wcat || "normal", kinds, rejected };
+  await bwDiag(env, "posts", { day: dc.t.ymd + (dc.t.hol ? ":" + dc.t.hol : ""), slot: slot.key, count: count, made: made, kinds: kinds, asked: aiAsked, aiGot: aiPosts ? aiPosts.length : 0, rej: rejected.slice(0, 4).map((x) => String(x).slice(0, 32)), gem: _gemLast });
+  return pres;
 }
 __name(generatePosts, "generatePosts");
 
@@ -937,13 +1140,13 @@ __name(generatePosts, "generatePosts");
 // ══════════════════════════════════════════════════════════════════════
 var CMT_TARGET_MAX = 12;       // 글당 서버 댓글 상한
 var CMT_PER_CYCLE = 10;        // 한 사이클에 새로 붙이는 최대 댓글 수
-async function geminiComments(env, posts, perPost, kst) {
+async function geminiComments(env, posts, perPost, kst, w, wcat) {
   if (!env.GEMINI_KEY || !posts.length) return null;
   try {
     const list = posts.map(function(p) { return "[" + p.id + "] 제목: " + p.title + "\n본문: " + String(p.body || "").slice(0, 160).replace(/\n/g, " / "); }).join("\n\n");
     const personas = NICKS.slice().sort(() => Math.random() - 0.5).slice(0, 12).join(", ");
-    const prompt = "한국 지하철\xB7버스 이용자 커뮤니티 게시판의 글에 달리는 댓글을 쓴다. 지금: " + slotLabel(kst) + "\n아래 글마다 서로 다른 사람이 단 것처럼 댓글을 " + perPost + "개씩 써라.\n" + list + "\n규칙:\n1. 그 글의 내용에 직접 반응(공감\xB7되묻기\xB7농담\xB7경험담\xB7추천). 글 제목을 그대로 따라 쓰지 마라.\n2. 5~40자, 반말\xB7편한 말투, ㅋㅋ\xB7ㅠㅠ 가끔. 같은 문장 틀\xB7같은 첫 단어 반복 금지(특히 \"ㅇㅈ\", \"공감\", \"맞아요\"로만 시작하지 말 것).\n3. 닉네임은 이 중에서: " + personas + "\n4. 정치\xB7혐오\xB7욕설\xB7실존인물 비방 금지.\nJSON 배열만 출력: [{\"p\":글번호,\"n\":\"닉\",\"t\":\"댓글\"}]";
-    const r = await fetchT("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=" + env.GEMINI_KEY, 12e3, {
+    const prompt = "한국 지하철\xB7버스 이용자 커뮤니티 게시판의 글에 달리는 댓글을 쓴다. 지금: " + slotLabel(kst) + ctxBlock(kst, w, wcat) + "\n아래 글마다 서로 다른 사람이 단 것처럼 댓글을 " + perPost + "개씩 써라.\n" + list + "\n규칙:\n1. 그 글의 내용에 직접 반응(공감\xB7되묻기\xB7농담\xB7경험담\xB7추천). 글 제목을 그대로 따라 쓰지 마라.\n2. 5~40자, 반말\xB7편한 말투, ㅋㅋ\xB7ㅠㅠ 가끔. 같은 문장 틀\xB7같은 첫 단어 반복 금지(특히 \"ㅇㅈ\", \"공감\", \"맞아요\"로만 시작하지 말 것).\n3. 닉네임은 이 중에서: " + personas + "\n4. 정치\xB7혐오\xB7욕설\xB7실존인물 비방 금지.\nJSON 배열만 출력: [{\"p\":글번호,\"n\":\"닉\",\"t\":\"댓글\"}]";
+    const r = await gemFetch(env, 12e3, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 1.1, maxOutputTokens: 4e3 } })
@@ -961,7 +1164,7 @@ async function geminiComments(env, posts, perPost, kst) {
     if (!Array.isArray(arr)) return null;
     const ids = {};
     posts.forEach(function(p) { ids[p.id] = 1; });
-    return arr.filter((x) => x && x.p != null && ids[parseInt(x.p, 10)] && x.n && x.t).map((x) => ({ post_id: parseInt(x.p, 10), nick: String(x.n).slice(0, 16), text: String(x.t).slice(0, 80).trim() }));
+    return arr.filter((x) => x && x.p != null && ids[parseInt(x.p, 10)] && x.n && x.t).map((x) => ({ post_id: parseInt(x.p, 10), nick: String(x.n).slice(0, 16), text: holFix(String(x.t).slice(0, 80).trim(), kst) })).filter((x) => !ctxReject(x.text, kst, w));
   } catch (e) {
     return null;
   }
@@ -984,8 +1187,9 @@ async function generateComments(env) {
     .sort(function(a, b) { return a.n - b.n; })
     .slice(0, 5);
   if (!cand.length) return { made: 0, skipped: "enough" };
-  const gen = await geminiComments(env, cand.map(function(x) { return x.p; }), 3, kst);
-  if (!gen || !gen.length) return { made: 0, skipped: "gemini-none" };
+  const cw = await getWeather();
+  const gen = await geminiComments(env, cand.map(function(x) { return x.p; }), 3, kst, cw, weatherCat(cw));
+  if (!gen || !gen.length) { await bwDiag(env, "comments", { skipped: "gemini-none", gem: _gemLast }); return { made: 0, skipped: "gemini-none" }; }
   let kept;
   try {
     const clean = gen.filter(function(g) { return g.text && !containsBadWord(g.text) && !containsBadWord(g.nick); });
@@ -1016,6 +1220,7 @@ async function generateComments(env) {
       break;
     }
   }
+  await bwDiag(env, "comments", { made: made, asked: gen.length, kept: kept.length, gem: _gemLast });
   return { made, asked: gen.length, kept: kept.length };
 }
 __name(generateComments, "generateComments");
@@ -1037,18 +1242,19 @@ function talkCount(kst) {
 __name(talkCount, "talkCount");
 function slotLabel(kst) {
   const h = kst.getUTCHours();
-  const day = kst.getUTCDay();
-  const weekend = isRestDay(kst);
-  const dayNm = ["일", "월", "화", "수", "목", "금", "토"][day] + "요일";
-  let t;
-  if (h < 6) t = "새벽";
-  else if (h < 9) t = "출근 시간";
-  else if (h < 11) t = "오전";
-  else if (h < 14) t = "점심시간";
-  else if (h < 17) t = "오후";
-  else if (h < 20) t = "퇴근 시간";
-  else t = "밤";
-  return dayNm + " " + t + (weekend ? " (주말)" : " (평일)");
+  const c = dayCtx(kst), t = c.t;
+  let tm;
+  if (h < 6) tm = "새벽";
+  else if (h < 9) tm = "출근 시간";
+  else if (h < 11) tm = "오전";
+  else if (h < 14) tm = "점심시간";
+  else if (h < 17) tm = "오후";
+  else if (h < 20) tm = "퇴근 시간";
+  else tm = "밤";
+  // ★ 2026-10-05: '월요일 (평일)'로 나가던 개천절 대체공휴일 — 날짜·요일·공휴일 이름·쉬는 날 여부를 함께 적는다. 쉬는 날이면 '출근 시간'은 '이른 아침'.
+  if (t.rest && tm === "출근 시간") tm = "이른 아침";
+  if (t.rest && tm === "퇴근 시간") tm = "저녁 무렵";
+  return t.m + "월 " + t.d + "일 " + DOW_KO[t.dow] + "요일" + (t.hol ? "(" + t.hol + ")" : "") + " " + tm + (t.rest ? " (쉬는 날)" : " (평일)");
 }
 __name(slotLabel, "slotLabel");
 var TALK_DIALOGS = {
@@ -1121,7 +1327,7 @@ function slotDialogKey(kst) {
   return "night";
 }
 __name(slotDialogKey, "slotDialogKey");
-function slotTopics(kst) {
+function _slotTopicsBase(kst) {
   const h = kst.getUTCHours();
   const we = isRestDay(kst);
   if (h < 6) return { ok: "새벽 감성, 야간 알바\xB7야근 귀가, 잠 안 옴, 첫차 기다림", no: "점심 메뉴, 퇴근 러시" };
@@ -1138,10 +1344,27 @@ function slotTopics(kst) {
   if (h < 20) return { ok: "퇴근\xB7하교 러시, 저녁 메뉴, 저녁 약속, 학원 이동, 지옥철", no: "점심 메뉴, 아침 출근" };
   return { ok: "야근, 과제\xB7시험공부, 야자 끝 귀가, 하루 마무리, 내일 걱정, 휴식", no: "점심 메뉴, 출근 러시" };
 }
+__name(_slotTopicsBase, "_slotTopicsBase");
+function slotTopics(kst) {
+  const r = _slotTopicsBase(kst);
+  const c = dayCtx(kst), h = kst.getUTCHours();
+  let ok = r.ok, no = r.no;
+  if (c.hw) ok = ok.replace(/주말/g, "휴일");
+  if (c.t.rest && h >= 18) {
+    // 쉬는 날 저녁: 내일도 쉬면 월요병·출근 걱정 금지, 내일이 평일이면 휴일의 마지막 저녁
+    ok = ok.replace("일요일 밤 월요병", c.tm.rest ? "내일도 쉬는 날이라 느긋한 저녁" : "휴일 마지막 저녁, 내일 출근·등교 걱정");
+    if (c.tm.rest) no += ", 월요병, 내일 출근·등교";
+  } else if (!c.t.rest && h >= 20 && c.tm.rest) {
+    ok = ok.replace("내일 걱정", "내일 쉬는 날이라 여유(약속·한잔·야식·늦잠 계획)");
+    no += ", 월요병, 내일 출근·등교";
+  }
+  if (c.t.rest) no += ", 오늘 출근·등교하는 것처럼 말하기";
+  return { ok: ok, no: no };
+}
 __name(slotTopics, "slotTopics");
 var PERSONA_ROLES = ["직장인", "대학생", "고등학생", "취준생", "알바생", "대학원생", "신입사원"];
 async function geminiTalks(env, n, recentTalks, kst, w, wcat, room) {
-  if (!env.GEMINI_KEY) return null;
+  if (!env.GEMINI_KEY) { _gemStat.fail++; _gemStat.last = "nokey"; return null; }
   try {
     const personas = NICKS.slice().sort(() => Math.random() - 0.5).slice(0, 8);
     recentTalks.slice(-5).forEach((t) => {
@@ -1151,29 +1374,32 @@ async function geminiTalks(env, n, recentTalks, kst, w, wcat, room) {
     const wtxt = w ? "기온 " + w.temp + "도" + (wcat === "rain" ? ", 비" : wcat === "hot" ? ", 폭염" : wcat === "cold" ? ", 한파" : wcat === "snow" ? ", 눈" : ", 맑은 편") : "보통";
     const tp = slotTopics(kst);
     // ★ 2026-10-04 노선별 방: 그 노선 이용자 입장에서 말하되, 실시간 운행 상황은 지어내지 않는다(지연·혼잡은 이용자 제보 기능이 따로 다룬다).
-    const lineRule = room ? "\n이 방은 '" + room.name + "' 이용자 방이다. 이 노선을 자주 타는 사람들의 말투와 일상(자주 가는 역: " + room.stns.join("\xB7") + ")으로 쓴다. 이 노선의 지금 운행 상황(지연\xB7사고\xB7고장\xB7운행중단\xB7얼마나 붐비는지)을 사실처럼 말하거나 지어내지 마라." : "";
+    const lineRule = room ? "\n이 방은 '" + room.name + "' 이용자 방이다. 이 노선을 자주 타는 사람들의 말투와 일상(자주 가는 역: " + room.stns.join("\xB7") + ")으로 쓴다. 이 노선의 지금 운행 상황(지연\xB7사고\xB7고장\xB7운행중단\xB7얼마나 붐비는지)을 사실처럼 말하거나 지어내지 마라." + " 이 대화는 앞으로 약 4시간에 걸쳐 올라가니 특정 시각·식사 시간·'지금 막'을 단정하지 말고 " + (kst.getUTCHours() >= 20 ? "자정을 넘기는 표현(내일 아침 등)도 피한다." : "시간대가 조금 바뀌어도 어색하지 않게 쓴다.") : "";
     const personaStr = personas.map(function(p, i) {
       return p + "(" + PERSONA_ROLES[i % PERSONA_ROLES.length] + ")";
     }).join(", ");
-    const prompt = "너는 한국의 지하철\xB7버스로 출퇴근하고 등하교하는 사람들이 모인 실시간 단체 오픈채팅방을 재현한다. 진짜 카톡 오픈채팅처럼 자연스럽게." + lineRule + "\n지금: " + slotLabel(kst) + ", 날씨: " + wtxt + "\n방금 전 대화:\n" + ctx + "\n\n이 흐름을 자연스럽게 이어서 채팅 " + n + "개를 써라.\n참여자(역할 고정): " + personaStr + "\n규칙:\n1. 진짜 사람처럼. 완결된 문장 말고 실제 채팅투 — 짧게 툭툭, 오타틱한 줄임말(ㄱㄱ,ㅇㅇ,ㅇㅈ,ㄹㅇ,ㅋㅋ,ㅠ,ㄷㄷ,담,낼,걍,넘,쫌), 한 명이 두세 줄 연달아 치기도 함.\n2. 서로 진짜 대화. 앞사람 말에 대답/맞장구/되묻기/딴지/부러움/투정. 각자 혼잣말 나열 절대 금지.\n3. 직장인은 회사\xB7야근\xB7상사\xB7월급, 학생은 수업\xB7과제\xB7시험\xB7급식 얘기로 서로 티키타카 (부러워하거나 놀리거나).\n4. 지금 시간대 얘기만: " + tp.ok + ". 금지: " + tp.no + '\n5. 방금 전 대화에 나온 말\xB7소재는 절대 반복하지 마. 새 메시지에끼리도 같은 말 반복 금지.\n6. 가끔 새 화제를 누가 툭 던져서 주제가 자연스럽게 바뀌어도 됨.\n7. 정치 편들기\xB7욕설\xB7혐오\xB7실존인물 비방 금지. 이모지는 거의 안 씀.\nJSON 배열만: [{"n":"닉","t":"채팅내용","d":지연초(3~15)}]';
-    const r = await fetchT("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=" + env.GEMINI_KEY, 12e3, {
+    const prompt = "너는 한국의 지하철\xB7버스로 출퇴근하고 등하교하는 사람들이 모인 실시간 단체 오픈채팅방을 재현한다. 진짜 카톡 오픈채팅처럼 자연스럽게." + lineRule + "\n지금: " + slotLabel(kst) + ", 날씨: " + wtxt + ctxBlock(kst, w, wcat) + "\n방금 전 대화:\n" + ctx + "\n\n이 흐름을 자연스럽게 이어서 채팅 " + n + "개를 써라.\n참여자(역할 고정): " + personaStr + "\n규칙:\n1. 진짜 사람처럼. 완결된 문장 말고 실제 채팅투 — 짧게 툭툭, 오타틱한 줄임말(ㄱㄱ,ㅇㅇ,ㅇㅈ,ㄹㅇ,ㅋㅋ,ㅠ,ㄷㄷ,담,낼,걍,넘,쫌), 한 명이 두세 줄 연달아 치기도 함.\n2. 서로 진짜 대화. 앞사람 말에 대답/맞장구/되묻기/딴지/부러움/투정. 각자 혼잣말 나열 절대 금지.\n3. 직장인은 회사\xB7야근\xB7상사\xB7월급, 학생은 수업\xB7과제\xB7시험\xB7급식 얘기로 서로 티키타카 (부러워하거나 놀리거나).\n4. 지금 시간대 얘기만: " + tp.ok + ". 금지: " + tp.no + '\n5. 방금 전 대화에 나온 말\xB7소재는 절대 반복하지 마. 새 메시지에끼리도 같은 말 반복 금지.\n6. 가끔 새 화제를 누가 툭 던져서 주제가 자연스럽게 바뀌어도 됨.\n7. 정치 편들기\xB7욕설\xB7혐오\xB7실존인물 비방 금지. 이모지는 거의 안 씀.\nJSON 배열만: [{"n":"닉","t":"채팅내용","d":지연초(3~15)}]';
+    const r = await gemFetch(env, 12e3, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 1.15, maxOutputTokens: 8e3 } })
     });
-    if (!r.ok) return null;
+    if (!r.ok) { _gemStat.fail++; _gemStat.last = "http " + r.status; return null; }
     const d = await r.json();
     let txt = "";
     try {
       txt = d.candidates[0].content.parts.map((p) => p.text || "").join("");
     } catch (e) {
-      return null;
+      _gemStat.fail++; _gemStat.last = "noparts"; return null;
     }
     txt = txt.replace(/```json|```/g, "").trim();
     const arr = JSON.parse(txt);
-    if (!Array.isArray(arr) || !arr.length) return null;
-    return arr.filter((x) => x && x.n && x.t).slice(0, n).map((x) => ({ nick: String(x.n).slice(0, 16), text: String(x.t).slice(0, 120), d: Math.max(3, Math.min(90, parseInt(x.d, 10) || 20)) }));
+    if (!Array.isArray(arr) || !arr.length) { _gemStat.fail++; _gemStat.last = "empty"; return null; }
+    _gemStat.ok++;
+    return arr.filter((x) => x && x.n && x.t).map((x) => ({ nick: String(x.n).slice(0, 16), text: holFix(String(x.t).slice(0, 120), kst), d: Math.max(3, Math.min(90, parseInt(x.d, 10) || 20)) }))
+      .filter((m) => { const why = ctxReject(m.text, kst, w); if (why) { _gemStat.ctxRej++; return false; } return true; }).slice(0, n);
   } catch (e) {
+    _gemStat.fail++; _gemStat.last = "ex " + String((e && e.message) || e).slice(0, 40);
     return null;
   }
 }
@@ -1182,14 +1408,19 @@ function fallbackTalks(n, kst, w, wcat, room) {
   const out = [];
   const L = room || rnd(LINES);
   const ctx = { line: L.name, stn: rnd(L.stns), stn2: "", temp: w ? String(w.temp) : "30" };
-  while (out.length < n) {
+  const dc = dayCtx(kst);
+  let guard = 0;
+  // ★ 2026-10-05: 정해진 대사도 오늘 날짜·계절·날씨와 맞는 것만 쓴다(일요일 밤 대사가 월요일 휴일에 나오는 일 방지). 맞는 게 없으면 덜 만든다.
+  while (out.length < n && guard++ < 60) {
     let key = pickDialogKey(kst, wcat) || slotDialogKey(kst);
     const pool = TALK_DIALOGS[key] || TALK_DIALOGS.day;
     const dlg = rnd(pool);
+    const lines = dlg.map((line) => holFix(fill(line, ctx), kst));
+    if (ctxReject(lines.join("\n"), kst, w, dc)) continue;
     const who = NICKS.slice().sort(() => Math.random() - 0.5).slice(0, rndInt(3, 5));
-    dlg.forEach((line, i) => {
+    lines.forEach((text, i) => {
       if (out.length >= n) return;
-      out.push({ nick: who[i % who.length], text: fill(line, ctx), d: rndInt(6, 45) });
+      out.push({ nick: who[i % who.length], text: text, d: rndInt(6, 45) });
     });
   }
   return out.slice(0, n);
@@ -1365,6 +1596,7 @@ __name(generateTalks, "generateTalks");
 //   · 전체 탭(GET /talks)은 이 방들의 대화를 시간순으로 모아서 내려준다. AI 글은 2일 뒤 지운다(실제 이용자 글은 14일).
 //   · 6개월 중복 원장(talkLedgerFilter)은 방 구분 없이 함께 쓴다.
 // ══════════════════════════════════════════════════════════════════════
+var LR_MAX_AI_ROOMS = 9;
 var LR_AI_ROOMS = [
   { name: "2호선", w: 10, stns: ["강남", "홍대입구", "신촌", "잠실", "성수", "사당", "건대입구"] },
   { name: "1호선", w: 6, stns: ["서울역", "시청", "종각", "구로", "부평", "인천"] },
@@ -1393,12 +1625,31 @@ async function generateLineTalks(env) {
   const w = await getWeather();
   const wcat = weatherCat(w);
   const wsum = LR_AI_ROOMS.reduce((a, r) => a + r.w, 0);
+  // ★ 2026-10-05 (YJ): 호선 방이 비어 보이는 문제 — 두 가지를 고쳤다.
+  //   ① 호선마다 시간당 최소 글 수(낮 9개, 새벽 2개)를 보장한다. 작은 호선은 가중치만으로는 회차마다 0~1개라 방이 비었다.
+  //   ② 글을 '앞으로 4시간치' 미리 만들어 미래 시각(ts)으로 넣는다(화면은 ts<=지금 인 글만 보여 준다).
+  //      방마다 "아직 안 나온 글"이 목표의 35% 밑으로 줄었을 때만 AI 를 부른다 → AI 호출이 회차×방 수에서 방당 1~2시간에 한 번으로 준다
+  //      (전에는 매 20분마다 방마다 불러서 하루 한도를 몇 시간 만에 다 쓰고, 그 뒤엔 몇 개 안 되는 정형 문구가 중복 검사에 걸려 방이 비었다).
+  const nowMs = Date.now();
+  const floorPerHour = kst.getUTCHours() < 5 ? 2 : 9;
+  const HORIZON_MIN = 240;
+  const haveMap = {};
+  try {
+    const hs = await env.DB.prepare("SELECT line, COUNT(*) AS n, MAX(ts) AS mx FROM line_msgs WHERE kind='chat' AND ts > ?1 GROUP BY line").bind(nowMs).all();
+    (hs.results || []).forEach((r) => { haveMap[r.line] = { n: r.n || 0, mx: r.mx || 0 }; });
+  } catch (e) {}
   const plan = [];
   for (const room of LR_AI_ROOMS) {
-    const share = total * room.w / wsum;
-    const k = Math.floor(share) + (Math.random() < share - Math.floor(share) ? 1 : 0);
-    if (k > 0) plan.push({ room, k });
+    const perHour = Math.max(floorPerHour, total * 3 * room.w / wsum);
+    const target = Math.round(perHour * HORIZON_MIN / 60);
+    const have = (haveMap[room.name] && haveMap[room.name].n) || 0;
+    if (target < 1 || have >= target * 0.35) continue;
+    plan.push({ room, k: Math.min(50, Math.max(1, target - have)), perHour, ratio: have / target, startTs: Math.max(nowMs, (haveMap[room.name] && haveMap[room.name].mx) || 0) });
   }
+  // ★ 2026-10-05: 한 회차에 AI 를 부르는 방은 가장 비어 있는 9개까지 — 나머지는 다음 회차(20분 뒤). Gemini 가 한꺼번에 몰려 과부하·한도에 걸리는 것을 줄인다.
+  plan.sort((a, b) => a.ratio - b.ratio);
+  if (plan.length > LR_MAX_AI_ROOMS) plan.length = LR_MAX_AI_ROOMS;
+  _gemStat.ok = 0; _gemStat.fail = 0; _gemStat.last = ""; _gemStat.ctxRej = 0;
   const scripts = [];
   let usedAi = 0;
   for (let i = 0; i < plan.length; i += 3) {
@@ -1410,7 +1661,7 @@ async function generateLineTalks(env) {
       } catch (e) {}
       let script = [];
       if (p.k >= 4) {
-        const g = await geminiTalks(env, Math.min(p.k, 40), recent, kst, w, wcat, p.room);
+        const g = await geminiTalks(env, Math.min(p.k, 50), recent, kst, w, wcat, p.room);
         if (g && g.length) { script = g; usedAi++; }
       }
       if (script.length < p.k) script = script.concat(fallbackTalks(p.k - script.length, kst, w, wcat, p.room));
@@ -1432,30 +1683,46 @@ async function generateLineTalks(env) {
     kept = await talkLedgerFilter(env, scripts);
   } catch (e) {
     console.log("[board-writer][linetalks] 원장 처리 실패, 이번 주기는 건너뜀:", e.message);
+    await bwDiag(env, "linetalks", { err: "ledger-failed", m: String((e && e.message) || e).slice(0, 80) });
     return { made: 0, skipped: "ledger-failed" };
   }
-  const SPAN = 19 * 60;
   const byLine = {};
   kept.forEach((m) => { (byLine[m.line] = byLine[m.line] || []).push(m); });
   const stmts = [];
-  const t0 = Date.now();
+  const planBy = {};
+  plan.forEach((p) => { planBy[p.room.name] = p; });
   for (const ln of Object.keys(byLine)) {
     const arr = byLine[ln];
-    const perMsg = SPAN / arr.length;
-    let ts = t0 + rndInt(2, 6) * 1e3;
+    const pl = planBy[ln];
+    const gapSec = Math.max(20, Math.min(900, 3600 / Math.max(1, pl ? pl.perHour : 9)));   // 글 사이 평균 간격(초). 이미 예약된 마지막 글 뒤부터 이어 붙인다
+    let ts = (pl ? pl.startTs : nowMs) + rndInt(2, 6) * 1e3;
     for (const m of arr) {
-      ts += Math.floor(Math.max(3, perMsg * (0.6 + Math.random() * 0.8)) * 1e3);
+      ts += Math.floor(gapSec * (0.6 + Math.random() * 0.8) * 1e3);
       stmts.push(env.DB.prepare("INSERT INTO line_msgs (line,kind,nick,text,stn,ipk,ts) VALUES (?1,'chat',?2,?3,NULL,'ai',?4)").bind(ln, m.nick, m.text, ts));
     }
   }
-  let made = 0;
+  let made = 0, insErr = "";
   for (let i = 0; i < stmts.length; i += 50) {
     try { await env.DB.batch(stmts.slice(i, i + 50)); made += Math.min(50, stmts.length - i); }
-    catch (e) { console.log("[board-writer][linetalks] INSERT 실패:", e.message); break; }
+    catch (e) { insErr = String((e && e.message) || e).slice(0, 80); console.log("[board-writer][linetalks] INSERT 실패:", e.message); break; }
   }
-  return { made, planned: total, rooms: Object.keys(byLine).length, aiRooms: usedAi, weather: wcat || "normal" };
+  const res = { made, planned: total, rooms: Object.keys(byLine).length, planRooms: plan.length, scripts: scripts.length, kept: kept.length, aiRooms: usedAi, gem: { ok: _gemStat.ok, fail: _gemStat.fail, last: _gemStat.last, model: _gemStat.model, rej: _gemStat.ctxRej, tried: _gemLast.tried }, weather: wcat || "normal" };
+  if (insErr) res.insErr = insErr;
+  await bwDiag(env, "linetalks", res);
+  return res;
 }
 __name(generateLineTalks, "generateLineTalks");
+// 진단 기록 — 서버 로그를 볼 수 없어서 D1 에 남긴다(최근 3일치만 유지). 조회: SELECT * FROM bw_diag ORDER BY ts DESC
+var _bwDiagReady = false, _bwDiagPurgedAt = 0;
+async function bwDiag(env, k, v) {
+  try {
+    if (!_bwDiagReady) { await env.DB.prepare("CREATE TABLE IF NOT EXISTS bw_diag (ts INTEGER NOT NULL, k TEXT, v TEXT)").run(); _bwDiagReady = true; }
+    const now = Date.now();
+    await env.DB.prepare("INSERT INTO bw_diag (ts, k, v) VALUES (?1, ?2, ?3)").bind(now, k, JSON.stringify(v).slice(0, 600)).run();
+    if (now - _bwDiagPurgedAt > 6 * 3600e3) { _bwDiagPurgedAt = now; await env.DB.prepare("DELETE FROM bw_diag WHERE ts < ?1").bind(now - 3 * 24 * 3600e3).run(); }
+  } catch (e) {}
+}
+__name(bwDiag, "bwDiag");
 var REACT_FALLBACK = [
   "ㅇㅈ",
   "ㄹㅇ?",
@@ -1479,6 +1746,7 @@ async function generateReaction(env, userNick, userText, line) {
   } catch (e) {
   }
   const kst = kstNow();
+  const rw = await getWeather();
   let replies = null;
   if (env.GEMINI_KEY) {
     try {
@@ -1486,8 +1754,8 @@ async function generateReaction(env, userNick, userText, line) {
         return p + "(" + PERSONA_ROLES[i % PERSONA_ROLES.length] + ")";
       });
       const ctx = recent.map((t) => t.nick + ": " + t.text).join("\n");
-      const prompt = "한국 지하철/출퇴근 커뮤니티 실시간 단체채팅입니다. 상황: " + slotLabel(kst) + "\n최근 대화:\n" + ctx + "\n" + userNick + ": " + userText + '\n마지막에 "' + userNick + '"가 방금 보낸 메시지에 자연스럽게 반응하는 답장을 1~3개 만드세요.\n- 반드시 그 메시지 내용에 직접 반응할 것 (질문이면 답하고, 얘기면 맞장구/되묻기/농담)\n- 참여자 닉네임은 이 중에서만: ' + personas.join(", ") + '\n- 위 최근 대화에 나온 문장\xB7표현 반복 금지\n- 짧게(5~35자), 반말, ㅋㅋ/ㄷㄷ 자연스럽게. 정치/혐오/욕설 금지\n- JSON 배열만 출력: [{"n":"닉","t":"내용","d":지연초(4~40)}]';
-      const r = await fetchT("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=" + env.GEMINI_KEY, 1e4, {
+      const prompt = "한국 지하철/출퇴근 커뮤니티 실시간 단체채팅입니다. 상황: " + slotLabel(kst) + ctxBlock(kst, rw, weatherCat(rw)) + "\n최근 대화:\n" + ctx + "\n" + userNick + ": " + userText + '\n마지막에 "' + userNick + '"가 방금 보낸 메시지에 자연스럽게 반응하는 답장을 1~3개 만드세요.\n- 반드시 그 메시지 내용에 직접 반응할 것 (질문이면 답하고, 얘기면 맞장구/되묻기/농담)\n- 참여자 닉네임은 이 중에서만: ' + personas.join(", ") + '\n- 위 최근 대화에 나온 문장\xB7표현 반복 금지\n- 짧게(5~35자), 반말, ㅋㅋ/ㄷㄷ 자연스럽게. 정치/혐오/욕설 금지\n- JSON 배열만 출력: [{"n":"닉","t":"내용","d":지연초(4~40)}]';
+      const r = await gemFetch(env, 1e4, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 1, maxOutputTokens: 500 } })
@@ -1502,7 +1770,7 @@ async function generateReaction(env, userNick, userText, line) {
         txt = txt.replace(/```json|```/g, "").trim();
         const arr = JSON.parse(txt);
         if (Array.isArray(arr) && arr.length) {
-          replies = arr.filter((x) => x && x.n && x.t).slice(0, 3).map((x) => ({ nick: String(x.n).slice(0, 16), text: String(x.t).slice(0, 120), d: Math.max(4, Math.min(40, parseInt(x.d, 10) || 12)) }));
+          replies = arr.filter((x) => x && x.n && x.t).map((x) => ({ nick: String(x.n).slice(0, 16), text: holFix(String(x.t).slice(0, 120), kst), d: Math.max(4, Math.min(40, parseInt(x.d, 10) || 12)) })).filter((m) => !ctxReject(m.text, kst, rw)).slice(0, 3);
         }
       }
     } catch (e) {
@@ -1580,15 +1848,66 @@ async function getCols(env, table) {
   return cols;
 }
 __name(getCols, "getCols");
+// ═══════════════════════════════════════════════════════════════════════
+// ★ 2026-10-08 (YJ: "내가 쓴 글은 앱 사용자 모두 보게 해줘"): 사용자 글 등록 · 신고 · 관리자 삭제
+//   · POST /post   {nick,title,body,cat}  → posts 에 user=1 로 저장 → GET /posts 로 모두에게 내려간다
+//   · POST /report {post_id}               → 사용자 글만 신고 가능, 서로 다른 3곳(IP)이 신고하면 hidden=1
+//   · GET  /post/delete?id=&token=         → 관리자 삭제(글+댓글),  GET /reports?token= → 신고된 글 목록
+//   악용 방지: 욕설 필터(기존 BAD_WORDS) · 링크/전화번호 차단 · IP당 시간 5건/하루 15건 · 같은 닉+제목 하루 1건 · 길이 제한
+// ═══════════════════════════════════════════════════════════════════════
+var USER_POST_CATS = ["잡담", "현장제보", "일상", "정보", "제보", "지연", "혼잡"];
+var POST_PER_IP_HR = 5, POST_PER_IP_DAY = 15, REPORT_PER_IP_HR = 30, REPORT_HIDE_AT = 3;
+function hasLinkOrPhone(t) {
+  t = String(t || "");
+  if (/(https?:\/\/|www\.|t\.me\/|open\.kakao|bit\.ly)/i.test(t)) return true;
+  if (/[a-z0-9-]{2,}\.(com|net|kr|co\.kr|io|me|ly|xyz|site|info|org|app|shop|top)(\/|\b)/i.test(t)) return true;
+  if (/0\d{1,2}[-.\s]?\d{3,4}[-.\s]?\d{4}/.test(t)) return true;
+  return false;
+}
+__name(hasLinkOrPhone, "hasLinkOrPhone");
+async function bumpLimit(env, key, bucket, max) {
+  try {
+    await env.DB.prepare("CREATE TABLE IF NOT EXISTS react_rl (k TEXT, hr INTEGER, n INTEGER, PRIMARY KEY (k, hr))").run();
+    await env.DB.prepare("INSERT INTO react_rl (k,hr,n) VALUES (?1,?2,1) ON CONFLICT(k,hr) DO UPDATE SET n = n + 1").bind(key, bucket).run();
+    const r = await env.DB.prepare("SELECT n FROM react_rl WHERE k=?1 AND hr=?2").bind(key, bucket).first();
+    return ((r && r.n) || 1) <= max;
+  } catch (e) { return false; }
+}
+__name(bumpLimit, "bumpLimit");
+async function ownerHash(k) {
+  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("bw-owner:" + String(k)));
+  return Array.from(new Uint8Array(d)).map((x) => x.toString(16).padStart(2, "0")).join("");
+}
+__name(ownerHash, "ownerHash");
+var _userColsOk = false;
+async function ensureUserPostCols(env) {
+  if (_userColsOk) return;
+  let cols = await getCols(env, "posts");
+  for (const [c, ddl] of [["user", "ALTER TABLE posts ADD COLUMN user INTEGER DEFAULT 0"], ["hidden", "ALTER TABLE posts ADD COLUMN hidden INTEGER DEFAULT 0"], ["owner", "ALTER TABLE posts ADD COLUMN owner TEXT"]]) {
+    if (cols.indexOf(c) < 0) { try { await env.DB.prepare(ddl).run(); } catch (e) {} }
+  }
+  delete _colsCache["posts"];
+  cols = await getCols(env, "posts");
+  _userColsOk = cols.indexOf("user") >= 0 && cols.indexOf("hidden") >= 0 && cols.indexOf("owner") >= 0;
+}
+__name(ensureUserPostCols, "ensureUserPostCols");
+async function purgePostsCache(url) {
+  try {
+    await caches.default.delete(new Request(url.origin + "/posts?limit=50"));
+    for (const c of USER_POST_CATS) await caches.default.delete(new Request(url.origin + "/posts?limit=50&cat=" + encodeURIComponent(c)));
+  } catch (e) {}
+}
+__name(purgePostsCache, "purgePostsCache");
 var worker_default = {
   // 크론 (20분마다)
   async scheduled(event, env, ctx) {
     ctx.waitUntil((async () => { try { await ensureLineRoom(env); await env.DB.prepare("DELETE FROM line_msgs WHERE ts < ?1").bind(Date.now() - 14 * 24 * 3600 * 1000).run(); await env.DB.prepare("DELETE FROM line_reports WHERE ts < ?1").bind(Date.now() - 14 * 24 * 3600 * 1000).run(); await env.DB.prepare("DELETE FROM line_msgs WHERE ipk = 'ai' AND ts < ?1").bind(Date.now() - 2 * 24 * 3600 * 1000).run(); } catch (e) {} })());
-    ctx.waitUntil(Promise.all([
-      generatePosts(env).then((r) => console.log("[board-writer][posts]", JSON.stringify(r))),
-      generateLineTalks(env).then((r) => console.log("[board-writer][linetalks]", JSON.stringify(r))).catch((e) => console.log("[board-writer][linetalks] 실패:", e.message)),
-      generateComments(env).then((r) => console.log("[board-writer][comments]", JSON.stringify(r))).catch((e) => console.log("[board-writer][comments] 실패:", e.message))
-    ]));
+    // ★ 2026-10-05: 게시판 글·댓글을 먼저, 호선 방은 그 다음 — Gemini 가 모자랄 때 게시판이 굶지 않게 한다. 하나가 실패해도 다음 단계는 계속한다.
+    ctx.waitUntil((async () => {
+      try { console.log("[board-writer][posts]", JSON.stringify(await generatePosts(env))); } catch (e) { console.log("[board-writer][posts] 실패:", e && e.message); }
+      try { console.log("[board-writer][comments]", JSON.stringify(await generateComments(env))); } catch (e) { console.log("[board-writer][comments] 실패:", e && e.message); }
+      try { console.log("[board-writer][linetalks]", JSON.stringify(await generateLineTalks(env))); } catch (e) { console.log("[board-writer][linetalks] 실패:", e && e.message); }
+    })());
   },
   // 수동 테스트/상태 확인
   async fetch(req, env) {
@@ -1671,7 +1990,7 @@ var worker_default = {
         //   INSERT처럼 pragma_table_info로 실제 존재하는 컬럼만 골라서 SELECT한다.
         //   (2026-09-25: 매 요청 D1 왕복이던 걸 getCols로 10분 메모리캐시함)
         const cols = await getCols(env, "posts");
-        const want = ["id", "nick", "title", "body", "cat", "ts", "views", "likes", "lols", "sads", "link"];
+        const want = ["id", "nick", "title", "body", "cat", "ts", "views", "likes", "lols", "sads", "link", "user"];
         const use = want.filter((c) => cols.indexOf(c) >= 0);
         if (!use.length) throw new Error("posts 테이블 컬럼을 찾을 수 없음");
         // ★ 2026-10-03: 목록의 💬 숫자가 글을 펼치기 전엔 항상 0이었다 → 올 때가 된 서버 댓글 수를 같이 내려준다
@@ -1679,10 +1998,14 @@ var worker_default = {
         try { hasCmt = (await getCols(env, "comments")).length > 0; } catch (e) { hasCmt = false; }
         let sql = "SELECT " + use.join(",") + (hasCmt ? ", (SELECT COUNT(*) FROM comments c WHERE c.post_id = posts.id AND c.ts <= " + Date.now() + ") AS cmts" : "") + " FROM posts";
         const binds = [];
+        const conds = [];
         if (cat && cat !== "all" && cols.indexOf("cat") >= 0) {
-          sql += " WHERE cat = ?";
+          conds.push("cat = ?");
           binds.push(cat);
         }
+        // ★ 2026-10-08: 신고가 쌓여 숨김 처리된 사용자 글은 내려주지 않는다
+        if (cols.indexOf("hidden") >= 0) conds.push("(hidden IS NULL OR hidden = 0)");
+        if (conds.length) sql += " WHERE " + conds.join(" AND ");
         sql += " ORDER BY id DESC LIMIT ?";
         binds.push(limit);
         const rs = await env.DB.prepare(sql).bind(...binds).all();
@@ -1698,6 +2021,103 @@ var worker_default = {
     // ★ 2026-09-25 신설: 실제 유저가 글에 달는 댓글을 D1에 저장하고, 같은 글을 보는 다른
     //   기기/사용자에게도 그대로 보여준다. 토큰 게이팅 없음 — /react(가짜 반응 생성)과달리
     //   실제 유저 액션이라 앱이 토큰 없이 호출함(subway-api의 실제 사용자 /react와 같은 결).
+    // ★ 2026-10-08: 사용자 글 등록
+    if (url.pathname === "/post" && req.method === "POST") {
+      const J = (o, st) => new Response(JSON.stringify(o), { status: st || 200, headers: cors });
+      let b = {};
+      try { b = await req.json(); } catch (e) {}
+      const nick = String(b.nick || "").replace(/\s+/g, " ").trim().slice(0, 16);
+      const title = String(b.title || "").replace(/\s+/g, " ").trim().slice(0, 60);
+      const body = String(b.body || "").replace(/\r/g, "").replace(/\n{3,}/g, "\n\n").trim().slice(0, 800);
+      const cat = USER_POST_CATS.indexOf(b.cat) >= 0 ? b.cat : "잡담";
+      if (!nick) return J({ ok: false, error: "커뮤니티 아이디가 필요해요" }, 400);
+      if (!title || !body) return J({ ok: false, error: "제목과 내용을 입력해주세요" }, 400);
+      if (containsBadWord(nick) || containsBadWord(title) || containsBadWord(body)) return J({ ok: false, error: "욕설·비방이 포함되어 등록할 수 없어요" }, 400);
+      if (hasLinkOrPhone(title) || hasLinkOrPhone(body)) return J({ ok: false, error: "링크·전화번호는 올릴 수 없어요" }, 400);
+      try {
+        await ensureUserPostCols(env);
+        const ip = (await ownerHash("ip:" + (req.headers.get("CF-Connecting-IP") || "?"))).slice(0, 24);   // IP 원문은 저장하지 않는다
+        const hr = Math.floor(Date.now() / 36e5), day = Math.floor(Date.now() / 864e5);
+        if (!(await bumpLimit(env, "post:" + ip, hr, POST_PER_IP_HR)) || !(await bumpLimit(env, "postd:" + ip, day, POST_PER_IP_DAY)))
+          return J({ ok: false, error: "글을 너무 자주 올리고 있어요. 잠시 뒤 다시 써주세요" }, 429);
+        const dup = await env.DB.prepare("SELECT id FROM posts WHERE nick = ?1 AND title = ?2 AND ts > ?3 LIMIT 1").bind(nick, title, Date.now() - 864e5).first();
+        if (dup) return J({ ok: false, error: "같은 제목의 글을 이미 올렸어요" }, 400);
+        const ts = Date.now();
+        const cols = await getCols(env, "posts");
+        const ok = String(b.owner_key || "");
+        const data = { nick, title, body, cat, ts, likes: 0, lols: 0, sads: 0, user: 1, hidden: 0, owner: ok.length >= 16 ? await ownerHash(ok) : null };
+        const use = Object.keys(data).filter((k) => cols.indexOf(k) >= 0);
+        const res = await env.DB.prepare("INSERT INTO posts (" + use.join(",") + ") VALUES (" + use.map(() => "?").join(",") + ")").bind(...use.map((k) => data[k])).run();
+        const id = res && res.meta ? res.meta.last_row_id : null;
+        await purgePostsCache(url);
+        return J({ ok: true, id, ts });
+      } catch (e) {
+        return J({ ok: false, error: "서버 오류: " + e.message }, 500);
+      }
+    }
+    // ★ 2026-10-08: 작성자 본인 삭제 — 등록할 때 보낸 기기 비밀키(owner_key)가 맞아야 한다(개인정보처리방침의 '직접 삭제' 약속)
+    if (url.pathname === "/post/mine-delete" && req.method === "POST") {
+      const J = (o, st) => new Response(JSON.stringify(o), { status: st || 200, headers: cors });
+      let b = {};
+      try { b = await req.json(); } catch (e) {}
+      const pid = parseInt(b.post_id, 10), ok = String(b.owner_key || "");
+      if (!pid || ok.length < 16) return J({ ok: false, error: "post_id·owner_key 필요" }, 400);
+      try {
+        await ensureUserPostCols(env);
+        const row = await env.DB.prepare("SELECT owner FROM posts WHERE id = ?1 AND user = 1").bind(pid).first();
+        if (!row) return J({ ok: true, deleted: false });   // 이미 없음
+        if (!row.owner || row.owner !== (await ownerHash(ok))) return J({ ok: false, error: "본인 글만 삭제할 수 있어요" }, 403);
+        await env.DB.prepare("DELETE FROM posts WHERE id = ?1").bind(pid).run();
+        try { await env.DB.prepare("DELETE FROM comments WHERE post_id = ?1").bind(pid).run(); } catch (e) {}
+        await purgePostsCache(url);
+        return J({ ok: true, deleted: true });
+      } catch (e) {
+        return J({ ok: false, error: e.message }, 500);
+      }
+    }
+    // ★ 2026-10-08: 사용자 글 신고 — 서로 다른 3곳이 신고하면 숨긴다
+    if (url.pathname === "/report" && req.method === "POST") {
+      const J = (o, st) => new Response(JSON.stringify(o), { status: st || 200, headers: cors });
+      let b = {};
+      try { b = await req.json(); } catch (e) {}
+      const pid = parseInt(b.post_id, 10);
+      if (!pid) return J({ ok: false, error: "post_id 필요" }, 400);
+      try {
+        await ensureUserPostCols(env);
+        const ip = (await ownerHash("ip:" + (req.headers.get("CF-Connecting-IP") || "?"))).slice(0, 24);   // IP 원문은 저장하지 않는다
+        if (!(await bumpLimit(env, "rep:" + ip, Math.floor(Date.now() / 36e5), REPORT_PER_IP_HR))) return J({ ok: false, error: "too many" }, 429);
+        const post = await env.DB.prepare("SELECT id, user FROM posts WHERE id = ?1").bind(pid).first();
+        if (!post || !post.user) return J({ ok: false, error: "신고할 수 없는 글이에요" }, 400);
+        await env.DB.prepare("CREATE TABLE IF NOT EXISTS post_reports (post_id INTEGER, k TEXT, ts INTEGER, PRIMARY KEY (post_id, k))").run();
+        if (Math.random() < 0.05) { try { await env.DB.prepare("DELETE FROM post_reports WHERE ts < ?1").bind(Date.now() - 14 * 864e5).run(); } catch (e) {} }   // 14일 지난 신고 기록 삭제(방침과 동일)
+        await env.DB.prepare("INSERT OR IGNORE INTO post_reports (post_id,k,ts) VALUES (?1,?2,?3)").bind(pid, ip, Date.now()).run();
+        const n = await env.DB.prepare("SELECT COUNT(*) AS n FROM post_reports WHERE post_id = ?1").bind(pid).first();
+        let hidden = false;
+        if (n && n.n >= REPORT_HIDE_AT) { await env.DB.prepare("UPDATE posts SET hidden = 1 WHERE id = ?1").bind(pid).run(); hidden = true; await purgePostsCache(url); }
+        return J({ ok: true, hidden });
+      } catch (e) {
+        return J({ ok: false, error: e.message }, 500);
+      }
+    }
+    // ★ 2026-10-08: 관리자 — 글 삭제 / 신고된 글 보기 (ADMIN_TOKEN)
+    if (url.pathname === "/post/delete" || url.pathname === "/reports") {
+      if (!adminOk(url, env)) return new Response(JSON.stringify({ ok: false, error: "unauthorized" }), { status: 401, headers: cors });
+      try {
+        if (url.pathname === "/post/delete") {
+          const id = parseInt(url.searchParams.get("id"), 10);
+          if (!id) return new Response(JSON.stringify({ ok: false, error: "id 필요" }), { status: 400, headers: cors });
+          await env.DB.prepare("DELETE FROM posts WHERE id = ?1").bind(id).run();
+          try { await env.DB.prepare("DELETE FROM comments WHERE post_id = ?1").bind(id).run(); } catch (e) {}
+          await purgePostsCache(url);
+          return new Response(JSON.stringify({ ok: true, deleted: id }), { headers: cors });
+        }
+        await env.DB.prepare("CREATE TABLE IF NOT EXISTS post_reports (post_id INTEGER, k TEXT, ts INTEGER, PRIMARY KEY (post_id, k))").run();
+        const rs = await env.DB.prepare("SELECT r.post_id, COUNT(*) AS n, p.nick, p.title, p.hidden FROM post_reports r LEFT JOIN posts p ON p.id = r.post_id GROUP BY r.post_id ORDER BY n DESC LIMIT 50").all();
+        return new Response(JSON.stringify({ ok: true, reports: rs.results || [] }), { headers: cors });
+      } catch (e) {
+        return new Response(JSON.stringify({ ok: false, error: e.message }), { status: 500, headers: cors });
+      }
+    }
     if (url.pathname === "/comment" && req.method === "POST") {
       let body = {};
       try {
@@ -1844,7 +2264,7 @@ var worker_default = {
         try {
           await ensureLineRoom(env);
           const now = Date.now();
-          const rs = await env.DB.prepare("SELECT id, kind, nick, text, stn, ts FROM line_msgs WHERE line=?1 AND ts <= ?2 AND ts > ?3" + LR_HIDDEN_SQL + " ORDER BY ts DESC, id DESC LIMIT 80").bind(line, now, now - 12 * 3600 * 1000).all();
+          const rs = await env.DB.prepare("SELECT id, kind, nick, text, stn, ts FROM line_msgs WHERE line=?1 AND ts <= ?2 AND ts > ?3" + LR_HIDDEN_SQL + " ORDER BY ts DESC, id DESC LIMIT 80").bind(line, now, now - 24 * 3600 * 1000).all();   // ★ 2026-10-05: 화면에 보이는 기간 12시간→24시간(새벽에도 전날 저녁 대화가 남아 방이 비어 보이지 않게)
           const al = await lrAlerts(env, [line]);
           snap = { msgs: (rs.results || []).reverse(), alert: al[line] || { reporters: 0, stations: [] } };
           try { await caches.default.put(snapKey, new Response(JSON.stringify(snap), { headers: { "Content-Type": "application/json", "Cache-Control": "public, s-maxage=5" } })); } catch (e) {}
