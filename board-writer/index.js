@@ -46,7 +46,8 @@ async function reactAllowed(req, env) {
 var LR_PER_IP_HR = 30;
 // ★ 2026-10-03: 신고가 서로 다른 3명 이상 모인 글은 보이지 않게 한다(자동 숨김). 신고한 기기 식별 코드도 14일 뒤 같이 지운다.
 var LR_HIDE_N = 3;
-var LR_HIDDEN_SQL = " AND id NOT IN (SELECT msg_id FROM line_reports GROUP BY msg_id HAVING COUNT(*) >= " + LR_HIDE_N + ")";
+// ★ 2026-10-10: AI 가 만든 "치맥… 🍗… 🤤" 식 말줄임표 조각 글은 화면에서 가린다(행은 지우지 않음 — 2일 뒤 자동 삭제). 실제 이용자 글(ipk≠'ai')은 대상이 아니다.
+var LR_HIDDEN_SQL = " AND id NOT IN (SELECT msg_id FROM line_reports GROUP BY msg_id HAVING COUNT(*) >= " + LR_HIDE_N + ") AND NOT (ipk = 'ai' AND (LENGTH(text) - LENGTH(REPLACE(text, '…', ''))) >= 2)";
 var LR_KINDS_OK = ["chat"];   // ★ 2026-10-05 (YJ): 지연·붐벼요 제보 버튼 삭제(악용 우려) — 서버도 일반 대화만 받는다
 // ★ 2026-10-03 (익명 정확도 기록): 앱이 예상한 '탑승~하차' 분과 실제로 걸린 분을 목적지 도착 때 한 번 보낸다.
 //   저장하는 것: 날짜(일 단위), 예상분, 실제분, 환승 횟수, 노선명, 시간대(시), 평일 여부, 수단 구분, 앱 버전.
@@ -379,13 +380,61 @@ var NEWS_FEEDS = [
 var _gemStat = { ok: 0, fail: 0, last: "", model: "", ctxRej: 0 };
 // ★ 2026-10-05: Gemini 무료 한도 대응. 모델마다 하루 한도가 따로라서, flash-lite 가 429(한도)면 다음 모델로 넘어간다.
 //   한도에 걸린 모델은 20분(404 면 6시간) 동안 건너뛴다 → 한도 난 뒤에도 20분마다 헛호출을 쏟아붓지 않는다.
-var GEM_MODELS = ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.0-flash"];
+// ★ 2026-10-10 (YJ: 게시글·댓글·소통방이 하루 만에 멈춘다 / 소통방 문장이 "치맥… 🍗… 🤤" 처럼 깨진다):
+//   원인① 무료 키의 gemini-2.5-flash-lite 는 하루 약 20회뿐이라 오후 몇 시간 만에 소진 → 다음 날 오후까지 429. (다른 gemini 모델은 이 키에서 404)
+//   원인② temperature 1.15 가 flash-lite 에서 말줄임표 조각을 낳았다.
+//   → ⓐ 쿼터가 따로 잡히는 Gemma(gemma-3-27b-it 등, 무료 하루 수천 회)를 예비 모델로 추가하고, 소통방 대량 생성은 Gemma 를 먼저 쓴다.
+//     ⓑ 404/429 외의 400·403 도 멈추지 않고 다음 모델로 넘어간다. ⓒ ListModels 로 이 키에서 실제 쓸 수 있는 모델을 찾아 목록에 보탠다(bw_diag 'gemmodels' 에 기록).
+var GEM_MODELS = ["gemini-2.5-flash-lite", "gemini-flash-lite-latest", "gemini-2.5-flash", "gemini-2.0-flash", "gemma-3-27b-it", "gemma-3-12b-it"];
+var GEM_BULK_ORDER = ["gemma-3-27b-it", "gemma-3-12b-it", "gemini-2.5-flash-lite", "gemini-flash-lite-latest", "gemini-2.5-flash", "gemini-2.0-flash"];   // 소통방(대량) — Gemini 쿼터는 게시판용으로 아낀다
 var _gemDownUntil = {};
 var _gemLast = { status: 0, model: "", tried: "" };
-async function gemFetch(env, ms, init) {
+var _gemUse = {};          // 이 실행에서 성공 호출한 모델별 횟수(끝나면 bw_diag 'gemuse' 로 기록 → 하루 예산 계산)
+var _gemExtra = [];        // ListModels 로 찾은 추가 모델
+var _gemDiscAt = 0;
+function gemOrder(base) {
+  const out = base.slice();
+  _gemExtra.forEach((m) => { if (out.indexOf(m) < 0) out.push(m); });
+  return out;
+}
+__name(gemOrder, "gemOrder");
+async function gemDiscover(env) {
+  if (Date.now() - _gemDiscAt < 3 * 3600e3 || !env.GEMINI_KEY) return;
+  _gemDiscAt = Date.now();
+  try {
+    const r = await fetchT("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200&key=" + env.GEMINI_KEY, 8e3, { method: "GET" });
+    if (!r.ok) { await bwDiag(env, "gemmodels", { http: r.status }); return; }
+    const d = await r.json();
+    const names = (d.models || []).filter((m) => (m.supportedGenerationMethods || []).indexOf("generateContent") >= 0).map((m) => String(m.name || "").replace(/^models\//, ""));
+    const usable = names.filter((n) => /^(gemini-[\d.]+-flash(-lite)?|gemini-flash(-lite)?-latest|gemma-3-(27b|12b|4b)-it)$/.test(n));
+    usable.forEach((n) => { if (GEM_MODELS.indexOf(n) < 0 && _gemExtra.indexOf(n) < 0) _gemExtra.push(n); });
+    await bwDiag(env, "gemmodels", { n: names.length, use: usable.join(",").slice(0, 400) });
+  } catch (e) { await bwDiag(env, "gemmodels", { err: String((e && e.message) || e).slice(0, 80) }); }
+}
+__name(gemDiscover, "gemDiscover");
+async function flushGemUse(env) {
+  const keys = Object.keys(_gemUse);
+  if (!keys.length) return;
+  const snap = _gemUse; _gemUse = {};
+  await bwDiag(env, "gemuse", snap);
+}
+__name(flushGemUse, "flushGemUse");
+// 최근 24시간 동안 Gemini(gemini-*) 모델을 부른 횟수 — 소통방이 게시판 몫까지 써 버리지 않게 예산을 가른다
+async function geminiUsed24h(env) {
+  let n = 0;
+  try {
+    const rs = await env.DB.prepare("SELECT v FROM bw_diag WHERE k='gemuse' AND ts > ?1").bind(Date.now() - 24 * 3600e3).all();
+    (rs.results || []).forEach((r) => { try { const o = JSON.parse(r.v); Object.keys(o).forEach((m) => { if (m.indexOf("gemini-") === 0) n += o[m] | 0; }); } catch (e) {} });
+  } catch (e) {}
+  Object.keys(_gemUse).forEach((m) => { if (m.indexOf("gemini-") === 0) n += _gemUse[m]; });
+  return n;
+}
+__name(geminiUsed24h, "geminiUsed24h");
+var GEMINI_TALK_BUDGET = 8;   // 소통방이 24시간에 쓸 수 있는 gemini-* 호출 수(무료 한도 ≈20 중 나머지는 게시글·댓글 몫)
+async function gemFetch(env, ms, init, order) {
   let last = null, attempted = 0;
   const tried = [];
-  for (const m of GEM_MODELS) {
+  for (const m of gemOrder(order || GEM_MODELS)) {
     if ((_gemDownUntil[m] || 0) > Date.now()) continue;
     attempted++;
     let r;
@@ -397,13 +446,13 @@ async function gemFetch(env, ms, init) {
       continue;
     }
     tried.push(m.replace("gemini-", "") + ":" + r.status);
-    if (r.ok) { _gemStat.model = m; _gemLast = { status: 200, model: m, tried: tried.join(",") }; return r; }
+    if (r.ok) { _gemStat.model = m; _gemUse[m] = (_gemUse[m] || 0) + 1; _gemLast = { status: 200, model: m, tried: tried.join(",") }; return r; }
     last = r;
     // ★ 2026-10-05: 503(과부하)도 다음 모델로 넘어간다 — 16:00 에 flash-lite 가 503 이라 13개 방이 비었다. 5xx 는 1분만 쉰다.
     if (r.status === 429) _gemDownUntil[m] = Date.now() + 20 * 60e3;
     else if (r.status === 404) _gemDownUntil[m] = Date.now() + 6 * 3600e3;
     else if (r.status >= 500) _gemDownUntil[m] = Date.now() + 60e3;
-    else { _gemLast = { status: r.status, model: "", tried: tried.join(",") }; return r; }
+    else _gemDownUntil[m] = Date.now() + 30 * 60e3;   // 400·403 등: 이 모델은 30분 쉬고 다음 모델을 시도한다(Gemma 가 지원 안 하는 옵션 등)
   }
   _gemLast = { status: last ? last.status : (attempted ? 504 : 429), model: "", tried: tried.join(",") };
   return last || { ok: false, status: attempted ? 504 : 429, json: async () => ({}), text: async () => "" };
@@ -792,7 +841,7 @@ async function geminiPosts(env, n, recentTitles, kst, w, wcat, topics, hotWords)
     const r = await gemFetch(env, 12e3, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 1.1, maxOutputTokens: 4e3 } })
+      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 0.95, topP: 0.95, maxOutputTokens: 4e3 } })
     });
     if (!r.ok) return null;
     const d = await r.json();
@@ -802,11 +851,10 @@ async function geminiPosts(env, n, recentTitles, kst, w, wcat, topics, hotWords)
     } catch (e) {
       return null;
     }
-    txt = txt.replace(/```json|```/g, "").trim();
-    const arr = JSON.parse(txt);
-    if (!Array.isArray(arr) || !arr.length) return null;
+    const arr = parseJsonArr(txt);
+    if (!arr || !arr.length) return null;
     const rej = [];
-    const out = arr.filter((x) => x && x.t && x.b).map((x) => ({ t: holFix(String(x.t).slice(0, 60), kst), b: holFix(String(x.b).slice(0, 400), kst) }))
+    const out = arr.filter((x) => x && x.t && x.b && !aiJunk(x.t)).map((x) => ({ t: holFix(String(x.t).slice(0, 60), kst), b: holFix(String(x.b).slice(0, 400), kst) }))
       .filter((x) => { const why = ctxReject(x.t + "\n" + x.b, kst, w); if (why) { rej.push("ctx:" + why); return false; } return true; }).slice(0, n);
     out.rej = rej;
     return out;
@@ -1051,6 +1099,7 @@ async function generatePosts(env) {
   } catch (e) {
     aiPosts = null;
   }
+  if (!aiPosts) { try { await gemDiscover(env); } catch (e) {} }
   let made = 0, kinds = [], rejected = (aiPosts && aiPosts.rej) ? aiPosts.rej.slice() : [];
   const aiQ = aiPosts ? aiPosts.slice() : [];
   for (let i = 0; i < count; i++) {
@@ -1193,7 +1242,7 @@ async function geminiComments(env, posts, perPost, kst, w, wcat) {
     const r = await gemFetch(env, 12e3, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 1.1, maxOutputTokens: 4e3 } })
+      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 0.95, topP: 0.95, maxOutputTokens: 4e3 } })
     });
     if (!r.ok) return null;
     const d = await r.json();
@@ -1203,12 +1252,11 @@ async function geminiComments(env, posts, perPost, kst, w, wcat) {
     } catch (e) {
       return null;
     }
-    txt = txt.replace(/```json|```/g, "").trim();
-    const arr = JSON.parse(txt);
-    if (!Array.isArray(arr)) return null;
+    const arr = parseJsonArr(txt);
+    if (!arr) return null;
     const ids = {};
     posts.forEach(function(p) { ids[p.id] = 1; });
-    return arr.filter((x) => x && x.p != null && ids[parseInt(x.p, 10)] && x.n && x.t).map((x) => ({ post_id: parseInt(x.p, 10), nick: String(x.n).slice(0, 16), text: holFix(String(x.t).slice(0, 80).trim(), kst) })).filter((x) => !ctxReject(x.text, kst, w));
+    return arr.filter((x) => x && x.p != null && ids[parseInt(x.p, 10)] && x.n && x.t).map((x) => ({ post_id: parseInt(x.p, 10), nick: String(x.n).slice(0, 16), text: holFix(String(x.t).slice(0, 80).trim(), kst) })).filter((x) => !aiJunk(x.text) && !ctxReject(x.text, kst, w));
   } catch (e) {
     return null;
   }
@@ -1406,8 +1454,27 @@ function slotTopics(kst) {
   return { ok: ok, no: no };
 }
 __name(slotTopics, "slotTopics");
+// ★ 2026-10-10: 모델 출력에서 JSON 배열만 뽑는다(Gemma 는 앞뒤에 설명을 붙이기도 한다) / 말줄임표 조각·이모지 범벅 같은 깨진 문장 판별
+function parseJsonArr(txt) {
+  let t = String(txt || "").replace(/```json|```/g, "").trim();
+  try { const a = JSON.parse(t); if (Array.isArray(a)) return a; } catch (e) {}
+  const i = t.indexOf("["), j = t.lastIndexOf("]");
+  if (i >= 0 && j > i) { try { const a = JSON.parse(t.slice(i, j + 1)); if (Array.isArray(a)) return a; } catch (e) {} }
+  return null;
+}
+__name(parseJsonArr, "parseJsonArr");
+function aiJunk(text) {
+  const t = String(text || "");
+  const ell = (t.match(/…|\.{3,}/g) || []).length;
+  const emo = (t.match(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu) || []).length;
+  if (ell >= 2) return true;                 // "치맥… 🍗… 🤤" 같은 조각
+  if (emo >= 2) return true;                 // 이모지 거의 안 쓰는 방이다
+  if (t.replace(/[\s.,!?~…·ㅋㅎㅠㅜ]/g, "").length < 2) return true;   // 의미 있는 글자가 없음
+  return false;
+}
+__name(aiJunk, "aiJunk");
 var PERSONA_ROLES = ["직장인", "대학생", "고등학생", "취준생", "알바생", "대학원생", "신입사원"];
-async function geminiTalks(env, n, recentTalks, kst, w, wcat, room) {
+async function geminiTalks(env, n, recentTalks, kst, w, wcat, room, order) {
   if (!env.GEMINI_KEY) { _gemStat.fail++; _gemStat.last = "nokey"; return null; }
   try {
     const personas = NICKS.slice().sort(() => Math.random() - 0.5).slice(0, 8);
@@ -1418,16 +1485,16 @@ async function geminiTalks(env, n, recentTalks, kst, w, wcat, room) {
     const wtxt = w ? "기온 " + w.temp + "도" + (wcat === "rain" ? ", 비" : wcat === "hot" ? ", 폭염" : wcat === "cold" ? ", 한파" : wcat === "snow" ? ", 눈" : ", 맑은 편") : "보통";
     const tp = slotTopics(kst);
     // ★ 2026-10-04 노선별 방: 그 노선 이용자 입장에서 말하되, 실시간 운행 상황은 지어내지 않는다(지연·혼잡은 이용자 제보 기능이 따로 다룬다).
-    const lineRule = room ? "\n이 방은 '" + room.name + "' 이용자 방이다. 이 노선을 자주 타는 사람들의 말투와 일상(자주 가는 역: " + room.stns.join("\xB7") + ")으로 쓴다. 이 노선의 지금 운행 상황(지연\xB7사고\xB7고장\xB7운행중단\xB7얼마나 붐비는지)을 사실처럼 말하거나 지어내지 마라." + " 이 대화는 앞으로 약 4시간에 걸쳐 올라가니 특정 시각·식사 시간·'지금 막'을 단정하지 말고 " + (kst.getUTCHours() >= 20 ? "자정을 넘기는 표현(내일 아침 등)도 피한다." : "시간대가 조금 바뀌어도 어색하지 않게 쓴다.") : "";
+    const lineRule = room ? "\n이 방은 '" + room.name + "' 이용자 방이다. 이 노선을 자주 타는 사람들의 말투와 일상(자주 가는 역: " + room.stns.join("\xB7") + ")으로 쓴다. 이 노선의 지금 운행 상황(지연\xB7사고\xB7고장\xB7운행중단\xB7얼마나 붐비는지)을 사실처럼 말하거나 지어내지 마라." + " 이 대화는 앞으로 약 6시간에 걸쳐 올라가니 특정 시각·식사 시간·'지금 막'을 단정하지 말고 " + (kst.getUTCHours() >= 20 ? "자정을 넘기는 표현(내일 아침 등)도 피한다." : "시간대가 조금 바뀌어도 어색하지 않게 쓴다.") : "";
     const personaStr = personas.map(function(p, i) {
       return p + "(" + PERSONA_ROLES[i % PERSONA_ROLES.length] + ")";
     }).join(", ");
-    const prompt = "너는 한국의 지하철\xB7버스로 출퇴근하고 등하교하는 사람들이 모인 실시간 단체 오픈채팅방을 재현한다. 진짜 카톡 오픈채팅처럼 자연스럽게." + lineRule + "\n지금: " + slotLabel(kst) + ", 날씨: " + wtxt + ctxBlock(kst, w, wcat) + "\n방금 전 대화:\n" + ctx + "\n\n이 흐름을 자연스럽게 이어서 채팅 " + n + "개를 써라.\n참여자(역할 고정): " + personaStr + "\n규칙:\n1. 진짜 사람처럼. 완결된 문장 말고 실제 채팅투 — 짧게 툭툭, 오타틱한 줄임말(ㄱㄱ,ㅇㅇ,ㅇㅈ,ㄹㅇ,ㅋㅋ,ㅠ,ㄷㄷ,담,낼,걍,넘,쫌), 한 명이 두세 줄 연달아 치기도 함.\n2. 서로 진짜 대화. 앞사람 말에 대답/맞장구/되묻기/딴지/부러움/투정. 각자 혼잣말 나열 절대 금지.\n3. 직장인은 회사\xB7야근\xB7상사\xB7월급, 학생은 수업\xB7과제\xB7시험\xB7급식 얘기로 서로 티키타카 (부러워하거나 놀리거나).\n4. 지금 시간대 얘기만: " + tp.ok + ". 금지: " + tp.no + '\n5. 방금 전 대화에 나온 말\xB7소재는 절대 반복하지 마. 새 메시지에끼리도 같은 말 반복 금지.\n6. 가끔 새 화제를 누가 툭 던져서 주제가 자연스럽게 바뀌어도 됨.\n7. 정치 편들기\xB7욕설\xB7혐오\xB7실존인물 비방 금지. 이모지는 거의 안 씀.\nJSON 배열만: [{"n":"닉","t":"채팅내용","d":지연초(3~15)}]';
-    const r = await gemFetch(env, 12e3, {
+    const prompt = "너는 한국의 지하철\xB7버스로 출퇴근하고 등하교하는 사람들이 모인 실시간 단체 오픈채팅방을 재현한다. 진짜 카톡 오픈채팅처럼 자연스럽게." + lineRule + "\n지금: " + slotLabel(kst) + ", 날씨: " + wtxt + ctxBlock(kst, w, wcat) + "\n방금 전 대화:\n" + ctx + "\n\n이 흐름을 자연스럽게 이어서 채팅 " + n + "개를 써라.\n참여자(역할 고정): " + personaStr + "\n규칙:\n1. 진짜 사람처럼. 완결된 문장 말고 실제 채팅투 — 짧게 툭툭, 오타틱한 줄임말(ㄱㄱ,ㅇㅇ,ㅇㅈ,ㄹㅇ,ㅋㅋ,ㅠ,ㄷㄷ,담,낼,걍,넘,쫌), 한 명이 두세 줄 연달아 치기도 함.\n2. 서로 진짜 대화. 앞사람 말에 대답/맞장구/되묻기/딴지/부러움/투정. 각자 혼잣말 나열 절대 금지.\n3. 직장인은 회사\xB7야근\xB7상사\xB7월급, 학생은 수업\xB7과제\xB7시험\xB7급식 얘기로 서로 티키타카 (부러워하거나 놀리거나).\n4. 지금 시간대 얘기만: " + tp.ok + ". 금지: " + tp.no + '\n5. 방금 전 대화에 나온 말\xB7소재는 절대 반복하지 마. 새 메시지에끼리도 같은 말 반복 금지.\n6. 가끔 새 화제를 누가 툭 던져서 주제가 자연스럽게 바뀌어도 됨.\n7. 정치 편들기\xB7욕설\xB7혐오\xB7실존인물 비방 금지. 이모지는 쓰지 않는다.\n8. 모든 채팅은 말이 되는 한 문장 이상. "…"로 끊긴 단어 조각이나 단어만 나열한 줄 금지.\nJSON 배열만: [{"n":"닉","t":"채팅내용","d":지연초(3~15)}]';
+    const r = await gemFetch(env, 25e3, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 1.15, maxOutputTokens: 8e3 } })
-    });
+      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 0.9, topP: 0.95, maxOutputTokens: 8e3 } })
+    }, order || GEM_BULK_ORDER);
     if (!r.ok) { _gemStat.fail++; _gemStat.last = "http " + r.status; return null; }
     const d = await r.json();
     let txt = "";
@@ -1436,12 +1503,11 @@ async function geminiTalks(env, n, recentTalks, kst, w, wcat, room) {
     } catch (e) {
       _gemStat.fail++; _gemStat.last = "noparts"; return null;
     }
-    txt = txt.replace(/```json|```/g, "").trim();
-    const arr = JSON.parse(txt);
-    if (!Array.isArray(arr) || !arr.length) { _gemStat.fail++; _gemStat.last = "empty"; return null; }
+    const arr = parseJsonArr(txt);
+    if (!arr || !arr.length) { _gemStat.fail++; _gemStat.last = "parse"; if (_gemLast.model) _gemDownUntil[_gemLast.model] = Date.now() + 15 * 60e3; return null; }
     _gemStat.ok++;
     return arr.filter((x) => x && x.n && x.t).map((x) => ({ nick: String(x.n).slice(0, 16), text: holFix(String(x.t).slice(0, 120), kst), d: Math.max(3, Math.min(90, parseInt(x.d, 10) || 20)) }))
-      .filter((m) => { const why = ctxReject(m.text, kst, w); if (why) { _gemStat.ctxRej++; return false; } return true; }).slice(0, n);
+      .filter((m) => { if (aiJunk(m.text)) { _gemStat.junk = (_gemStat.junk || 0) + 1; return false; } const why = ctxReject(m.text, kst, w); if (why) { _gemStat.ctxRej++; return false; } return true; }).slice(0, n);
   } catch (e) {
     _gemStat.fail++; _gemStat.last = "ex " + String((e && e.message) || e).slice(0, 40);
     return null;
@@ -1675,8 +1741,8 @@ async function generateLineTalks(env) {
   //      방마다 "아직 안 나온 글"이 목표의 35% 밑으로 줄었을 때만 AI 를 부른다 → AI 호출이 회차×방 수에서 방당 1~2시간에 한 번으로 준다
   //      (전에는 매 20분마다 방마다 불러서 하루 한도를 몇 시간 만에 다 쓰고, 그 뒤엔 몇 개 안 되는 정형 문구가 중복 검사에 걸려 방이 비었다).
   const nowMs = Date.now();
-  const floorPerHour = kst.getUTCHours() < 5 ? 2 : 9;
-  const HORIZON_MIN = 240;
+  const floorPerHour = kst.getUTCHours() < 5 ? 2 : 6;
+  const HORIZON_MIN = 360;
   const haveMap = {};
   try {
     const hs = await env.DB.prepare("SELECT line, COUNT(*) AS n, MAX(ts) AS mx FROM line_msgs WHERE kind='chat' AND ts > ?1 GROUP BY line").bind(nowMs).all();
@@ -1688,12 +1754,17 @@ async function generateLineTalks(env) {
     const target = Math.round(perHour * HORIZON_MIN / 60);
     const have = (haveMap[room.name] && haveMap[room.name].n) || 0;
     if (target < 1 || have >= target * 0.35) continue;
-    plan.push({ room, k: Math.min(50, Math.max(1, target - have)), perHour, ratio: have / target, startTs: Math.max(nowMs, (haveMap[room.name] && haveMap[room.name].mx) || 0) });
+    plan.push({ room, k: Math.min(60, Math.max(1, target - have)), perHour, ratio: have / target, startTs: Math.max(nowMs, (haveMap[room.name] && haveMap[room.name].mx) || 0) });
   }
   // ★ 2026-10-05: 한 회차에 AI 를 부르는 방은 가장 비어 있는 9개까지 — 나머지는 다음 회차(20분 뒤). Gemini 가 한꺼번에 몰려 과부하·한도에 걸리는 것을 줄인다.
   plan.sort((a, b) => a.ratio - b.ratio);
   if (plan.length > LR_MAX_AI_ROOMS) plan.length = LR_MAX_AI_ROOMS;
-  _gemStat.ok = 0; _gemStat.fail = 0; _gemStat.last = ""; _gemStat.ctxRej = 0;
+  _gemStat.ok = 0; _gemStat.fail = 0; _gemStat.last = ""; _gemStat.ctxRej = 0; _gemStat.junk = 0;
+  // ★ 2026-10-10: Gemma 먼저, gemini-* 는 하루 예산(GEMINI_TALK_BUDGET) 안에서만 — 게시글·댓글이 쓸 한도를 남긴다
+  let talkOrder = GEM_BULK_ORDER;
+  const usedG = await geminiUsed24h(env);
+  if (usedG >= GEMINI_TALK_BUDGET) talkOrder = GEM_BULK_ORDER.filter((m) => m.indexOf("gemma-") === 0);
+  if (plan.length) await gemDiscover(env);
   const scripts = [];
   let usedAi = 0;
   for (let i = 0; i < plan.length; i += 3) {
@@ -1705,7 +1776,7 @@ async function generateLineTalks(env) {
       } catch (e) {}
       let script = [];
       if (p.k >= 4) {
-        const g = await geminiTalks(env, Math.min(p.k, 50), recent, kst, w, wcat, p.room);
+        const g = await geminiTalks(env, Math.min(p.k, 60), recent, kst, w, wcat, p.room, talkOrder);
         if (g && g.length) { script = g; usedAi++; }
       }
       if (script.length < p.k) script = script.concat(fallbackTalks(p.k - script.length, kst, w, wcat, p.room));
@@ -1750,9 +1821,10 @@ async function generateLineTalks(env) {
     try { await env.DB.batch(stmts.slice(i, i + 50)); made += Math.min(50, stmts.length - i); }
     catch (e) { insErr = String((e && e.message) || e).slice(0, 80); console.log("[board-writer][linetalks] INSERT 실패:", e.message); break; }
   }
-  const res = { made, planned: total, rooms: Object.keys(byLine).length, planRooms: plan.length, scripts: scripts.length, kept: kept.length, aiRooms: usedAi, gem: { ok: _gemStat.ok, fail: _gemStat.fail, last: _gemStat.last, model: _gemStat.model, rej: _gemStat.ctxRej, tried: _gemLast.tried }, weather: wcat || "normal" };
+  const res = { made, planned: total, rooms: Object.keys(byLine).length, planRooms: plan.length, scripts: scripts.length, kept: kept.length, aiRooms: usedAi, gem: { ok: _gemStat.ok, fail: _gemStat.fail, last: _gemStat.last, model: _gemStat.model, rej: _gemStat.ctxRej, junk: _gemStat.junk || 0, tried: _gemLast.tried, usedG: usedG }, weather: wcat || "normal" };
   if (insErr) res.insErr = insErr;
   await bwDiag(env, "linetalks", res);
+  await flushGemUse(env);
   return res;
 }
 __name(generateLineTalks, "generateLineTalks");
@@ -1952,6 +2024,7 @@ var worker_default = {
       await holRefresh(env);
       try { console.log("[board-writer][posts]", JSON.stringify(await generatePosts(env))); } catch (e) { console.log("[board-writer][posts] 실패:", e && e.message); }
       try { console.log("[board-writer][comments]", JSON.stringify(await generateComments(env))); } catch (e) { console.log("[board-writer][comments] 실패:", e && e.message); }
+      try { await flushGemUse(env); } catch (e) {}
       try { console.log("[board-writer][linetalks]", JSON.stringify(await generateLineTalks(env))); } catch (e) { console.log("[board-writer][linetalks] 실패:", e && e.message); }
     })());
   },
