@@ -1,0 +1,30 @@
+import { DatabaseSync } from 'node:sqlite';
+import assert from 'node:assert';
+globalThis.caches = { default: { async match(){return undefined}, async put(){}, async delete(){return true} } };
+const db = new DatabaseSync(':memory:');
+db.exec("CREATE TABLE posts (id INTEGER PRIMARY KEY AUTOINCREMENT, nick TEXT, title TEXT, body TEXT, cat TEXT, ts INTEGER, likes INTEGER, lols INTEGER, sads INTEGER)");
+db.exec("CREATE TABLE comments (id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER, nick TEXT, body TEXT, ts INTEGER)");
+db.exec("CREATE TABLE talks (id INTEGER PRIMARY KEY AUTOINCREMENT, nick TEXT, text TEXT, ts INTEGER)");
+db.prepare("INSERT INTO posts (nick,title,body,cat,ts,likes,lols,sads) VALUES ('a','t','b','정보',?,0,0,0)").run(Date.now()-1000);
+let calls = 0;
+const mk = (sql) => { let stc=null; const S=()=>stc||(stc=db.prepare(sql.replace(/\?(\d+)/g,'?$1'))); let params=[];
+  const o = { bind(...p){ params=p; return o; }, async run(){ calls++; const r=S().run(...params); return {meta:{last_row_id:r.lastInsertRowid}}; }, async all(){ calls++; return {results: S().all(...params)}; }, async first(){ calls++; return S().get(...params)||null; } }; return o; };
+const DB = { prepare: mk, async batch(a){ for (const x of a) await x.run(); return []; } };
+const mod = await import(process.argv[2]);
+const w = mod.default;
+const pend=[]; const ctx={ waitUntil(p){ pend.push(p); } };
+const env = { DB };
+let r = await w.fetch(new Request('https://x.dev/lroom?line=1%ED%98%B8%EC%84%A0'), env, ctx);
+let j = await r.json(); console.log(JSON.stringify(j).slice(0,300)); assert.equal(j.ok, true);
+// 쓰기 후 즉시 반영
+r = await w.fetch(new Request('https://x.dev/lroom', {method:'POST', body: JSON.stringify({line:'1호선', kind:'chat', nick:'나', text:'안녕'})}), env, ctx);
+j = await r.json(); assert.equal(j.ok, true, JSON.stringify(j));
+r = await w.fetch(new Request('https://x.dev/lroom?line=1%ED%98%B8%EC%84%A0'), env, ctx);
+j = await r.json(); assert.equal(j.msgs.length, 1, 'write then read');
+// 같은 격리 두 번째 읽기는 D1 을 안 부른다
+const c0 = calls; await w.fetch(new Request('https://x.dev/lroom?line=1%ED%98%B8%EC%84%A0'), env, ctx); assert.equal(calls, c0, 'mem cache');
+r = await w.fetch(new Request('https://x.dev/talks'), env, ctx); j = await r.json(); assert.equal(j.ok, true); assert.equal(j.talks.length, 1);
+r = await w.fetch(new Request('https://x.dev/posts?limit=50'), env, ctx); j = await r.json(); assert.equal(j.posts.length, 1);
+const c1 = calls; await w.fetch(new Request('https://x.dev/posts?limit=50'), env, ctx); assert.equal(calls, c1, 'posts mem cache');
+await Promise.all(pend);
+console.log('smoke ok');

@@ -104,12 +104,29 @@ async function rideHandle(req, env, cors) {
   }
 }
 var _lrReady = false;
-async function ensureLineRoom(env) {
+// ★ 2026-10-10 (YJ: 게시판·실시간소통 로딩이 길다): 표는 이미 있다. 예전엔 격리(isolate)가 새로 뜰 때마다
+//   표 만들기 3번을 차례로 기다린 뒤에야 읽기를 시작했다(D1 왕복 3번 = 첫 요청이 그만큼 늦음).
+//   이제 한 번에 묶어(batch) 응답과 별개로 보내고, 읽기는 바로 시작한다.
+var _CTX = null;
+var _cmtIdxDone = false;
+var _MEM = Object.create(null);
+function memGet(k, ttl) { var h = _MEM[k]; return h && Date.now() - h.at < ttl ? h.v : null; }
+function memPut(k, v) { _MEM[k] = { at: Date.now(), v: v }; }
+var _lrRetry = false;
+async function ensureLineRoom(env, wait) {
   if (_lrReady) return;
-  await env.DB.prepare("CREATE TABLE IF NOT EXISTS line_msgs (id INTEGER PRIMARY KEY AUTOINCREMENT, line TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'chat', nick TEXT, text TEXT, stn TEXT, ipk TEXT, ts INTEGER NOT NULL)").run();
-  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_line_msgs ON line_msgs (line, ts)").run();
-  await env.DB.prepare("CREATE TABLE IF NOT EXISTS line_reports (msg_id INTEGER NOT NULL, ipk TEXT NOT NULL, ts INTEGER NOT NULL, PRIMARY KEY (msg_id, ipk))").run();
   _lrReady = true;
+  const stmts = [
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS line_msgs (id INTEGER PRIMARY KEY AUTOINCREMENT, line TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'chat', nick TEXT, text TEXT, stn TEXT, ipk TEXT, ts INTEGER NOT NULL)"),
+    env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_line_msgs ON line_msgs (line, ts)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS line_reports (msg_id INTEGER NOT NULL, ipk TEXT NOT NULL, ts INTEGER NOT NULL, PRIMARY KEY (msg_id, ipk))")
+  ];
+  const p = (typeof env.DB.batch === "function"
+    ? env.DB.batch(stmts)
+    : stmts.reduce(function (c, st) { return c.then(function () { return st.run(); }); }, Promise.resolve())
+  ).catch(function () { _lrReady = false; });
+  try { if (_CTX && !wait) { _CTX.waitUntil(p); return; } } catch (e) {}
+  await p;
 }
 function lrLineOk(line) {
   return typeof line === "string" && line.length >= 1 && line.length <= 24 && /^[0-9A-Za-z가-힣\s\-·()_]+$/.test(line);
@@ -137,9 +154,10 @@ async function lrAlerts(env, lines) {
   for (const ln of lines) out[ln] = { reporters: 0, stations: [] };
   if (!lines.length) return out;
   const ph = lines.map(() => "?").join(",");
-  const a = await env.DB.prepare("SELECT line, COUNT(DISTINCT ipk) AS n FROM line_msgs WHERE kind='delay' AND ts > ? AND ts <= ? AND line IN (" + ph + ")" + LR_HIDDEN_SQL + " GROUP BY line").bind(since, Date.now(), ...lines).all();
+  const aP = env.DB.prepare("SELECT line, COUNT(DISTINCT ipk) AS n FROM line_msgs WHERE kind='delay' AND ts > ? AND ts <= ? AND line IN (" + ph + ")" + LR_HIDDEN_SQL + " GROUP BY line").bind(since, Date.now(), ...lines).all();
+  const bP = env.DB.prepare("SELECT line, stn, COUNT(DISTINCT ipk) AS n, MAX(ts) AS last FROM line_msgs WHERE kind='delay' AND stn IS NOT NULL AND stn <> '' AND ts > ? AND ts <= ? AND line IN (" + ph + ")" + LR_HIDDEN_SQL + " GROUP BY line, stn ORDER BY n DESC, last DESC").bind(since, Date.now(), ...lines).all();
+  const [a, b] = await Promise.all([aP, bP]);
   (a.results || []).forEach((r) => { if (out[r.line]) out[r.line].reporters = r.n; });
-  const b = await env.DB.prepare("SELECT line, stn, COUNT(DISTINCT ipk) AS n, MAX(ts) AS last FROM line_msgs WHERE kind='delay' AND stn IS NOT NULL AND stn <> '' AND ts > ? AND ts <= ? AND line IN (" + ph + ")" + LR_HIDDEN_SQL + " GROUP BY line, stn ORDER BY n DESC, last DESC").bind(since, Date.now(), ...lines).all();
   (b.results || []).forEach((r) => { if (out[r.line] && out[r.line].stations.length < 5) out[r.line].stations.push({ stn: r.stn, n: r.n, last: r.last }); });
   return out;
 }
@@ -1918,6 +1936,7 @@ async function ensureUserPostCols(env) {
 }
 __name(ensureUserPostCols, "ensureUserPostCols");
 async function purgePostsCache(url) {
+  _MEM = Object.create(null);
   try {
     await caches.default.delete(new Request(url.origin + "/posts?limit=50"));
     for (const c of USER_POST_CATS) await caches.default.delete(new Request(url.origin + "/posts?limit=50&cat=" + encodeURIComponent(c)));
@@ -1937,9 +1956,12 @@ var worker_default = {
     })());
   },
   // 수동 테스트/상태 확인
-  async fetch(req, env) {
+  async fetch(req, env, ctx) {
+    _CTX = ctx || null;
+    if (req.method === "POST") _MEM = Object.create(null);   // 글·제보·댓글을 쓰면 이 격리의 메모리 스냅샷은 모두 버린다(바로 보이게)
     const url = new URL(req.url);
-    await holRefresh(env);
+    // ★ 2026-10-10: 공휴일 자료 읽기(D1 왕복 3번)가 모든 첫 요청을 막고 있었다 → 응답과 별개로 처리한다
+    try { if (ctx) ctx.waitUntil(holRefresh(env)); else holRefresh(env).catch(function () {}); } catch (e) {}
     const cors = {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
@@ -2007,6 +2029,9 @@ var worker_default = {
       //   적용한다(이전엔 Cache-Control 헤더만 있고 caches.default 저장/조회가 없어 매번
       //   D1까지 갔었음 — 게시판 진입 2~3초 지연의 주원인).
       const cacheKey = new Request(url.origin + "/posts?limit=" + limit + (cat ? "&cat=" + encodeURIComponent(cat) : ""));
+      // ★ 2026-10-10: workers.dev 에서는 엣지 캐시가 동작하지 않아 매 요청 D1 까지 갔다 → 같은 격리 안에서 15초 메모리 캐시
+      const memBody = memGet("posts:" + limit + ":" + (cat || ""), 15000);
+      if (memBody) return new Response(memBody, { headers: Object.assign({}, cors, { "Cache-Control": "public, s-maxage=30, max-age=15" }) });
       try {
         const hit = await caches.default.match(cacheKey);
         if (hit) return hit;
@@ -2017,13 +2042,14 @@ var worker_default = {
         //   SELECT하면 스키마가 조금만 달라도 500 에러가 난다. generatePosts의
         //   INSERT처럼 pragma_table_info로 실제 존재하는 컬럼만 골라서 SELECT한다.
         //   (2026-09-25: 매 요청 D1 왕복이던 걸 getCols로 10분 메모리캐시함)
-        const cols = await getCols(env, "posts");
+        const [cols, cmtCols] = await Promise.all([getCols(env, "posts"), getCols(env, "comments").catch(function () { return []; })]);   // ★ 2026-10-10: 차례로 → 동시에
         const want = ["id", "nick", "title", "body", "cat", "ts", "views", "likes", "lols", "sads", "link", "user"];
         const use = want.filter((c) => cols.indexOf(c) >= 0);
         if (!use.length) throw new Error("posts 테이블 컬럼을 찾을 수 없음");
         // ★ 2026-10-03: 목록의 💬 숫자가 글을 펼치기 전엔 항상 0이었다 → 올 때가 된 서버 댓글 수를 같이 내려준다
-        let hasCmt = false;
-        try { hasCmt = (await getCols(env, "comments")).length > 0; } catch (e) { hasCmt = false; }
+        const hasCmt = cmtCols.length > 0;
+        // ★ 2026-10-10: 목록의 💬 숫자(글마다 댓글 수 세기)가 빠르도록 댓글 표에 색인을 한 번 만들어 둔다(이미 있으면 아무 일 없음)
+        if (hasCmt && !_cmtIdxDone) { _cmtIdxDone = true; try { const pi = env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_comments_post ON comments (post_id, ts)").run().catch(function () {}); if (_CTX) _CTX.waitUntil(pi); } catch (e) {} }
         let sql = "SELECT " + use.join(",") + (hasCmt ? ", (SELECT COUNT(*) FROM comments c WHERE c.post_id = posts.id AND c.ts <= " + Date.now() + ") AS cmts" : "") + " FROM posts";
         const binds = [];
         const conds = [];
@@ -2037,7 +2063,9 @@ var worker_default = {
         sql += " ORDER BY id DESC LIMIT ?";
         binds.push(limit);
         const rs = await env.DB.prepare(sql).bind(...binds).all();
-        const res = new Response(JSON.stringify({ ok: true, posts: rs.results || [] }), {
+        const bodyStr = JSON.stringify({ ok: true, posts: rs.results || [] });
+        memPut("posts:" + limit + ":" + (cat || ""), bodyStr);
+        const res = new Response(bodyStr, {
           headers: Object.assign({}, cors, { "Cache-Control": "public, s-maxage=30, max-age=15" })
         });
         try { await caches.default.put(cacheKey, res.clone()); } catch (e) {}
@@ -2205,10 +2233,14 @@ var worker_default = {
       const since = parseInt(url.searchParams.get("since") || "0", 10) || 0;
       const limit = Math.min(60, Math.max(1, parseInt(url.searchParams.get("limit") || "30", 10)));
       const snapKey = new Request(url.origin + "/talks?snap=1");
-      let snap = null;
+      // ★ 2026-10-10: workers.dev 에서는 엣지 캐시(caches.default)가 동작하지 않는다(Cloudflare 문서: 사용자 지정 도메인에서만) →
+      //   같은 격리 안에서 5초간은 메모리 스냅샷을 쓴다.
+      let snap = memGet("talks", 5000);
       try {
-        const hit = await caches.default.match(snapKey);
-        if (hit) snap = await hit.json();
+        if (!snap) {
+          const hit = await caches.default.match(snapKey);
+          if (hit) snap = await hit.json();
+        }
       } catch (e) {
       }
       if (!snap) {
@@ -2219,11 +2251,13 @@ var worker_default = {
           const nowT = Date.now();
           const rs = await env.DB.prepare("SELECT * FROM (SELECT 'L' || id AS id, nick, text, ts, line FROM line_msgs WHERE kind='chat' AND ts <= ?1 AND ts > ?2" + LR_HIDDEN_SQL + " UNION ALL SELECT id, nick, text, ts, NULL AS line FROM talks WHERE ts <= ?1 AND ts > ?2) ORDER BY ts DESC LIMIT 100").bind(nowT, nowT - 6 * 3600 * 1000).all();
           snap = { talks: (rs.results || []).reverse() };
+          memPut("talks", snap);
           try {
             await caches.default.put(snapKey, new Response(JSON.stringify(snap), { headers: { "Content-Type": "application/json", "Cache-Control": "public, s-maxage=5" } }));
           } catch (e) {
           }
         } catch (e) {
+          if (/no such table/i.test(String(e && e.message)) && !_lrRetry) { _lrRetry = true; _lrReady = false; try { await ensureLineRoom(env, true); return await worker_default.fetch(req, env, ctx); } finally { _lrRetry = false; } }
           return new Response(JSON.stringify({ ok: false, error: e.message }), { status: 500, headers: cors });
         }
       }
@@ -2286,17 +2320,21 @@ var worker_default = {
       if (!lrLineOk(line)) return new Response(JSON.stringify({ ok: false, error: "line" }), { status: 400, headers: cors });
       const since = parseInt(url.searchParams.get("since") || "0", 10) || 0;
       const snapKey = new Request(url.origin + "/lroom?snap=1&line=" + encodeURIComponent(line));
-      let snap = null;
-      try { const hit = await caches.default.match(snapKey); if (hit) snap = await hit.json(); } catch (e) {}
+      let snap = memGet("lroom:" + line, 5000);
+      if (!snap) { try { const hit = await caches.default.match(snapKey); if (hit) snap = await hit.json(); } catch (e) {} }
       if (!snap) {
         try {
           await ensureLineRoom(env);
           const now = Date.now();
+          const alP = lrAlerts(env, [line]);   // ★ 2026-10-10: 대화와 지연 제보 집계를 동시에 읽는다
+          alP.catch(function () {});
           const rs = await env.DB.prepare("SELECT id, kind, nick, text, stn, ts FROM line_msgs WHERE line=?1 AND ts <= ?2 AND ts > ?3" + LR_HIDDEN_SQL + " ORDER BY ts DESC, id DESC LIMIT 80").bind(line, now, now - 24 * 3600 * 1000).all();   // ★ 2026-10-05: 화면에 보이는 기간 12시간→24시간(새벽에도 전날 저녁 대화가 남아 방이 비어 보이지 않게)
-          const al = await lrAlerts(env, [line]);
+          const al = await alP;
           snap = { msgs: (rs.results || []).reverse(), alert: al[line] || { reporters: 0, stations: [] } };
+          memPut("lroom:" + line, snap);
           try { await caches.default.put(snapKey, new Response(JSON.stringify(snap), { headers: { "Content-Type": "application/json", "Cache-Control": "public, s-maxage=5" } })); } catch (e) {}
         } catch (e) {
+          if (/no such table/i.test(String(e && e.message)) && !_lrRetry) { _lrRetry = true; _lrReady = false; try { await ensureLineRoom(env, true); return await worker_default.fetch(req, env, ctx); } finally { _lrRetry = false; } }
           return new Response(JSON.stringify({ ok: false, error: e.message }), { status: 500, headers: cors });
         }
       }
@@ -2315,6 +2353,7 @@ var worker_default = {
         try { await caches.default.put(key, res.clone()); } catch (e) {}
         return res;
       } catch (e) {
+        if (/no such table/i.test(String(e && e.message)) && !_lrRetry) { _lrRetry = true; _lrReady = false; try { await ensureLineRoom(env, true); return await worker_default.fetch(req, env, ctx); } finally { _lrRetry = false; } }
         return new Response(JSON.stringify({ ok: false, error: e.message }), { status: 500, headers: cors });
       }
     }
