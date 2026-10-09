@@ -525,23 +525,25 @@ function ymdOf(d) { return d.getUTCFullYear() + "-" + _p2(d.getUTCMonth() + 1) +
 // ★ 2026-10-09: 공휴일 단일 출처 — 엔진(route-v2)의 /holidays 가 매일 새벽 정부 특일 API 등을 대조해 갱신한다.
 //   여기 표(HOLIDAY_NAMES)는 그 자료를 못 받을 때의 예비다. 받은 자료에 있는 해는 그것만 믿는다(대체공휴일·임시공휴일 포함).
 var HOLIDAY_LIVE = null, HOLIDAY_LIVE_AT = 0, HOLIDAY_LIVE_TRY = 0;
-var HOLIDAY_SRC_URL = "https://route-v2.phg0643.workers.dev/holidays";
+// 같은 계정의 워커끼리는 workers.dev 주소로 부를 수 없어(404) 엔진을 직접 부르지 않는다. 대신 갱신 워크플로(refresh-holidays.yml)가 KV 에 올릴 때
+// D1(subway-db)의 holidays_live 표에도 같은 JSON 을 넣어 두고, 여기서는 그것을 읽는다.
 async function holRefresh(env) {
   const now = Date.now();
   if (now - HOLIDAY_LIVE_AT < 6 * 3600e3 || now - HOLIDAY_LIVE_TRY < 10 * 60e3) return;
   HOLIDAY_LIVE_TRY = now;
   try {
-    const ac = new AbortController(), tm = setTimeout(function () { ac.abort(); }, 4000);
-    let r; try { r = await fetch(HOLIDAY_SRC_URL, { signal: ac.signal }); } finally { clearTimeout(tm); }
-    if (!r.ok) { if (env) await bwDiag(env, "holidays", { ok: false, status: r.status }); return; }
-    const o = await r.json();
-    if (!o || !o.years || typeof o.years !== "object") { if (env) await bwDiag(env, "holidays", { ok: false, bad: "shape" }); return; }
+    if (!env || !env.DB) return;
+    await env.DB.prepare("CREATE TABLE IF NOT EXISTS holidays_live (k TEXT PRIMARY KEY, v TEXT NOT NULL, ts INTEGER)").run();
+    const row = await env.DB.prepare("SELECT v FROM holidays_live WHERE k = 'nt:holidays:v1'").first();
+    if (!row || !row.v) { await bwDiag(env, "holidays", { ok: false, bad: "nodata" }); return; }
+    const o = JSON.parse(row.v);
+    if (!o || !o.years || typeof o.years !== "object") { await bwDiag(env, "holidays", { ok: false, bad: "shape" }); return; }
     const yrs = {};
     for (const y in o.years) { const ye = o.years[y]; if (ye && ye.dates && typeof ye.dates === "object") yrs[y] = ye.dates; }
-    if (!Object.keys(yrs).length) { if (env) await bwDiag(env, "holidays", { ok: false, bad: "empty" }); return; }
+    if (!Object.keys(yrs).length) { await bwDiag(env, "holidays", { ok: false, bad: "empty" }); return; }
     HOLIDAY_LIVE = yrs; HOLIDAY_LIVE_AT = now;
-    if (env) await bwDiag(env, "holidays", { ok: true, src: o.src, ver: o.version, years: Object.keys(yrs) });
-  } catch (e) { if (env) await bwDiag(env, "holidays", { ok: false, err: String(e && e.message || e).slice(0, 120) }); /* 예비 표를 그대로 쓴다 */ }
+    await bwDiag(env, "holidays", { ok: true, src: o.src, ver: o.version, years: Object.keys(yrs) });
+  } catch (e) { try { await bwDiag(env, "holidays", { ok: false, err: String(e && e.message || e).slice(0, 120) }); } catch (e2) {} /* 예비 표를 그대로 쓴다 */ }
 }
 __name(holRefresh, "holRefresh");
 function holidayName(ymd) {
