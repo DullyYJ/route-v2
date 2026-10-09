@@ -526,21 +526,22 @@ function ymdOf(d) { return d.getUTCFullYear() + "-" + _p2(d.getUTCMonth() + 1) +
 //   여기 표(HOLIDAY_NAMES)는 그 자료를 못 받을 때의 예비다. 받은 자료에 있는 해는 그것만 믿는다(대체공휴일·임시공휴일 포함).
 var HOLIDAY_LIVE = null, HOLIDAY_LIVE_AT = 0, HOLIDAY_LIVE_TRY = 0;
 var HOLIDAY_SRC_URL = "https://route-v2.phg0643.workers.dev/holidays";
-async function holRefresh() {
+async function holRefresh(env) {
   const now = Date.now();
   if (now - HOLIDAY_LIVE_AT < 6 * 3600e3 || now - HOLIDAY_LIVE_TRY < 10 * 60e3) return;
   HOLIDAY_LIVE_TRY = now;
   try {
     const ac = new AbortController(), tm = setTimeout(function () { ac.abort(); }, 4000);
     let r; try { r = await fetch(HOLIDAY_SRC_URL, { signal: ac.signal }); } finally { clearTimeout(tm); }
-    if (!r.ok) return;
+    if (!r.ok) { if (env) await bwDiag(env, "holidays", { ok: false, status: r.status }); return; }
     const o = await r.json();
-    if (!o || !o.years || typeof o.years !== "object") return;
+    if (!o || !o.years || typeof o.years !== "object") { if (env) await bwDiag(env, "holidays", { ok: false, bad: "shape" }); return; }
     const yrs = {};
     for (const y in o.years) { const ye = o.years[y]; if (ye && ye.dates && typeof ye.dates === "object") yrs[y] = ye.dates; }
-    if (!Object.keys(yrs).length) return;
+    if (!Object.keys(yrs).length) { if (env) await bwDiag(env, "holidays", { ok: false, bad: "empty" }); return; }
     HOLIDAY_LIVE = yrs; HOLIDAY_LIVE_AT = now;
-  } catch (e) { /* 예비 표를 그대로 쓴다 */ }
+    if (env) await bwDiag(env, "holidays", { ok: true, src: o.src, ver: o.version, years: Object.keys(yrs) });
+  } catch (e) { if (env) await bwDiag(env, "holidays", { ok: false, err: String(e && e.message || e).slice(0, 120) }); /* 예비 표를 그대로 쓴다 */ }
 }
 __name(holRefresh, "holRefresh");
 function holidayName(ymd) {
@@ -1927,7 +1928,7 @@ var worker_default = {
     ctx.waitUntil((async () => { try { await ensureLineRoom(env); await env.DB.prepare("DELETE FROM line_msgs WHERE ts < ?1").bind(Date.now() - 14 * 24 * 3600 * 1000).run(); await env.DB.prepare("DELETE FROM line_reports WHERE ts < ?1").bind(Date.now() - 14 * 24 * 3600 * 1000).run(); await env.DB.prepare("DELETE FROM line_msgs WHERE ipk = 'ai' AND ts < ?1").bind(Date.now() - 2 * 24 * 3600 * 1000).run(); } catch (e) {} })());
     // ★ 2026-10-05: 게시판 글·댓글을 먼저, 호선 방은 그 다음 — Gemini 가 모자랄 때 게시판이 굶지 않게 한다. 하나가 실패해도 다음 단계는 계속한다.
     ctx.waitUntil((async () => {
-      await holRefresh();
+      await holRefresh(env);
       try { console.log("[board-writer][posts]", JSON.stringify(await generatePosts(env))); } catch (e) { console.log("[board-writer][posts] 실패:", e && e.message); }
       try { console.log("[board-writer][comments]", JSON.stringify(await generateComments(env))); } catch (e) { console.log("[board-writer][comments] 실패:", e && e.message); }
       try { console.log("[board-writer][linetalks]", JSON.stringify(await generateLineTalks(env))); } catch (e) { console.log("[board-writer][linetalks] 실패:", e && e.message); }
@@ -1936,7 +1937,7 @@ var worker_default = {
   // 수동 테스트/상태 확인
   async fetch(req, env) {
     const url = new URL(req.url);
-    await holRefresh();
+    await holRefresh(env);
     const cors = {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
