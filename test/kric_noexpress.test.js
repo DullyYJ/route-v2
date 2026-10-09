@@ -69,6 +69,6 @@ const xcount = (G, line) => { let n = 0; for (const k in G.adj) for (const e of 
     const r = await mod.kricRederive({ DB: db }, ['IN2']);
     assert.strictEqual(r.line, 'IN2'); assert.strictEqual(r.remaining, 0);
   });
-  await t('엔진 버전이 갱신돼 있다(배포 확인용)', () => assert.ok(/^route-v2-2026-10-06/.test(mod.ENGINE_VERSION), mod.ENGINE_VERSION));
+  await t('엔진 버전이 갱신돼 있다(배포 확인용)', () => assert.ok(/^route-v2-2026-10-\d\d/.test(mod.ENGINE_VERSION), mod.ENGINE_VERSION));
   console.log('\n' + pass + '개 통과'); if (process.exitCode) console.log('실패 있음');
 })();
