@@ -430,7 +430,7 @@ async function geminiUsed24h(env) {
   return n;
 }
 __name(geminiUsed24h, "geminiUsed24h");
-var GEMINI_TALK_BUDGET = 8;   // 소통방이 24시간에 쓸 수 있는 gemini-* 호출 수(무료 한도 ≈20 중 나머지는 게시글·댓글 몫)
+var GEMINI_TALK_BUDGET = 40;   // 소통방이 24시간에 쓸 수 있는 gemini-* 호출 수. 배포 뒤 실측: gemini-flash-lite-latest 가 따로 잡힌 한도로 응답(Gemma 는 이 키에서 쓰이지 않음) → 8회는 너무 빡빡해 소통방이 다시 멈출 수 있다. 모델별 429 는 다음 모델로 넘어간다
 async function gemFetch(env, ms, init, order) {
   let last = null, attempted = 0;
   const tried = [];
