@@ -17,7 +17,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-09s18";
+var ENGINE_VERSION = "route-v2-2026-10-11s19";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -1563,6 +1563,14 @@ function dijkstraRaw(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
     }
   } catch (e) {
   }
+  try {
+    const _lc = collapseLeapfrog(legs, G, accessSec);
+    if (_lc && _lc.kind) {
+      real += _lc.delta;
+      xf -= _lc.dxf;
+    }
+  } catch (e) {
+  }
   const _svcWarn = svcAtBoard(G, legs, accessSec);
   for (const L of legs) {
     if (L.mode !== "bus" && L.mode !== "subway") continue;
@@ -1627,6 +1635,103 @@ function dijkstraRaw(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
 }
 __name(dijkstra, "dijkstra");
 __name2(dijkstra, "dijkstra");
+var LEAP_TOL_SEC = 180;
+function collapseLeapfrog(legs, G, accessSec) {
+  const out = { delta: 0, dxf: 0, kind: null };
+  try {
+    if (!legs || !G || !G.routeStops) return out;
+    let i0 = -1;
+    for (let i = 0; i < legs.length; i++) {
+      if (legs[i].mode === "walk") continue;
+      i0 = i;
+      break;
+    }
+    if (i0 < 0 || legs[i0].mode !== "bus") return out;
+    const L1 = legs[i0];
+    let k = -1, walks = 0;
+    for (let j = i0 + 1; j < legs.length; j++) {
+      if (legs[j].mode === "walk") {
+        walks++;
+        continue;
+      }
+      k = j;
+      break;
+    }
+    if (k < 0) return out;
+    const L2 = legs[k];
+    if (L2.mode !== "bus" || !L2.line || L2.line === L1.line) return out;
+    if (!L1.coordList || !L1.coordList[0] || !L2.coordList || L2.coordList.length < 2) return out;
+    if (isCircularRoute(G, L2.line)) return out;
+    const arr = G.routeStops[L2.line];
+    if (!arr || arr.length < 3) return out;
+    const at = (c) => {
+      if (!c) return -1;
+      for (let q = 0; q < arr.length; q++) if (arr[q].lat != null && Math.abs(arr[q].lat - c[0]) < 1e-5 && Math.abs(arr[q].lng - c[1]) < 1e-5) return q;
+      return -1;
+    };
+    const iS = at(L1.coordList[0]);
+    const iX = at(L2.coordList[0]);
+    const iA = at(L2.coordList[L2.coordList.length - 1]);
+    if (iS < 0 || iX <= iS || iA <= iX) return out;
+    const nL2 = L2.coordList.length - 1;
+    const lastSec = L2.secList && L2.secList[nL2] != null ? L2.secList[nL2] : Math.max(0, (L2.sec || 0) - (L2.waitSec || 0));
+    const per = lastSec / Math.max(1, nL2);
+    const tSX = per * (iX - iS);
+    const sidS = arr[iS].node_id;
+    const walkSum = legs.slice(i0 + 1, k).reduce((a, L) => a + (L.sec || 0), 0);
+    const oldSec = legs.slice(i0, k + 1).reduce((a, L) => a + (L.sec || 0), 0);
+    const tX = (L1.sec || 0) + walkSum;
+    const no = G.routeNoOf ? G.routeNoOf[L2.line] : null;
+    const LV = sidS && G.live ? G.live[stopNorm(sidS)] : null;
+    const list = LV && no ? LV[no] || LV[noKey(no)] : null;
+    const acc = accessSec || 0;
+    let consWait = L2.waitSec || 0;
+    if (Array.isArray(list) && list.length) {
+      const rel = list.map((v) => v - acc);
+      const hw = rel.length > 1 ? Math.max(120, rel[1] - rel[0]) : Math.max(240, (G.routeWait && G.routeWait[L2.line] != null ? G.routeWait[L2.line] : BUS_WAIT) * 2);
+      const cands = [rel[0] - 2 * hw, rel[0] - hw].filter((v) => v < CATCH_BUFFER_SEC).concat(rel);
+      let best = null;
+      for (const r of cands) {
+        const reach = r + tSX;
+        if (reach >= tX + CATCH_BUFFER_SEC && (best == null || reach < best)) best = reach;
+      }
+      if (best != null) consWait = Math.max(0, best - tX);
+    }
+    const w2 = busWaitAt(G, L2.line, sidS);
+    const wsrc = G.__waitSrc || "";
+    const wreal = wsrc === "\uC2E4\uCE21" || wsrc === "rtw";
+    const altSec = w2 + tSX + lastSec;
+    const curSec = (L1.sec || 0) + walkSum + consWait + lastSec;
+    if (altSec <= curSec + LEAP_TOL_SEC) {
+      const stops = arr.slice(iS, iA + 1);
+      const sl = [], cl = [], sc = [];
+      for (let q = 0; q < stops.length; q++) {
+        sl.push(stops[q].node_nm || (G.busNm && G.busNm[stops[q].node_id]) || stops[q].node_id);
+        cl.push(stops[q].lat == null ? null : [stops[q].lat, stops[q].lng]);
+        sc.push(q <= iX - iS ? per * q : tSX + (L2.secList && L2.secList[q - (iX - iS)] != null ? L2.secList[q - (iX - iS)] : per * (q - (iX - iS))));
+      }
+      const nl = Object.assign({}, L2, { from: sl[0], to: sl[sl.length - 1], stopList: sl, coordList: cl, secList: sc, sec: w2 + tSX + lastSec, waitSec: w2, waitReal: wreal, waitSrc: wsrc, waitUnknown: !wreal, waitMissed: false, waitEstimated: false, boardStopId: sidS || null, _busXfer: false, fixed: false });
+      legs.splice(i0, k - i0 + 1, nl);
+      out.delta = nl.sec - oldSec;
+      out.dxf = (L2._busXfer ? 1 : 0) + walks;
+      out.kind = "collapse";
+      G.__leapLog = (G.__leapLog || []).concat([(L1.busNo || L1.line) + "\u2192" + (L2.busNo || L2.line) + " \uC9C1\uD589 " + Math.round(altSec) + "s vs \uD658\uC2B9 " + Math.round(curSec) + "s"]);
+      return out;
+    }
+    if (consWait > (L2.waitSec || 0) + 30) {
+      const d = consWait - (L2.waitSec || 0);
+      L2.waitSec = consWait;
+      L2.sec = (L2.sec || 0) + d;
+      L2.waitReal = false;
+      L2.waitEstimated = true;
+      out.delta = d;
+      out.kind = "raise";
+    }
+  } catch (e) {
+  }
+  return out;
+}
+__name(collapseLeapfrog, "collapseLeapfrog");
 var ALIGHT_MAX_WALK = 800;
 var ALIGHT_NAME_BONUS = 240;
 var ALIGHT_MIN_GAIN = 60;
