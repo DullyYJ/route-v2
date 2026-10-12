@@ -17,7 +17,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-12a";
+var ENGINE_VERSION = "route-v2-2026-10-12b";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -7582,7 +7582,9 @@ var RIDE_ETA_DEFAULTS = {
   // 기지국 선행 통과는 실제 통과보다 1~3분 이르다.
   cellLeadMinSec: 60, cellLeadMaxSec: 180,
   // GPS 통과: 가장 가까웠던 순간 ±15초
-  gpsTolSec: 15,
+  gpsTolSec: 25,      // 2026-10-12: 15 → 25 (역 근처 확인 좌표의 시각 오차를 넉넉히: 정확도 60m 이내 좌표 + 반경 90~160m 최근접 판정)
+  // 2026-10-12 (YJ: 시각이 1~2분씩 계속 바뀌어 보인다): 앱이 마지막으로 그린 지연 수준(prevLevelMin)과 새 수준 차이가 이 값(분) 안이면 그린 값을 유지한다. 새 통과 증거가 실제로 어긋남을 보일 때만 시각이 움직인다.
+  levelDeadbandMin: 0.4,
   // 움직임 시작(src 'move'): 앱이 위치 궤적에서 '달리기가 시작된 때'를 되짚어 찍은 값(앱: 탑승 증거가 선 시각 − 60초). 증거가 서는 때는 출발 뒤 25~120초라
   //   찍힌 값은 실제 출발보다 −35~+60초(이르거나 늦다)에 놓이고, 문턱 근처 오차 ±10초. (실측 전의 가정 — 실차 기록으로 보정할 값)
   moveLagMinSec: -35, moveLagMaxSec: 60, moveTolSec: 10,
@@ -7811,6 +7813,10 @@ function rideEta(input) {
   }
   var anchor = ps[ps.length - 1];
   var level = legLevel[legOf[anchor.idx]];
+  if (input.prevLevelMin != null && isFinite(+input.prevLevelMin) && O.levelDeadbandMin > 0 && !(input.prevAnchorIdx > anchor.idx) && Math.abs(level - +input.prevLevelMin) < O.levelDeadbandMin && Math.abs(level - +input.prevLevelMin) > 1e-6) {
+    notes.push('지연 수준 ' + (Math.round(level * 100) / 100) + '분은 그려진 값(' + (Math.round(+input.prevLevelMin * 100) / 100) + '분)과 ' + O.levelDeadbandMin + '분 안이라 유지');
+    level = +input.prevLevelMin;
+  }
   if (legKeys.length > 1) notes.push('앞 구간 ' + (legKeys.length - 1) + '개는 자기 구간 통과만으로 고정(뒤 구간 지연에 안 끌려감)');
 
   // ── 7. 노드별 시각 만들기
@@ -8103,7 +8109,6 @@ function handleRideEta(request) {
   }, function () { return new Response(JSON.stringify({ error: 'JSON 아님' }), { status: 400, headers: H }); });
 }
 
-
 // ===== ride-eta 끝 =====
 // ===== ride-track (경로 이탈·타고 있는 차·못 탔다·승차 안 함 판정 엔진) 시작 =====
 // 길동무 — 탑승 중 경로 추적 판정 모듈 (route-v2 Worker 에 붙여 넣는 순수 함수)
@@ -8138,7 +8143,7 @@ var RIDE_TRACK_DEFAULTS = {
   offMinFixes: 4,         // 그 시간 안에 필요한 서로 다른 좌표 수(좌표가 같은 값으로 반복되면 한 번으로 센다 = 끊긴 GPS)
   offMinSpanSec: 50,      // 첫 좌표와 마지막 좌표가 이만큼 떨어져 있어야 한다(순간 오차 무시)
   // 진행도가 지하철 노드일 때: 지하 진입 직전 튄 좌표와 구분해야 하므로 더 엄격하게. 지상에서 확실히 움직이는 좌표가 충분히 있을 때만 이탈로 본다.
-  subWinSec: 100, subMinFixes: 6, subMinSpanSec: 80, subMinMoveM: 150, subMaxAcc: 60,
+  subWinSec: 100, subMinFixes: 6, subMinSpanSec: 80, subMinMoveM: 90, subMaxAcc: 60,
   freshSec: 25,           // 마지막 좌표가 이보다 오래됐으면 '끊긴 GPS' — 이탈도 못 탔다는 증명도 하지 않는다
   maxAcc: 120,            // 정확도가 이보다 나쁜 좌표는 쓰지 않는다
   // 타고 있는 차 찾기(예전 _matchRiddenRoute): 지나온 길 평균/최대/현재 위치가 후보 경로선에서 떨어진 거리(m)
