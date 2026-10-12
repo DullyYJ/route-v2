@@ -17,7 +17,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-12b";
+var ENGINE_VERSION = "route-v2-2026-10-12c";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -8212,6 +8212,7 @@ function rtOff(P, tr, O) {
   var plan = P.plan || {}, now = P.nowMs;
   var res = { confirmed: false, distM: null, n: 0, spanSec: 0, why: '' };
   if (plan.suppress && plan.suppress.length) { res.why = 'suppressed:' + plan.suppress.join(','); return res; }
+  if (plan.subConfirmed === true) { res.why = 'sub_confirmed'; return res; }          // 2026-10-12: 지하철 탑승이 확정이면 이탈 판정을 하지 않는다(YJ)
   if (plan.notDeparted) { res.why = 'not_departed'; return res; }
   var pts = plan.pts || [];
   if (pts.length < 2) { res.why = 'no_path'; return res; }
@@ -8269,6 +8270,7 @@ function rtTrailFit(pts, tr) {
 function rtRidden(P, tr, O, vehNow) {
   var cands = P.cands || [], plan = P.plan || {}, now = P.nowMs;
   if (cands.length < 2) return null;
+  if (plan.subConfirmed === true) return null;                         // 2026-10-12: 지하철 탑승이 확정이면 다른 후보 경로로 갈아타지 않는다(YJ)
   var onVeh = plan.boarded === true || plan.riding === true || vehNow;
   if (!onVeh) return null;                                           // 걷고 있으면 맞추지 않는다(재탐색)
   var from = Math.max(plan.startMs ? plan.startMs - 30000 : 0, now - O.rideWinSec * 1000);
