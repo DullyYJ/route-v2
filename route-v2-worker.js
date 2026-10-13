@@ -18,7 +18,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-13s11";
+var ENGINE_VERSION = "route-v2-2026-10-13s12";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -8779,6 +8779,7 @@ function handleRideTrack(request) {
 //           stops: [{i,lat,lng,arrMs,fin?,pass?,bus?}…]   영점용 정류장(앱 _arrEndStops) — arrMs 는 엔진이 매번 최신 도착 시각(etaMs)으로 맞춘다.
 //           trail: [[ts,lat,lng,acc?]…]                    최근 궤적(엔진이 fixes 를 덧붙이고 60개·10분으로 자른다).
 //           cfg:   { targets:[{seqPos,nodeIdx,name,kind,nextLine?}…], seq:[노드번호…], allowed:{type:bool}, destName }   하차·환승 알림 대상(앱 _buildTransitAlertTargets)
+//           ovl:   { cells:[…], map:[…], base, theme }       오버레이 그림 틀(웹이 앱 경로 화면에서 읽은 칸 — 선택)
 //           fired: {"노드_남은정거장":1}                    이미 보낸 알림
 //           notYet:{노드번호:ms}, etaMs:[…], arrivedAt?, steps }
 //       }
@@ -8786,6 +8787,8 @@ function handleRideTrack(request) {
 //         ongoing:{title,text}      알림창의 상주 알림에 그릴 문구,
 //         alert:null|{key,type,title,body,vib:[ms…]}   지금 울릴 알림 하나(같은 순간에 걸린 나머지는 보낸 것으로 처리),
 //         done:bool                 안내를 끝내도 된다(목적지 도착 알림 뒤 3분),
+//         overlay:null|{…}          네이티브 오버레이에 그릴 값(OverlayPlugin.update 와 같은 모양 — state.ovl 그림 틀이 있을 때만),
+//         view:{text,line1,line2,curIdx,at}   앱을 다시 열었을 때 보여 줄 마지막 상태,
 //         zero:{…}                  ride-track 영점 결과(진단용), notes:[…] }
 //
 // 이 파일은 ride-track.js · ride-eta.js 의 rideTrack · rideEta 를 쓴다(Worker 에서는 같은 범위의 함수, Node 시험에서는 require).
@@ -8837,6 +8840,50 @@ function rsAlerts(cfg, fired, curIdx, etaMs, now) {
     else { title = '목적지 도착'; body = tg.name + '에 도착했습니다. 수고하셨어요'; vib = [300, 100, 300, 100, 300]; }
   }
   return { alert: { key: d.key, type: d.type, title: title, body: body, vib: vib }, extra: due.slice(1).map(function (x) { return x.key; }), curPos: curPos };
+}
+
+// ── 오버레이(앱 경로 화면과 같은 칸 줄) ─────────────────────────────────────────────
+// ★ 2026-10-13 (YJ: "카카오 방식 — 앱이 사라져도 네이티브가 안내를 그린다"): 웹이 사라진 동안 네이티브 오버레이가 그릴 값을 엔진이 만든다.
+//   state.ovl = { cells:[앱 타임라인 칸(n·t·g·gp·gc·lc·rc·dc·dk + m(이동 중 문구))], map:[칸→노드 번호 또는 -1], theme:{bg,fg,sub} } 는 웹이 맡겨 둔 '그림 틀'(색·이름·노선 라벨)이고,
+//   엔진은 시각(t)·현위치 칸(cur)·이동 중(moving)·알약 문구·남은시간 줄·하차 임박 단계(alert)·[안내 종료] 줄(rs)만 채운다. 출력은 OverlayPlugin.update 가 받는 모양 그대로다.
+function rsOverlay(st, r, curIdx, curPos, now, dest, destName, moving, done) {
+  var ov = st.ovl;
+  if (done) return { active: false };
+  if (!ov || !ov.cells || !ov.cells.length) return null;
+  var map = ov.map || [], cells = [], j, cur = -1, firstNode = -1;
+  for (j = 0; j < ov.cells.length; j++) {
+    var c = rsClone(ov.cells[j]), ni = map[j] != null ? map[j] : -1;
+    if (ni >= 0 && r.arr && r.arr[ni]) c.t = r.arr[ni];
+    cells.push(c);
+    if (ni >= 0) { if (firstNode < 0) firstNode = j; if (ni <= curIdx) cur = j; }
+  }
+  if (cur < 0) cur = firstNode >= 0 ? firstNode : 0;
+  var nextJ = -1;
+  for (j = cur + 1; j < cells.length; j++) if (map[j] != null && map[j] >= 0) { nextJ = j; break; }
+  var cn = cells[cur] ? cells[cur].n : '', nn = nextJ >= 0 ? cells[nextJ].n : '';
+  var line1 = nn ? cn + ' ▸ ' + nn : '● ' + cn;
+  var pill = (moving && nextJ >= 0) ? (cells[nextJ].m || '') : '';
+  // 남은시간 줄 — 목적지 도착 시각 기준
+  var p2 = function (n) { return (n < 10 ? '0' : '') + n; }, line2 = '';
+  var dn = dest ? dest.nodeIdx : -1;
+  if (dn >= 0 && r.etaMs && r.etaMs[dn] != null) {
+    var mm = Math.max(0, Math.round((r.etaMs[dn] - now) / 60000));
+    line2 = '남은시간: ' + p2(Math.floor(mm / 60)) + '시간 ' + p2(mm % 60) + '분' + (r.arr && r.arr[dn] ? ' · ' + r.arr[dn] + '도착' : '');
+  }
+  // 하차 임박 단계: 환승·목적지 2정거장 전 = 2, 1정거장 전 = 1 (앱 _ovlAlertLevel 과 같은 규칙), 목적지 3정거장 전 = pre
+  var lv = 0, pre = 0, tg = (st.cfg && st.cfg.targets) || [], i;
+  for (i = 0; i < tg.length; i++) {
+    var rem = tg[i].seqPos - curPos;
+    if (curPos >= 0 && (rem === 1 || rem === 2)) lv = lv ? Math.min(lv, rem) : rem;
+    if (curPos >= 0 && tg[i].kind === 'dest' && rem === 3) pre = 1;
+  }
+  var oa = st.ovlAlert || (st.ovlAlert = { lv: 0, at: 0 });
+  if (oa.lv !== lv) { oa.lv = lv; if (lv > 0) oa.at = now; }
+  var arrived = !!(dest && curPos >= dest.seqPos);
+  var rs = arrived ? { st: 'board', bt: '안내 종료', k: '목적지에 도착했어요', ch: '도착', nm: destName || '', bar: -1, cbg: '', cfg: '#0a84ff' } : { st: 'hidden' };
+  var out = { active: true, line1: line1, pill: pill, track: [], cur: cur, base: ov.base || 0, line2: line2, line3: '', alert: arrived ? 0 : lv, alertAt: oa.at || 0, alertVibe: false, pre: !arrived && pre === 1, moving: !!moving, rs: rs, reco: { on: false }, cells: cells };
+  if (ov.theme) out.theme = ov.theme;
+  return out;
 }
 
 function rideStandby(req) {
@@ -8900,21 +8947,28 @@ function rideStandby(req) {
   if (st.arrivedAt && now - st.arrivedAt >= O.doneAfterSec * 1000) { done = true; notes.push('목적지 도착 ' + O.doneAfterSec + '초 뒤 종료'); }
   var lastAt = st.lastAt || now; if (now - lastAt > O.maxStaleSec * 1000) done = true;
   st.lastAt = now;
-  return { v: 1, state: st, ongoing: { title: O.ongoingTitle, text: text }, alert: al.alert, done: done, curIdx: curIdx, zero: zero, notes: notes };
+  var moving = !!(r.pos && r.pos.moving), overlay = null;
+  try { overlay = rsOverlay(st, r, curIdx, al.curPos, now, dest, cfg.destName || (dest && dest.name) || '', moving, done); } catch (eOv) { notes.push('오버레이 계산 실패: ' + (eOv && eOv.message)); }
+  var view = { text: text, line1: overlay && overlay.line1 || '', line2: overlay && overlay.line2 || '', curIdx: curIdx, at: now };
+  return { v: 1, state: st, ongoing: { title: O.ongoingTitle, text: text }, alert: al.alert, done: done, curIdx: curIdx, overlay: overlay, view: view, zero: zero, notes: notes };
 }
 
 function handleRideStandby(request) {
   var H = { 'content-type': 'application/json', 'access-control-allow-origin': '*', 'access-control-allow-methods': 'POST, OPTIONS', 'access-control-allow-headers': 'content-type' };
   if (request.method === 'OPTIONS') return Promise.resolve(new Response(null, { status: 204, headers: H }));
   if (request.method !== 'POST') return Promise.resolve(new Response(JSON.stringify({ error: 'POST only' }), { status: 405, headers: H }));
-  return request.json().then(function (body) {
-    var out;
+  // ★ 2026-10-13: 네이티브는 5초마다 상태(그림 틀 포함)를 보낸다 — 데이터를 아끼려고 gzip 으로 눌러 보낼 수 있다(앞 두 바이트 1f 8b 로 알아본다. 엣지가 이미 풀어 줬어도 그대로 읽는다).
+  return request.arrayBuffer().then(function (buf) {
+    var u8 = new Uint8Array(buf);
+    if (u8.length > 2 && u8[0] === 0x1f && u8[1] === 0x8b && typeof DecompressionStream === 'function') return new Response(new Blob([u8]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
+    return new TextDecoder().decode(u8);
+  }).then(function (txt) {
+    var body, out;
+    try { body = JSON.parse(txt); } catch (e0) { return new Response(JSON.stringify({ error: 'JSON 아님' }), { status: 400, headers: H }); }
     try { out = rideStandby(body); } catch (e) { return new Response(JSON.stringify({ error: String(e && e.message || e) }), { status: 500, headers: H }); }
     return new Response(JSON.stringify(out), { headers: H });
-  }, function () { return new Response(JSON.stringify({ error: 'JSON 아님' }), { status: 400, headers: H }); });
+  }, function () { return new Response(JSON.stringify({ error: '요청을 읽지 못함' }), { status: 400, headers: H }); });
 }
-
-
 // ===== ride-standby 끝 =====
 // ===== next-train 시작 =====
 // 길동무 — 공휴일 내장본 (tools/holidays/gen_embed.js 로 생성; 직접 고치지 않는다)
