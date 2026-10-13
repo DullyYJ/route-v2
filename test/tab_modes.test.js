@@ -4,7 +4,7 @@
 const fs = require('fs'), assert = require('assert'), path = require('path');
 let src = fs.readFileSync(process.argv[2] || path.join(__dirname, '..', 'route-v2-worker.js'), 'utf8');
 const ei = src.lastIndexOf('\nexport {'); assert.ok(ei > 0); src = src.slice(0, ei) + '\n';
-const mod = new Function('fetch', 'caches', src + '\nreturn { buildSubway, addBus, dijkstra, subwayTabRoute, ENGINE_VERSION, XPEN, WPEN };')(async () => ({}), undefined);
+const mod = new Function('fetch', 'caches', src + '\nreturn { buildSubway, addBus, dijkstra, subwayTabRoute, ENGINE_VERSION, XPEN, WPEN, pickMinTransfer };')(async () => ({}), undefined);
 let fail = 0; const t = (n, f) => { try { f(); console.log('  ok  ', n); } catch (e) { fail++; console.log('  FAIL', n, '\n      ', e.message.split('\n')[0]); } };
 
 const KM = 1 / 111.0;   // 위도 1km ≈ 0.009°
@@ -127,6 +127,17 @@ t('새벽A148(운행시각 없음)은 저녁 7시에 안 나오고, 새벽 4시�
   assert.strictEqual(mk(Date.UTC(2026, 9, 13, 10, 20)), null, '19:20 KST 에는 새벽버스가 없어야 한다');
   const dawn = mk(Date.UTC(2026, 9, 12, 19, 10));   // 04:10 KST
   assert.ok(dawn && nBus(dawn) >= 1, '04:10 KST 에는 새벽버스가 다닌다');
+});
+
+
+// ── 최소환승 후보 고르기: 환승 수가 확정된 경로들 중 환승 적은 순 → 빠른 순, 처음 걷기 20분 초과는 제외
+t('pickMinTransfer: 환승 적은 쪽, 같으면 빠른 쪽, 너무 오래 걷는 경로는 제외', () => {
+  const R = (transfers, totalMin, accessWalkMin) => ({ transfers, totalMin, accessWalkMin });
+  assert.strictEqual(mod.pickMinTransfer([R(1, 47, 1), R(0, 26, 1)]).totalMin, 26);          // 직행이 있으면 그것
+  assert.strictEqual(mod.pickMinTransfer([R(1, 50, 1), R(1, 40, 1)]).totalMin, 40);           // 환승 같으면 빠른 쪽
+  assert.strictEqual(mod.pickMinTransfer([R(0, 70, 53), R(1, 60, 2)]).totalMin, 60);          // 53분 걷는 0환승은 제외
+  assert.strictEqual(mod.pickMinTransfer([R(0, 70, 53), R(1, 60, 40)]).transfers, 0);         // 전부 오래 걸으면 그대로 환승 적은 쪽
+  assert.strictEqual(mod.pickMinTransfer([null, null]), null);
 });
 
 console.log(fail ? fail + ' 실패' : '전부 통과', '(엔진 ' + mod.ENGINE_VERSION + ')'); process.exit(fail ? 1 : 0);

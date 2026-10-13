@@ -18,7 +18,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-13s3";
+var ENGINE_VERSION = "route-v2-2026-10-13s4";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -7034,6 +7034,21 @@ async function estimateCached(env, ctx, official, now) {
   return out;
 }
 __name(estimateCached, "estimateCached");
+// 최소환승 탭 경로 고르기. ★ 2026-10-13 (시뮬: 환승 0번 직행버스 26분이 있는데 최소환승 탭이 환승 1번 47분을 고름):
+//   탐색 중에는 같은 정류장에서 노선을 바꾸는 것도 환승 비용(XPEN)으로 세지만, 나중에 collapseLeapfrog 가 그걸 '그냥 계속 타는 것'으로 합쳐
+//   실제 환승은 0번이 된다. 그래서 환승 비용을 크게 둔 탐색이 이런 경로를 놓친다. 마무리된 경로(환승 수가 확정된 것)들 중에서 고른다:
+//   환승 수 적은 순 → 같으면 빠른 순. 처음 걷기가 너무 긴 경로(20분 초과)는 후보에서 뺀다(전부 길면 그대로 둔다).
+var LESS_WALK_MAX_MIN = 20;
+function pickMinTransfer(cands) {
+  const ok = (cands || []).filter((r) => r && r.totalMin != null && r.transfers != null);
+  if (!ok.length) return cands && cands[0] || null;
+  const elig = ok.filter((r) => (r.accessWalkMin || 0) <= LESS_WALK_MAX_MIN);
+  const pool = elig.length ? elig : ok;
+  let best = pool[0];
+  for (const r of pool) if (r.transfers < best.transfers || r.transfers === best.transfers && r.totalMin < best.totalMin) best = r;
+  return best;
+}
+__name(pickMinTransfer, "pickMinTransfer");
 // 지하철 탭 경로. ★ 2026-10-13 (YJ: "지하철 탭은 지하철만. 단 버스를 타야 하는 경우는 버스를 태워야지, 경로없음은 말이 안 된다"):
 //   ① 기본은 버스 없이 가까운 역까지 걸어가 지하철만 탄다(noBus).
 //   ② 가까운 역이 멀어(걸어서 12분 초과) 걷기가 길거나, 지하철만으로는 갈 수 없으면, 역까지 버스를 타는(버스+지하철) 경로를 쓴다.
@@ -7328,6 +7343,10 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
     for (const m of ["minTime", "minTransfer", "minWalk"]) o[m] = dijkstra(G, busCoord, busNm, SY, SX, EY, EX, m);
     o.subway = subwayTabRoute(G, busCoord, busNm, SY, SX, EY, EX);
     o.bus = dijkstra(G, busCoord, busNm, SY, SX, EY, EX, "minTime", { noSubway: true });
+    {
+      const _pm = pickMinTransfer([o.minTransfer, o.minTime, o.minWalk, o.subway, o.bus]);
+      if (_pm !== o.minTransfer) o.minTransfer = _pm ? JSON.parse(JSON.stringify(_pm)) : _pm;   // 같은 객체를 두 탭이 같이 쓰지 않게 복사
+    }
     return o;
   }, "_search");
   const _tS = Date.now();
