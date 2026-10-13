@@ -9,6 +9,7 @@ var _G = null;
 var WALK_MPS = 1.2;
 var B2S_WALK = 500;
 var B2B_WALK = 200;
+var HOP_WALK_M = 600;
 var ACCESS_WALK = 900;
 var ISO_ID = "";
 var ISO_N = 0;
@@ -17,7 +18,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-13s2";
+var ENGINE_VERSION = "route-v2-2026-10-13s3";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -261,7 +262,9 @@ async function btLearn(env, ctx, restRows, missing, minLat, maxLat, minLng, maxL
   else await run;
 }
 __name(btLearn, "btLearn");
-var WPEN = { minTime: 1.6, minTransfer: 1, minWalk: 2.5 };
+// ★ 2026-10-13 (YJ: "최소환승이 왜 50분을 걸어가, 버스를 타야지"): 처음 걷는 구간은 환승으로 세지 않아, 환승을 줄이려고 53분을 걷는 경로가 나왔다.
+//   최소환승에서도 걷기에 무게를 둔다(5배: 약 24분 걷기 ≈ 환승 1번, 53분 걷기 ≈ 환승 2번 이상). 환승 횟수가 우선이라는 원칙은 그대로.
+var WPEN = { minTime: 1.6, minTransfer: 5, minWalk: 2.5 };
 // ★ 2026-10-13 (YJ: "최소환승 탭을 누르면 최소환승 경로가 나와야 한다"): 최소환승은 '환승 횟수 먼저, 같으면 빠른 쪽'.
 //   예전 900초(15분)는 "환승 3번이지만 30분 빠른 경로"가 "환승 1번"을 이겼다(인천 송도→압구정로데오 시험 주행: 최소환승 탭이 환승 3번).
 //   환승 한 번에 2시간(7200초)을 매겨, 시간이 2시간 넘게 차이 나지 않는 한 환승이 적은 쪽이 이기게 한다.
@@ -499,6 +502,14 @@ __name(busHW, "busHW");
 __name2(busHW, "busHW");
 var BUS_DEFAULT_SVC_S = 240;
 var BUS_DEFAULT_SVC_E = 1440;
+// ★ 2026-10-13 (YJ: "새벽버스가 진짜 저녁 7시에 다니는 거야?"): 서울 새벽·심야 노선은 자료에 운행 시각이 비어 있어(null) 낮에도 다니는 것으로 취급됐다.
+//   이름으로 운행 시간대를 정한다(자료에 시각이 있으면 그것이 우선). 새벽동행(새벽A148 등) 03:30~05:30, 서울 심야(올빼미) N노선 23:30~05:00.
+function busSvcNameWindow(no, rt) {
+  const n = String(no || "");
+  if (/^새벽/.test(n)) return { s: 210, e: 330 };
+  if (/심야/.test(rt || "") && /^N\d/.test(n)) return { s: 1410, e: 300 };
+  return null;
+}
 function busSvcAllHoursType(rt) {
   return /농어촌|시외|외곽|심야|마중/.test(rt || "");
 }
@@ -799,6 +810,10 @@ function addBusRaw(G, rows, B) {
     const rt = a[0] && a[0].route_type;
     const r0 = a[0] || {};
     svcWin[rk] = { s: hhmmMin(r0.start_time), e: hhmmMin(r0.end_time) };
+    if (svcWin[rk].s == null && svcWin[rk].e == null) {
+      const _nw = busSvcNameWindow(routeNoOf[rk] || r0.route_no, rt);
+      if (_nw) svcWin[rk] = _nw;
+    }
     if (svcWin[rk].s == null && svcWin[rk].e == null && !busSvcAllHoursType(rt)) {
       const no = routeNoOf[rk];
       const borrowed = no && busSvcCrossBoundaryType(rt) ? crossWin[no] : null;
@@ -890,7 +905,9 @@ function addBusRaw(G, rows, B) {
     const bl = bLa[i], bg = bLn[i], bc = bCos[i];
     const ci = Math.floor(bl / CELL), cj = Math.floor(bg / CELL);
     const lim = B2S_WALK * 1.02;
-    for (let di = -1; di <= 1; di++) for (let dj = -1; dj <= 1; dj++) {
+    // ★ 2026-10-13: 칸(CELL 0.003°≈265~333m)을 ±1 만 훑어서 '500m 안'이라는 규칙이 실제로는 위치에 따라 265~530m 로 들쭉날쭉했다
+    //   (예: 지식정보단지역(4번출구) 정류장은 역까지 걸을 수 있는데도 연결이 안 돼 버스를 한 정거장 타야 했다). ±2 칸으로 넓혀 500m 를 정확히 지킨다.
+    for (let di = -2; di <= 2; di++) for (let dj = -2; dj <= 2; dj++) {
       const c = sgrid.get((ci + di) * GK + (cj + dj));
       if (!c) continue;
       for (let q = 0; q < c.length; q++) {
@@ -1441,6 +1458,19 @@ function dijkstraRaw(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
   const dist = {}, pk = {}, pl = {};
   for (let i = 0; i < _pathI.length; i++) { const k = path[i], st = _pathI[i]; dist[k] = dA[st]; pk[k] = pkA[st]; pl[k] = plA[st]; }
   best = path[path.length - 1];
+  // ★ 2026-10-13 (YJ: "왜 같은 곳에서 버스를 타고 내리는 거야?"): 버스를 600m도 안 되는 한 정거장만 타고 내려 바로 걷는 경로(예: 지식정보단지역(4번출구)→지식정보단지역, 240m)는
+  //   타는 정류장에서 곧장 걸어가는 길이 있으면 그 걷기로 바꾼다(버스 기다림·환승보다 걷는 게 낫다).
+  for (let i = 1; i + 1 < path.length; i++) {
+    if (pk[path[i]] !== "bus" || pk[path[i - 1]] === "bus" && pl[path[i - 1]] === pl[path[i]] || pk[path[i + 1]] !== "walk") continue;
+    const a = dec(path[i - 1]), b = dec(path[i]), c = dec(path[i + 1]);
+    if (a.charCodeAt(0) !== 66 || b.charCodeAt(0) !== 66) continue;
+    const ca = busCoord[a.slice(2)], cb = busCoord[b.slice(2)];
+    if (!ca || !cb || hav(ca[0], ca[1], cb[0], cb[1]) >= HOP_WALK_M) continue;
+    if (!pickEdge(adj[a], c, "walk")) continue;
+    path.splice(i, 1);
+    pk[path[i]] = "walk";
+    i--;
+  }
   let real = 0;
   for (const [s, w] of starts) if (enc(s, 0) === path[0]) {
     real += w;

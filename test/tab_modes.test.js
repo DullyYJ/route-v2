@@ -4,7 +4,7 @@
 const fs = require('fs'), assert = require('assert'), path = require('path');
 let src = fs.readFileSync(process.argv[2] || path.join(__dirname, '..', 'route-v2-worker.js'), 'utf8');
 const ei = src.lastIndexOf('\nexport {'); assert.ok(ei > 0); src = src.slice(0, ei) + '\n';
-const mod = new Function('fetch', 'caches', src + '\nreturn { buildSubway, addBus, dijkstra, subwayTabRoute, ENGINE_VERSION, XPEN };')(async () => ({}), undefined);
+const mod = new Function('fetch', 'caches', src + '\nreturn { buildSubway, addBus, dijkstra, subwayTabRoute, ENGINE_VERSION, XPEN, WPEN };')(async () => ({}), undefined);
 let fail = 0; const t = (n, f) => { try { f(); console.log('  ok  ', n); } catch (e) { fail++; console.log('  FAIL', n, '\n      ', e.message.split('\n')[0]); } };
 
 const KM = 1 / 111.0;   // 위도 1km ≈ 0.009°
@@ -95,4 +95,38 @@ t('환승이 같으면 더 빠른 쪽: 직행이 둘이면 빠른 노선', () =>
   const r = run(X3, 'minTransfer');
   assert.ok(r); assert.strictEqual(r.legs.filter((L) => L.mode === 'bus')[0].busNo, '7');
 });
+
+// ── 장면 3: 최소환승이 50분씩 걷지 않는다 (YJ: "최소환승 왜 50분을 걸어가, 버스타야지")
+t('최소환승: 걷기가 환승 한 번보다 훨씬 길면 버스를 탄다(약 2.5km·40분 걷기 대신 버스 1번)', () => {
+  const far = [37.5, 126.975];   // S1(127.003)까지 약 2.5km
+  const Xw = build([['R2', '2', [['W1', 37.5, 126.9752], ['W2', 37.5, 127.0025]]]]);
+  const r = mod.dijkstra(Xw.G, Xw.busCoord, Xw.busNm, far[0], far[1], D[0], D[1], 'minTransfer');
+  assert.ok(r); assert.ok(nBus(r) >= 1, '버스 ' + nBus(r) + ' ' + JSON.stringify(modes(r)));
+});
+
+// ── 장면 4: 버스를 한 정거장(500m 안)만 타고 내려 바로 걷는 구간이 없다 (YJ: "왜 같은 곳에서 버스를 타고 내리는 거야?")
+t('한 정거장만 타고 내리지 않는다: 정류장→역이 걸어서 400m 이면 그냥 걷는다', () => {
+  const hopRows = [['R8', '8', [['F1', 37.5, 126.95], ['F2', 37.5, 126.97], ['H1', 37.5, 126.9985]]], ['R7', '7', [['H1', 37.5, 126.9985], ['H2', 37.5, 127.0028]]]];
+  const Xh = build(hopRows);
+  const r = mod.dijkstra(Xh.G, Xh.busCoord, Xh.busNm, 37.5, 126.95, D[0], D[1], 'minTime');
+  assert.ok(r);
+  const buses = (r.legs || []).filter((L) => L.mode === 'bus');
+  assert.ok(buses.length >= 1);
+  for (const L of buses) assert.ok(L.stopList.length > 2 || L.busNo !== '7', '한 정거장 버스 구간이 있다: ' + L.busNo + ' ' + L.stopList.join('>'));
+});
+
+// ── 장면 5: 새벽·심야 노선은 운행시간 자료가 비어도 낮·저녁에는 다니지 않는다 (YJ: "새벽버스가 진짜 저때 다니는 거야?")
+t('새벽A148(운행시각 없음)은 저녁 7시에 안 나오고, 새벽 4시에는 나온다', () => {
+  const mk = (utcMs) => {
+    const Bx = B, sub = mod.buildSubway(Bx);
+    const G = { adj: sub.adj, ST: sub.ST, LN: sub.LN, _baseMs: utcMs };
+    const rows = [['11_SEL1', '새벽A148', '마을버스', [['N1', Y, 127.0005], ['N2', Y, 127.299]]]].flatMap(([rk, no, rt, pts]) => pts.map((p, i) => ({ route_key: rk, route_no: no, route_type: rt, start_time: null, end_time: null, node_id: p[0], node_nm: p[0], seq: i + 1, lat: p[1], lng: p[2] })));
+    const bc = mod.addBus(G, rows, Bx);
+    return mod.dijkstra(G, bc.busCoord, bc.busNm, O[0], O[1], D[0], D[1], 'minTime', { noSubway: true });
+  };
+  assert.strictEqual(mk(Date.UTC(2026, 9, 13, 10, 20)), null, '19:20 KST 에는 새벽버스가 없어야 한다');
+  const dawn = mk(Date.UTC(2026, 9, 12, 19, 10));   // 04:10 KST
+  assert.ok(dawn && nBus(dawn) >= 1, '04:10 KST 에는 새벽버스가 다닌다');
+});
+
 console.log(fail ? fail + ' 실패' : '전부 통과', '(엔진 ' + mod.ENGINE_VERSION + ')'); process.exit(fail ? 1 : 0);
