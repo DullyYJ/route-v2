@@ -18,7 +18,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-13s4";
+var ENGINE_VERSION = "route-v2-2026-10-13s5";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -7058,16 +7058,21 @@ function subwayTabRoute(G, busCoord, busNm, SY, SX, EY, EX) {
   const _optPure = { mustSubway: true, subwayNearest: true, noBus: true };
   const _pure = dijkstra(G, busCoord, busNm, SY, SX, EY, EX, "minTime", _optPure);
   if (_pure && (_optPure._nearWalkMin || 0) <= _SUB_WALK_OK_MIN) return _pure;
-  const _optNW = { mustSubway: true, subwayNearest: true, subwayNearestNoWalk: true };
-  const _sNoWalk = dijkstra(G, busCoord, busNm, SY, SX, EY, EX, "minTime", _optNW);
-  const _sWalk = dijkstra(G, busCoord, busNm, SY, SX, EY, EX, "minTime", { mustSubway: true, subwayNearest: true });
-  let _mixed;
-  if (_sNoWalk && (_optNW._nearWalkMin || 0) > 10) _mixed = _sNoWalk;
-  else if (!_sNoWalk) _mixed = _sWalk;
-  else if (!_sWalk) _mixed = _sNoWalk;
-  else _mixed = _sNoWalk.totalMin <= _sWalk.totalMin ? _sNoWalk : _sWalk;
-  if (_pure && _mixed) return _mixed.totalMin < _pure.totalMin ? _mixed : _pure;
-  return _pure || _mixed || null;
+  // ★ 2026-10-13 (YJ: "탑승한 대중교통에서 지하철역까지 한 번에 갈 수 있으면 환승시키지 마, 비효율적이야"):
+  //   예전에는 '출발지에서 가장 가까운 역'에서만 타게 강제해서, 첫 버스가 바로 다른 역(테크노파크)에 닿는데도 버스를 갈아타고 가까운 역(지식정보단지)까지 갔다.
+  //   버스로 역까지 가는 경우에는 어느 역이든 탈 수 있게 풀고, 후보(최단·최소환승) 중 환승이 적은 쪽을 고른다(가장 빠른 것보다 5분·20% 넘게 느리면 제외).
+  const _cands = [
+    dijkstra(G, busCoord, busNm, SY, SX, EY, EX, "minTime", { mustSubway: true }),
+    dijkstra(G, busCoord, busNm, SY, SX, EY, EX, "minTransfer", { mustSubway: true })
+  ].filter((r) => r && r.legs && r.legs.some((L) => L.mode === "subway"));
+  if (_pure) _cands.push(_pure);
+  if (!_cands.length) return null;
+  const _fastest = Math.min(..._cands.map((r) => r.totalMin));
+  let _pool = _cands.filter((r) => r.totalMin <= _fastest + Math.max(5, _fastest * 0.2) && (r.accessWalkMin || 0) <= 25);
+  if (!_pool.length) _pool = _cands.filter((r) => r.totalMin === _fastest);
+  let _best = _pool[0];
+  for (const r of _pool) if (r.transfers < _best.transfers || r.transfers === _best.transfers && r.totalMin < _best.totalMin) _best = r;
+  return _best;
 }
 __name(subwayTabRoute, "subwayTabRoute");
 async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {

@@ -140,4 +140,18 @@ t('pickMinTransfer: 환승 적은 쪽, 같으면 빠른 쪽, 너무 오래 걷�
   assert.strictEqual(mod.pickMinTransfer([null, null]), null);
 });
 
+
+// ── 지하철 탭: 첫 버스가 바로 다른 역에 닿으면 그 역에서 탄다(가까운 역까지 버스를 또 갈아타지 않는다)
+//    (YJ: "탑승한 대중교통에서 지하철역까지 한 번에 갈 수 있으면 환승시키지 마")
+t('지하철 탭: 버스 한 번으로 닿는 역(S2)이 있으면 가까운 역(S1)까지 버스를 갈아타지 않는다', () => {
+  const far = [37.5, 126.97];   // 가장 가까운 역 S1 까지 약 2.9km
+  const Xb = build([
+    ['R2', '2', [['F1', 37.5, 126.9705], ['X1', 37.5, 127.045], ['F2', 37.5, 127.098]]],   // 출발지 근처 → 중간 → S2(127.10) 앞. 한 번에 감
+    ['R5', '5', [['X1', 37.5, 127.045], ['N1', 37.5, 127.0035]]]                       // 되돌아 S1 쪽으로 가는 다른 버스(환승해야 함)
+  ]);
+  const r = tabSub(Xb, far);
+  assert.ok(r); assert.ok(modes(r).indexOf('subway') >= 0);
+  assert.strictEqual(nBus(r), 1, '버스 ' + nBus(r) + ' ' + JSON.stringify(modes(r)));
+});
+
 console.log(fail ? fail + ' 실패' : '전부 통과', '(엔진 ' + mod.ENGINE_VERSION + ')'); process.exit(fail ? 1 : 0);
