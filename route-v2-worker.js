@@ -18,7 +18,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-13s9";
+var ENGINE_VERSION = "route-v2-2026-10-13s10";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -8617,8 +8617,8 @@ function rtZero(P, tr, O) {
   for (var k = 0; k < stops.length; k++) {
     var s = stops[k];
     if (!s || !isFinite(s.arrMs) || !isFinite(s.lat) || !isFinite(s.lng)) continue;
-    var r = rtZeroStop(s, tr, now, O), ps = (s.pass === true) ? rtPassTime(s, tr, now, O) : null;
-    var ny = (!ps && s.pass === true) ? rtNotYet(s, k > 0 ? stops[k - 1] : null, tr, now, O) : null;
+    var r = rtZeroStop(s, tr, now, O), ps = (s.pass === true && !s.fin) ? rtPassTime(s, tr, now, O) : null;
+    var ny = (!ps && s.pass === true && !s.fin) ? rtNotYet(s, k > 0 ? stops[k - 1] : null, tr, now, O) : null;
     if (!r && !ps && !ny) continue;
     if (ny && r && r.state === 'near') ny = null;
     if (!r && !ps && !ny) continue;
