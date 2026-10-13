@@ -17,7 +17,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-13s1";
+var ENGINE_VERSION = "route-v2-2026-10-13s2";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -262,7 +262,10 @@ async function btLearn(env, ctx, restRows, missing, minLat, maxLat, minLng, maxL
 }
 __name(btLearn, "btLearn");
 var WPEN = { minTime: 1.6, minTransfer: 1, minWalk: 2.5 };
-var XPEN = { minTime: 480, minTransfer: 900, minWalk: 150 };
+// ★ 2026-10-13 (YJ: "최소환승 탭을 누르면 최소환승 경로가 나와야 한다"): 최소환승은 '환승 횟수 먼저, 같으면 빠른 쪽'.
+//   예전 900초(15분)는 "환승 3번이지만 30분 빠른 경로"가 "환승 1번"을 이겼다(인천 송도→압구정로데오 시험 주행: 최소환승 탭이 환승 3번).
+//   환승 한 번에 2시간(7200초)을 매겨, 시간이 2시간 넘게 차이 나지 않는 한 환승이 적은 쪽이 이기게 한다.
+var XPEN = { minTime: 480, minTransfer: 7200, minWalk: 150 };
 var BUS_WAIT = 180;
 var BUS_STOP_SEC = 30;
 var BUS_CRUISE_MPS = 5.6;
@@ -1224,6 +1227,9 @@ function dijkstraRaw(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
   DJ_STAT.calls++;
   const adj = G.adj;
   const mustS = !!(opt && opt.mustSubway), noS = !!(opt && opt.noSubway);
+  // ★ 2026-10-13 (YJ: "지하철 탭을 누르면 지하철만 태워야 한다"): noBus = 버스 정류장·버스 구간을 아예 쓰지 않는다(출발지~역은 걸어서).
+  const noB = !!(opt && opt.noBus);
+  const isBusNode = (n) => n.charCodeAt(0) === 66;
   const nearSubOnly = !!(opt && opt.subwayNearest);
   const cutoff = opt && opt.cutoff != null ? opt.cutoff : null;
   const enc = /* @__PURE__ */ __name2((n, st) => mustS ? n + "#" + st : n, "enc");
@@ -1280,6 +1286,7 @@ function dijkstraRaw(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
   };
   for (const [s, w] of starts) {
     if (noS && isSub(s)) continue;
+    if (noB && isBusNode(s)) continue;
     const s0 = djId(s) * 2;
     if (s0 >= cap) { djEnsure(s0 + 2); dA = DJ_DIST; stamp = DJ_STAMP; prevA = DJ_PREV; pkA = DJ_PK; plA = DJ_PL; cap = DJ_CAP; }
     if (stamp[s0] !== _cur || w * wpen < dA[s0]) {
@@ -1360,6 +1367,7 @@ function dijkstraRaw(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
       const ek = e.kind;
       const ride = ek === "ride" || ek === "sub-xfer" || ek === "xpress";
       if (noS && (ride || isSub(e.to))) continue;
+      if (noB && (ek === "bus" || isBusNode(e.to))) continue;
       if (ride && G.subOff && G.subOff.has(e.line)) continue;
       if (_svcBan !== null && ek === "bus" && _svcBan[e.line] === 1) continue;
       if (nearIds && ust === 0 && (ek === "ride" || ek === "sub-xfer" || ek === "xpress")) {
@@ -7267,16 +7275,9 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
   const _search = /* @__PURE__ */ __name(() => {
     const o = {};
     for (const m of ["minTime", "minTransfer", "minWalk"]) o[m] = dijkstra(G, busCoord, busNm, SY, SX, EY, EX, m);
-    {
-      const _optNW = { mustSubway: true, subwayNearest: true, subwayNearestNoWalk: true };
-      const _sNoWalk = dijkstra(G, busCoord, busNm, SY, SX, EY, EX, "minTime", _optNW);
-      const _sWalk = dijkstra(G, busCoord, busNm, SY, SX, EY, EX, "minTime", { mustSubway: true, subwayNearest: true });
-      const _nearWalkMin = _optNW._nearWalkMin || 0;
-      if (_sNoWalk && _nearWalkMin > 10) o.subway = _sNoWalk;
-      else if (!_sNoWalk) o.subway = _sWalk;
-      else if (!_sWalk) o.subway = _sNoWalk;
-      else o.subway = _sNoWalk.totalMin <= _sWalk.totalMin ? _sNoWalk : _sWalk;
-    }
+    // ★ 2026-10-13 (YJ): 지하철 탭 = 지하철만(버스 없음). 출발지에서 가장 가까운 역까지는 걸어가고, 거기서 지하철만 타서 도착지 쪽 역에서 내린다.
+    //   예전에는 "지하철을 한 번 포함"만 요구해서 버스+지하철+버스가 섞여 나왔다. 지하철만으로 갈 수 없으면 null(앱이 '없다'고 알린다).
+    o.subway = dijkstra(G, busCoord, busNm, SY, SX, EY, EX, "minTime", { mustSubway: true, subwayNearest: true, noBus: true });
     o.bus = dijkstra(G, busCoord, busNm, SY, SX, EY, EX, "minTime", { noSubway: true });
     return o;
   }, "_search");
@@ -10055,4 +10056,5 @@ export {
   route_v2_worker_default as default
 };
 //# sourceMappingURL=route-v2-worker.js.map
-
+
+
