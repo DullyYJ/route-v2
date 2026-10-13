@@ -18,7 +18,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-13s12";
+var ENGINE_VERSION = "route-v2-2026-10-13s13";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -8871,17 +8871,23 @@ function rsOverlay(st, r, curIdx, curPos, now, dest, destName, moving, done) {
     line2 = '남은시간: ' + p2(Math.floor(mm / 60)) + '시간 ' + p2(mm % 60) + '분' + (r.arr && r.arr[dn] ? ' · ' + r.arr[dn] + '도착' : '');
   }
   // 하차 임박 단계: 환승·목적지 2정거장 전 = 2, 1정거장 전 = 1 (앱 _ovlAlertLevel 과 같은 규칙), 목적지 3정거장 전 = pre
-  var lv = 0, pre = 0, tg = (st.cfg && st.cfg.targets) || [], i;
+  var lv = 0, pre = 0, tg = (st.cfg && st.cfg.targets) || [], i, bTg = null;
   for (i = 0; i < tg.length; i++) {
     var rem = tg[i].seqPos - curPos;
-    if (curPos >= 0 && (rem === 1 || rem === 2)) lv = lv ? Math.min(lv, rem) : rem;
+    if (curPos >= 0 && (rem === 1 || rem === 2)) { if (!lv || rem < lv) { lv = rem; bTg = tg[i]; } }
     if (curPos >= 0 && tg[i].kind === 'dest' && rem === 3) pre = 1;
   }
+  // 앱 화면(재개 화면)이 크게 보여 줄 문구 — 문구도 엔진이 정한다
+  var banner = '';
+  if (bTg && !(dest && curPos >= dest.seqPos)) {
+    banner = bTg.kind === 'transfer' ? (lv === 1 ? '다음 정거장 ' + bTg.name + ' — ' + (bTg.nextLine || '다음 노선') + ' 환승 준비' : bTg.name + '에서 ' + (bTg.nextLine || '다음 노선') + ' 환승 · 2정거장 전')
+      : (lv === 1 ? '다음 정거장 ' + bTg.name + ' — 내릴 준비하세요' : bTg.name + '까지 2정거장 남았어요');
+  } else if (dest && curPos >= dest.seqPos) banner = (destName || dest.name || '목적지') + '에 도착했어요';
   var oa = st.ovlAlert || (st.ovlAlert = { lv: 0, at: 0 });
   if (oa.lv !== lv) { oa.lv = lv; if (lv > 0) oa.at = now; }
   var arrived = !!(dest && curPos >= dest.seqPos);
   var rs = arrived ? { st: 'board', bt: '안내 종료', k: '목적지에 도착했어요', ch: '도착', nm: destName || '', bar: -1, cbg: '', cfg: '#0a84ff' } : { st: 'hidden' };
-  var out = { active: true, line1: line1, pill: pill, track: [], cur: cur, base: ov.base || 0, line2: line2, line3: '', alert: arrived ? 0 : lv, alertAt: oa.at || 0, alertVibe: false, pre: !arrived && pre === 1, moving: !!moving, rs: rs, reco: { on: false }, cells: cells };
+  var out = { active: true, line1: line1, pill: pill, track: [], cur: cur, base: ov.base || 0, line2: line2, line3: '', alert: arrived ? 0 : lv, alertAt: oa.at || 0, alertVibe: false, banner: banner, destName: destName || '', pre: !arrived && pre === 1, moving: !!moving, rs: rs, reco: { on: false }, cells: cells };
   if (ov.theme) out.theme = ov.theme;
   return out;
 }
