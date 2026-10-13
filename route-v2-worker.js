@@ -7004,6 +7004,27 @@ async function estimateCached(env, ctx, official, now) {
   return out;
 }
 __name(estimateCached, "estimateCached");
+// 지하철 탭 경로. ★ 2026-10-13 (YJ: "지하철 탭은 지하철만. 단 버스를 타야 하는 경우는 버스를 태워야지, 경로없음은 말이 안 된다"):
+//   ① 기본은 버스 없이 가까운 역까지 걸어가 지하철만 탄다(noBus).
+//   ② 가까운 역이 멀어(걸어서 12분 초과) 걷기가 길거나, 지하철만으로는 갈 수 없으면, 역까지 버스를 타는(버스+지하철) 경로를 쓴다.
+//   두 경로가 다 있으면 더 빠른 쪽. 둘 다 없을 때만 null.
+function subwayTabRoute(G, busCoord, busNm, SY, SX, EY, EX) {
+  const _SUB_WALK_OK_MIN = 12;
+  const _optPure = { mustSubway: true, subwayNearest: true, noBus: true };
+  const _pure = dijkstra(G, busCoord, busNm, SY, SX, EY, EX, "minTime", _optPure);
+  if (_pure && (_optPure._nearWalkMin || 0) <= _SUB_WALK_OK_MIN) return _pure;
+  const _optNW = { mustSubway: true, subwayNearest: true, subwayNearestNoWalk: true };
+  const _sNoWalk = dijkstra(G, busCoord, busNm, SY, SX, EY, EX, "minTime", _optNW);
+  const _sWalk = dijkstra(G, busCoord, busNm, SY, SX, EY, EX, "minTime", { mustSubway: true, subwayNearest: true });
+  let _mixed;
+  if (_sNoWalk && (_optNW._nearWalkMin || 0) > 10) _mixed = _sNoWalk;
+  else if (!_sNoWalk) _mixed = _sWalk;
+  else if (!_sWalk) _mixed = _sNoWalk;
+  else _mixed = _sNoWalk.totalMin <= _sWalk.totalMin ? _sNoWalk : _sWalk;
+  if (_pure && _mixed) return _mixed.totalMin < _pure.totalMin ? _mixed : _pure;
+  return _pure || _mixed || null;
+}
+__name(subwayTabRoute, "subwayTabRoute");
 async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
   _liveCtx = ctx || null;
   const _tReq = Date.now(), _djC0 = DJ_STAT.calls, _djP0 = DJ_STAT.pops;
@@ -7275,9 +7296,7 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
   const _search = /* @__PURE__ */ __name(() => {
     const o = {};
     for (const m of ["minTime", "minTransfer", "minWalk"]) o[m] = dijkstra(G, busCoord, busNm, SY, SX, EY, EX, m);
-    // ★ 2026-10-13 (YJ): 지하철 탭 = 지하철만(버스 없음). 출발지에서 가장 가까운 역까지는 걸어가고, 거기서 지하철만 타서 도착지 쪽 역에서 내린다.
-    //   예전에는 "지하철을 한 번 포함"만 요구해서 버스+지하철+버스가 섞여 나왔다. 지하철만으로 갈 수 없으면 null(앱이 '없다'고 알린다).
-    o.subway = dijkstra(G, busCoord, busNm, SY, SX, EY, EX, "minTime", { mustSubway: true, subwayNearest: true, noBus: true });
+    o.subway = subwayTabRoute(G, busCoord, busNm, SY, SX, EY, EX);
     o.bus = dijkstra(G, busCoord, busNm, SY, SX, EY, EX, "minTime", { noSubway: true });
     return o;
   }, "_search");

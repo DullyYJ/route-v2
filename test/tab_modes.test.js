@@ -1,10 +1,10 @@
 // 경로 탭(최단시간·최소환승·지하철·버스) 계약 시험. 실행: node test/tab_modes.test.js [엔진파일]
-//   · 지하철 탭 = 지하철만(버스 구간·버스 정류장 없음)   · 버스 탭 = 버스만(지하철 없음)
+//   · 지하철 탭 = 기본은 지하철만(역이 가까우면 버스 없음). 역이 멀어 버스가 필요하면 버스+지하철, 경로없음으로 두지 않는다   · 버스 탭 = 버스만(지하철 없음)
 //   · 최소환승 탭 = 환승 횟수가 가장 적은 경로(시간이 좀 더 걸려도)   · 최단시간 = 가장 빠른 경로
 const fs = require('fs'), assert = require('assert'), path = require('path');
 let src = fs.readFileSync(process.argv[2] || path.join(__dirname, '..', 'route-v2-worker.js'), 'utf8');
 const ei = src.lastIndexOf('\nexport {'); assert.ok(ei > 0); src = src.slice(0, ei) + '\n';
-const mod = new Function('fetch', 'caches', src + '\nreturn { buildSubway, addBus, dijkstra, ENGINE_VERSION, XPEN };')(async () => ({}), undefined);
+const mod = new Function('fetch', 'caches', src + '\nreturn { buildSubway, addBus, dijkstra, subwayTabRoute, ENGINE_VERSION, XPEN };')(async () => ({}), undefined);
 let fail = 0; const t = (n, f) => { try { f(); console.log('  ok  ', n); } catch (e) { fail++; console.log('  FAIL', n, '\n      ', e.message.split('\n')[0]); } };
 
 const KM = 1 / 111.0;   // 위도 1km ≈ 0.009°
@@ -45,21 +45,27 @@ t('버스 탭: 지하철 구간이 없다', () => {
   assert.ok(r); assert.strictEqual(modes(r).filter((m) => m === 'subway').length, 0);
   assert.ok(nBus(r) >= 1);
 });
-t('지하철 탭: 출발지에서 역이 멀고 버스가 가까워도 버스를 타지 않는다(걸어서 역까지)', () => {
-  // 출발지(126.97)는 S1 까지 약 2.9km. 버스 R2 가 출발지 근처 F1 에서 S1 앞 F2 까지 간다.
+const tabSub = (X, o) => mod.subwayTabRoute(X.G, X.busCoord, X.busNm, o[0], o[1], D[0], D[1]);
+t('지하철 탭(역이 가까움): 직행버스가 더 빨라도 버스 없이 지하철만', () => {
+  const r = tabSub(X1b, O);
+  assert.ok(r); assert.strictEqual(nBus(r), 0, JSON.stringify(modes(r))); assert.ok(modes(r).indexOf('subway') >= 0);
+});
+t('지하철 탭(역이 멀고 버스가 역까지 데려다 줌): 버스를 타서 역까지 가고, 경로없음이 아니다', () => {
+  // 출발지(126.97)는 S1 까지 약 2.9km(걸어서 30분+). 버스 R2 가 출발지 근처 F1 에서 S1 앞 F2 까지 간다.
   const far = [37.5, 126.97];
   const Xf = build([['R2', '2', [['F1', 37.5, 126.9705], ['F2', 37.5, 127.0025]]]]);
-  const mixed = mod.dijkstra(Xf.G, Xf.busCoord, Xf.busNm, far[0], far[1], D[0], D[1], 'minTime', { mustSubway: true, subwayNearest: true });
+  const r = tabSub(Xf, far);
+  assert.ok(r, '경로가 있어야 한다');
+  assert.ok(nBus(r) >= 1, '버스 ' + nBus(r) + ' ' + JSON.stringify(modes(r)));
+  assert.ok(modes(r).indexOf('subway') >= 0, '지하철도 타야 한다');
   const only = mod.dijkstra(Xf.G, Xf.busCoord, Xf.busNm, far[0], far[1], D[0], D[1], 'minTime', { mustSubway: true, subwayNearest: true, noBus: true });
-  assert.ok(mixed && nBus(mixed) >= 1, '비교용: 버스 허용이면 버스로 역까지 간다(예전 지하철 탭의 혼합)');
-  assert.ok(only, '지하철만 경로');
-  assert.strictEqual(nBus(only), 0, '버스 ' + nBus(only));
-  assert.ok(modes(only).indexOf('subway') >= 0);
+  assert.ok(!only || r.totalMin < only.totalMin, '버스 경로가 걷기보다 빨라야 한다');
 });
-t('지하철만으로 갈 수 없으면 null (버스로 대신하지 않는다)', () => {
-  const Xn = build([['R1', '1', [['B1', Y, 127.0005], ['B2', Y, 127.299]]]]);
-  const r = mod.dijkstra(Xn.G, Xn.busCoord, Xn.busNm, 37.7, 127.0, 37.7, 127.3, 'minTime', { mustSubway: true, subwayNearest: true, noBus: true });
-  assert.strictEqual(r, null);
+t('지하철 탭(역이 멀지만 버스가 없음): 걸어서 역까지 가는 지하철 경로(경로없음 아님)', () => {
+  const far = [37.5, 126.97];
+  const Xe = build([['R9', '9', [['Z1', 37.9, 127.5], ['Z2', 37.9, 127.6]]]]);
+  const r = tabSub(Xe, far);
+  assert.ok(r); assert.strictEqual(nBus(r), 0); assert.ok(modes(r).indexOf('subway') >= 0);
 });
 
 // ── 장면 2: 최소환승. 환승 2번인 빠른 경로 vs 환승 0번인 느린 직행(우회).
