@@ -17,7 +17,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-12c";
+var ENGINE_VERSION = "route-v2-2026-10-13s1";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -7561,7 +7561,7 @@ var route_v2_worker_default = { async scheduled(event, env, ctx) {
 //   앱은 매번 '지금까지의 증거 전부'를 보내고, 이 함수가 노드별 도착시각을 돌려준다(상태 없음 = stateless).
 //
 // 입력  { nowMs, nodes:[{name,isSub,isBus,isWalk,isOrigin,lineName,planMin}], passes:[{idx,ms,src}], boarded,
-//         timetable?:{boardIdx,times[]}, notDeparted?, platformWaiting?, live?:[{idx,ms}], boardNext?:{ms,src,allowEarlier,maxWaitMin}, boardArriveMs?, tzOffsetMin?, opts? }
+//         timetable?:{boardIdx,times[]}, notDeparted?, platformWaiting?, live?:[{idx,ms}], boardNext?:{ms,src,allowEarlier,maxWaitMin}, boardArriveMs?, tzOffsetMin?, timetableFirst?(true 면 증거 없음을 연착으로 밀지 않는다), opts? }
 //   planMin : 처음 안내한 도착 예정(하루 안의 분, 자정을 넘으면 1440 이상). 앱이 덮어쓴 값이 아니라 '원래 값'을 항상 보낸다.
 //   passes  : 통과 증거. src = 'board'(승차 확정) | 'move'(움직임 시작 시각 — 되짚어 찍은 값) | 'gps' | 'pf'(위치 채택) | 'cell'(기지국 선행) | 'drift'
 //             같은 역에 증거가 여러 개여도 된다(예: 기지국 선행 + 뒤이은 PF 채택) — 어느 것을 믿을지는 여기서 정한다.
@@ -7621,6 +7621,8 @@ var RIDE_ETA_DEFAULTS = {
   // ★ 2026-10-07 (앱의 시각 계산을 엔진으로 옮김 — 'overdue' = 예전 앱의 _pfOverdueShift / _htlDelayTrack):
   //   앵커(마지막 통과) 뒤 첫 정차 노드의 예정 시각이 이만큼(초) 지났는데 도착 증거가 없으면 그만큼 늦는 것이다 → 그 노드를 '지금 + overdueExtraMin 분'으로 미루고 뒤를 같은 폭만큼 민다(최대 overdueMaxMin 분).
   //   엔진은 상태가 없어 매번 같은 식으로 다시 계산하므로 누적되지 않는다.
+  // 정차 시간(초) — 실측 25초(표본 25,997). 시각표 기준 위치(pos)에서 도착 뒤 이만큼은 역 위에 머문다.
+  stopDwellSec: 25,
   overdueSec: 60, overdueMaxMin: 15, overdueExtraMin: 0.5, overdueGain: 1, overdueMode: 'clamp',
   // 승강장에서 열차를 기다리는 중(platformWaiting): 예정 출발이 platMinOverMin 분 넘게 지났고 platGraceMin 분 안이면 늦는 것으로 보고 승차역부터 '지금 + platExtraMin 분'으로 민다(예전 앱의 _platformLateShift).
   platMinOverMin: 1, platGraceMin: 4, platExtraMin: 0.5,
@@ -7650,7 +7652,34 @@ function _reSrcPri(src) { return src === 'gps' ? 6 : src === 'move' ? 5 : src ==
 // ─────────────────────────────────────────────────────────────────────────────
 // 본체
 // ─────────────────────────────────────────────────────────────────────────────
+// 진입: 도착시각 계산(_rideEtaCore) + (timetableFirst 일 때) 지금 열차가 어느 역 사이 어디쯤인지(pos)
 function rideEta(input) {
+  var r = _rideEtaCore(input);
+  try { if (input && input.timetableFirst === true && input.notDeparted !== true && r && r.etaMs) r.pos = _rePos(input, r); } catch (e) { r.pos = null; }
+  return r;
+}
+// ★ 2026-10-13 (YJ: "계산은 엔진이, 그림은 앱이"): 시각표 기준 위치. 앱은 이 구간(from→to)과 t0·t1 시각만 받아 그 사이를 시간 흐름대로 그린다(위치 계산 없음).
+//   from = 도착 시각이 지난 마지막 노드(단, 통과 증거가 더 앞서 있으면 그 노드 = 바닥), to = 그 다음 노드. 정차(stopDwellSec) 동안은 역 위(ratio 0), 이후 to 의 도착 시각까지 0→1.
+function _rePos(input, r) {
+  var O = _reMerge(RIDE_ETA_DEFAULTS, input.opts), nodes = input.nodes || [], out = r.etaMs, nowMs = +input.nowMs, idxs = [], i, fl = -1;
+  if (!isFinite(nowMs)) nowMs = Date.now();
+  for (i = 0; i < nodes.length; i++) if (out[i] != null) idxs.push(i);
+  if (!idxs.length) return null;
+  var ps = input.passes || [];
+  for (i = 0; i < ps.length; i++) { var pi = +ps[i].idx; if (isFinite(pi) && pi >= 0 && pi < nodes.length && pi > fl) fl = pi; }
+  var f = idxs[0], k;
+  for (k = 0; k < idxs.length; k++) { if (out[idxs[k]] <= nowMs) f = idxs[k]; else break; }
+  if (fl > f) f = fl;
+  var pos = -1;
+  for (k = 0; k < idxs.length; k++) if (idxs[k] === f) { pos = k; break; }
+  if (pos < 0) { for (k = 0; k < idxs.length; k++) if (idxs[k] > f) { pos = Math.max(0, k - 1); break; } if (pos < 0) pos = idxs.length - 1; f = idxs[pos]; }
+  if (pos >= idxs.length - 1) return { from: f, to: f, t0: null, t1: null, ratio: 0, moving: false, floor: fl };
+  var t = idxs[pos + 1], t0 = out[f] + O.stopDwellSec * 1000, t1 = out[t];
+  if (!(t1 - t0 >= 5000)) t0 = out[f];
+  var ratio = t1 > t0 ? Math.max(0, Math.min(1, (nowMs - t0) / (t1 - t0))) : 0;
+  return { from: f, to: t, t0: t0, t1: t1, ratio: Math.round(ratio * 1000) / 1000, moving: ratio > 0 && ratio < 1, floor: fl };
+}
+function _rideEtaCore(input) {
   input = input || {};
   var O = _reMerge(RIDE_ETA_DEFAULTS, input.opts);
   var tz = (typeof input.tzOffsetMin === 'number') ? input.tzOffsetMin : 540;     // 한국 표준시
@@ -7872,6 +7901,8 @@ function rideEta(input) {
   // (바) 연착: 앵커 뒤 첫 정차 노드의 예정 시각이 지났는데 도착 증거가 없다
   var nxO = -1;
   for (k = anchor.idx + 1; k < n; k++) if (valid[k] && _reIsTransit(nodes[k]) && out[k] != null) { nxO = k; break; }
+  // ★ 2026-10-13 (YJ: "탑승이 확정되면 시간표 기준으로 마커를 움직인다. 도착 때 GPS 로 영점만 본다"): input.timetableFirst === true 면 증거가 없다고 연착으로 밀지 않는다 — 시각표(+통과 증거로 배운 지연)가 기준이다.
+  if (nxO >= 0 && input.timetableFirst === true) { notes.push('시각표 기준: 증거 없음을 연착으로 보지 않음'); nxO = -1; }
   if (nxO >= 0) {
     var overO = (nowMs - out[nxO]) / 1000;
     if (overO >= O.overdueSec) {
@@ -8128,10 +8159,16 @@ function handleRideEta(request) {
 //                suppress?:[string…] }          판정을 쉬어야 하는 모드(예상 시각·지하철 노선도·수동 출발 등) — 하나라도 있으면 이탈 없음
 //         cands?:[{id,pts:[{lat,lng}…],longDist?}…]   엔진이 이번 탐색에서 준 후보 경로들
 //         sensor?:{ cellN180, pfSeg }            기지국 변화 횟수(180초), PF 가 최근 주행(seg)으로 본 적이 있는지
-//         want?:{ off, ridden, miss } }           (생략하면 전부)
+//         want?:{ off, ridden, miss, zero } }     (생략하면 off·ridden·miss — zero 는 요청할 때만)
+//         plan.stops?:[{ i, lat, lng, arrMs, fin? }…]   (zero 용) 승차 뒤 지나는 역·정류장 — i=앱 노드 번호, arrMs=시각표(엔진이 맞춘 표시) 도착 시각, fin=최종 목적지
 // 출력  { v, fix:{n, ageSec, fresh}, off:{confirmed, distM, n, spanSec, why},
 //         ridden:{id, ok, mean, max, tail, curMean, curTail, curBad, last:{lat,lng}} | null,
 //         miss:{proof, why}, board:{walkingAway, distM, speed, why} | null, vehicleNow }
+//   zero  : (want.zero, plan.boarded 일 때만) 영점 확인 — 각 정류장의 시각표 도착 15초 전 ~ 30초 뒤(45초) 동안 신선한 GPS 가 그 정류장 부근(정확도 반경을 뺀 거리 200m, 최종 목적지는 250m)에 한 번이라도 잡히면
+//           '제대로 달리고 있다' = state 'near'(도착 시각 3초 전부터 apply:true — 앱이 진행도를 그 정류장으로 맞춘다). 시각표는 바꾸지 않는다(엔진 출력에 시각 보정이 없다).
+//           창이 끝났는데 가까운 위치가 없으면 600m 넘는 위치만 있으면 'far', 쓸 위치가 아예 없으면 'none', 그 사이(250~600m)는 'off'. 잡히지 않아도 벌은 없다.
+//           final = 최종 목적지(fin) 판정 verdict: 'verify'(창 안) · 'confirmed'(창 끝에 가까운 위치 있음 → 앱은 안내 종료) · 'notyet'(먼 위치만 → 아직 도착 전) · 'unknown'(위치 없음/애매 → 앱은 [안내 종료] 버튼).
+//           창이 끝난 뒤에도 30분까지는 최근 45초로 다시 판정한다(늦게 도착해 GPS 가 나중에 잡혀도 confirmed 로 바뀐다).
 //   board : 지하철 승차 확정 전(plan.notDeparted)에만. 승차역(plan.boardPt)에서 멀어졌지만 신선한 GPS 가 '걷는 속도'로 이어지면 열차를 탄 게 아니다 → walkingAway.
 //           앱은 이때 '승차역에서 멀어짐·시각 경과·기지국 변화'만으로 승차를 확정하지 않는다(시뮬: 지하철 먼저 계획에서 안 타고 돌아가거나 걸어도 승차로 처리).
 //
@@ -8152,7 +8189,9 @@ var RIDE_TRACK_DEFAULTS = {
   // 못 탔다는 증명(예전 _missProof)
   // 걷는 중인지(승차 안 함): 승차역에서 departM(기본 400m) 넘게 떨어진 신선한 좌표가 걷는 속도(앞·뒤 덩어리 중앙값 사이 순속도 ≤ 3m/s; 열차는 8m/s 이상)로 이어짐
   walkWinSec: 75, walkMinFixes: 5, walkMinSpanSec: 45, walkMaxSpeed: 3.0, walkDepartM: 400,
-  missWinSec: 120, missD80: 80, missMinSpanSec: 45, missMinFixes: 3, missCellN: 2
+  missWinSec: 120, missD80: 80, missMinSpanSec: 45, missMinFixes: 3, missCellN: 2,
+  // 영점 확인 / 도착 확인
+  zeroLeadSec: 15, zeroWinSec: 45, zeroNearM: 200, zeroFinalNearM: 250, zeroFarM: 600, zeroApplyLeadSec: 3, zeroKeepSec: 20, zeroFinalKeepMin: 30
 };
 
 // ── 기하 ──────────────────────────────────────────────────────────────────────
@@ -8339,6 +8378,51 @@ function rtBoard(P, tr, O) {
   return res;
 }
 
+// ── 영점 확인 · 도착 확인 ─────────────────────────────────────────────
+function rtZeroStop(s, tr, now, O) {
+  var lead = O.zeroLeadSec * 1000, win = O.zeroWinSec * 1000, ws = s.arrMs - lead, we = ws + win;
+  var active = now >= ws && now <= we, ended = now > we;
+  if (now < ws) return null;
+  var sliding = false;
+  if (ended) {
+    if (s.fin && now - s.arrMs <= O.zeroFinalKeepMin * 60000) sliding = true;       // 최종 목적지는 늦게 도착해도 최근 45초로 다시 본다
+    else if (now - we > O.zeroKeepSec * 1000) return null;                          // 중간 역은 창이 끝난 뒤 잠깐만 알려 준다
+  }
+  var from = sliding ? now - win : ws - 2000, to = sliding ? now : (ended ? we : now);
+  var R = s.fin ? O.zeroFinalNearM : O.zeroNearM, n = 0, near = 0, far = 0, best = null;
+  for (var i = 0; i < tr.length; i++) {
+    var q = tr[i];
+    if (q.ts < from || q.ts > to + 1000) continue;
+    if (q.acc != null && q.acc > 150) continue;
+    var acc = q.acc == null ? 50 : q.acc, d = rtHav(q.lat, q.lng, s.lat, s.lng) - acc;
+    n++;
+    if (best == null || d < best) best = d;
+    if (d <= R) near++; else if (d > O.zeroFarM) far++;
+  }
+  var dt = now - s.arrMs, st;
+  if (near >= 1 && near >= far) st = 'near';
+  else if (active) st = 'pending';
+  else if (far >= 1) st = 'far';
+  else if (n === 0) st = 'none';
+  else st = 'off';
+  var r = { i: s.i, fin: !!s.fin, state: st, apply: (st === 'near' && dt >= -O.zeroApplyLeadSec * 1000), dtSec: Math.round(dt / 1000), n: n, near: near, far: far, distM: best == null ? null : Math.round(best) };
+  if (s.fin) r.verdict = (active && !sliding) ? 'verify' : (st === 'near' ? 'confirmed' : (st === 'far' ? 'notyet' : 'unknown'));
+  return r;
+}
+function rtZero(P, tr, O) {
+  var plan = P.plan || {}, stops = plan.stops || [], now = P.nowMs, out = { stops: [], final: null };
+  if (!plan.boarded || !stops.length) return out;
+  for (var k = 0; k < stops.length; k++) {
+    var s = stops[k];
+    if (!s || !isFinite(s.arrMs) || !isFinite(s.lat) || !isFinite(s.lng)) continue;
+    var r = rtZeroStop(s, tr, now, O);
+    if (!r) continue;
+    out.stops.push(r);
+    if (r.fin) out.final = r;
+  }
+  return out;
+}
+
 // ── 진입 ──────────────────────────────────────────────────────────────────────
 function rideTrack(P) {
   P = P || {};
@@ -8355,6 +8439,7 @@ function rideTrack(P) {
   if (want.ridden) out.ridden = rtRidden(P, tr, O, out.vehicleNow);
   if (want.miss) out.miss = rtMiss(P, tr, O);
   if (want.board !== false) out.board = rtBoard(P, tr, O);
+  if (want.zero) out.zero = rtZero(P, tr, O);
   return out;
 }
 
@@ -9415,6 +9500,7 @@ async function ntAttachAll(env, od, baseMs, bf) {
 //   GET  ?op=board&line=1호선&from=서울역&to=남영&atMin=480.5&baseMs=…   → { dk:'상'|'하', depMin }
 //        ?op=times (같은 인자)                                            → { dk, times:[…]|null }
 //        ?op=info  (같은 인자, atMin 없음; 기준 시각 = baseMs)             → { info:{found,depMin,firstMin,dir} }
+//        ?op=late&line=…&from=…&to=…&atMin=지금(분)&back=1&baseMs=…         → { dk, depMin, late:출발분|null }  (탑승을 늦게 눌렀을 때: backMin 분 전까지 이미 떠난 차가 있는가)
 //        ?op=fwd&line=…&from=내다음역&to=내릴역&term=열차종착역            → { fwd:true|false|null }  (실시간 도착정보 열차가 내 진행 방향인지)
 //   POST { items:[{ id, op, … }] } → { items:[{ id, … }] }  (한 번에 여러 개)
 function ntAnswer(nt, q) {
@@ -9427,6 +9513,14 @@ function ntAnswer(nt, q) {
   if (op === 'info') { return { info: nt.metroInfo({ line: line, from: from, to: to, baseMs: baseMs, mins: 0 }) }; }
   var atMin = q.atMin != null && isFinite(+q.atMin) ? +q.atMin : null;
   if (atMin == null) return { error: 'atMin 필요' };
+  // op=late — '탑승을 늦게 눌렀다' 판정: atMin(지금, 분·소수 가능) 기준 시각표상 backMin(기본 1)분 전까지 이미 떠난 차가 있는가.
+  //   분 단위로 본다 — 지금 분이나 backMin 분 전에 출발한 차면 late=그 출발 분(자정 넘으면 1440 이상), 아니면 late=null. (앱은 이 답만 따른다)
+  if (op === 'late') {
+    var back = q.back != null && isFinite(+q.back) ? Math.max(0, Math.min(3, Math.floor(+q.back))) : 1;
+    var nowM = Math.floor(atMin), bl = nt.boardTable({ line: line, from: from, to: to, atMin: nowM - back, baseMs: baseMs });
+    var dep = bl.depMin, ok = dep != null && isFinite(dep) && dep <= nowM && dep >= nowM - back;
+    return { dk: bl.dk, depMin: dep, late: ok ? dep : null };
+  }
   var b = nt.boardTable({ line: line, from: from, to: to, atMin: atMin, baseMs: baseMs });
   return { dk: b.dk, depMin: b.depMin };
 }
