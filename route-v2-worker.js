@@ -18,7 +18,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-13s13";
+var ENGINE_VERSION = "route-v2-2026-10-14s14";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -8355,6 +8355,8 @@ var RIDE_TRACK_DEFAULTS = {
   pressFarM: 800,         // 이보다 멀면 '역에 없다' — 버튼을 거둔다(그 사이는 믿는다)
   busStopNearM: 150,      // 승차 정류장을 '지났다'고 보는 반경(정확도 일부를 뺀 거리)
   busStopAccCap: 50,      // 위 거리에서 빼 주는 정확도의 상한
+  busTrailMaxAgeSec: 570, // 앱 궤적은 10분(600초)보다 오래된 점을 버린다 — 맨 앞 점이 이만큼 오래됐으면 밀려났을 수 있다
+  busTrailCap: 240,       // 앱이 보내는 궤적 점 수의 상한 — 이만큼 차면 오래된 점이 밀려나 '승차 정류장을 지난 적 없음'을 말할 수 없다
   busCoverSlackSec: 20,   // 궤적이 움직임 시작보다 이만큼 앞서 시작해야 '정류장을 지난 적 없음'을 말할 수 있다
   busAheadSec: 300,       // 뒤 정류장에 계획 시각보다 이만큼 먼저 닿으면 앞서 달린 것
   busAheadMinStops: 2,    // 그런 정류장이 이만큼 이상이어야 '버스가 아님'
@@ -8685,6 +8687,10 @@ function rtBus(P, tr, O, vehNow) {
   if (ahead >= O.busAheadMinStops) { res.state = 'notBus'; res.why = 'ahead'; return res; }
   if (seen === false) {
     // 승차 정류장을 지난 적이 없다 — 궤적이 움직임 시작 전부터 있을 때만 단정한다(오래전에 지나 궤적 밖으로 밀려난 것일 수 있다)
+    // ★ 2026-10-14 (시뮬 bus/faithful: 계획대로 버스를 타는데 10분쯤 뒤 '승용차'로 판정돼 재탐색): 궤적은 최근 busTrailCap 점만 남아 오래된 점이 밀려난다.
+    //   승차 증거 시각(startMs)이 승차 정류장 통과보다 늦으면, 정류장 통과는 밀려나고 궤적 맨 앞은 아직 startMs 보다 앞이라 '지난 적 없음'으로 잘못 읽혔다.
+    //   → 궤적이 점 수 상한에 닿았거나 맨 앞 점이 10분 가까이 됐으면(오래된 점이 밀려났을 수 있다) 단정하지 않는다.
+    if (tr.length >= O.busTrailCap || now - tr[0].ts >= O.busTrailMaxAgeSec * 1000) { res.why = 'trail_capped'; return res; }
     var from = plan.startMs || null;
     if (!from) from = rtMotionStart(tr, O);
     if (from && tr[0].ts <= from - O.busCoverSlackSec * 1000) { res.state = 'notBus'; res.why = 'no_stop'; return res; }
@@ -8759,8 +8765,6 @@ function handleRideTrack(request) {
     return new Response(JSON.stringify(out), { headers: H });
   }, function () { return new Response(JSON.stringify({ error: 'JSON 아님' }), { status: 400, headers: H }); });
 }
-
-
 // ===== ride-track 끝 =====
 // ===== ride-standby (대기 모드: 웹뷰가 사라져도 네이티브가 이어받는 안내 엔진) 시작 =====
 // 길동무 — 대기 모드(웹뷰가 사라져도 네이티브가 이어받는 안내) 엔진 (route-v2 Worker 에 붙여 넣는 순수 함수)
@@ -8892,6 +8896,40 @@ function rsOverlay(st, r, curIdx, curPos, now, dest, destName, moving, done) {
   return out;
 }
 
+function rsDistM(aLat, aLng, bLat, bLng) {
+  var R = 6371000, dLat = (bLat - aLat) * Math.PI / 180, dLng = (bLng - aLng) * Math.PI / 180;
+  var h = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(aLat * Math.PI / 180) * Math.cos(bLat * Math.PI / 180) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+// ★ 2026-10-14 (시뮬: 버스는 GPS 가 10분 넘게 끊겼다 돌아오면 영점이 영영 안 잡혔다): ride-track 영점은 '표시 도착 시각 앞 5분~뒤 7분' 창 안의 GPS 만 본다.
+//   시각표 기준이 아닌 여정(버스)에서 GPS 가 오래 끊겨 창이 밀렸다가 돌아오면, 지금 위치가 앞쪽 정류장 근처인데도 창 밖이라 무시됐다.
+//   → 신선한 정확한 좌표 두 점(5초 이상 간격)이 모두 앞쪽 정류장 150m 안이고, 마지막 통과 정류장에서 계획 소요의 40% 이상 지났으면 그 정류장 통과로 본다(정류장 건너뛰기 포함).
+function rsResync(st, now, notes) {
+  var eta = st.eta, tr = st.trail || [], stops = st.stops || [], passes = eta.passes || [], i, k;
+  if (eta.timetableFirst || tr.length < 2 || !stops.length) return;
+  var maxIdx = 0, lastPass = null;
+  for (i = 0; i < passes.length; i++) if (passes[i].idx > maxIdx) { maxIdx = passes[i].idx; lastPass = passes[i]; }
+  if (!lastPass) return;
+  var a = tr[tr.length - 1], b = null;
+  if (now - a[0] > 30000 || (a[3] != null && a[3] > 60)) return;
+  for (i = tr.length - 2; i >= 0; i--) { if (a[0] - tr[i][0] >= 5000 && a[0] - tr[i][0] <= 60000 && (tr[i][3] == null || tr[i][3] <= 60)) { b = tr[i]; break; } }
+  if (!b) return;
+  var lastStop = null; for (i = 0; i < stops.length; i++) if (stops[i].i === maxIdx) lastStop = stops[i];
+  var best = null, bestD = 1e9;
+  for (k = 0; k < stops.length; k++) {
+    var s = stops[k]; if (s.i <= maxIdx) continue;
+    var da = rsDistM(a[1], a[2], s.lat, s.lng), db = rsDistM(b[1], b[2], s.lat, s.lng);
+    if (da > 150 || db > 150) continue;
+    var gap = lastStop ? (s.arrMs - lastStop.arrMs) : 0;
+    if (gap > 0 && lastPass.ms != null && a[0] - lastPass.ms < 0.4 * gap) continue;   // 계획 소요의 40% 도 안 지났으면 건너뛸 수 없다
+    if (da < bestD) { bestD = da; best = s; }
+  }
+  if (!best) return;
+  passes.push({ idx: best.i, ms: a[0], src: 'gps' });
+  if (st.notYet) delete st.notYet[best.i];
+  notes.push('재동기 ' + best.i + '번(GPS 끊김 뒤 위치로 통과 인정, ' + Math.round(bestD) + 'm)');
+}
+
 function rideStandby(req) {
   req = req || {};
   var O = RIDE_STANDBY_DEFAULTS, st = req.state, now = +req.nowMs, notes = [], i;
@@ -8922,6 +8960,7 @@ function rideStandby(req) {
       });
     }
   }
+  rsResync(st, now, notes);   // 2.5) 버스: 오래 끊겼던 GPS 가 돌아오면 앞쪽 정류장 통과로 다시 맞춘다(시각표 기준 여정은 시각표가 이어가므로 해당 없음)
   // 3) 도착 시각 계산
   var nyList = [], nk;
   for (nk in notYet) { if (now - notYet[nk] <= O.notYetKeepSec * 1000) nyList.push(+nk); else delete notYet[nk]; }
