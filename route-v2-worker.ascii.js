@@ -37,7 +37,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-14s20";
+var ENGINE_VERSION = "route-v2-2026-10-14s21";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -7813,7 +7813,8 @@ var RIDE_ETA_DEFAULTS = {
   // \u2605 2026-10-14 (YJ: \uc778\ucc9c1\ud638\uc120(\uc2e4\uc2dc\uac04 \uc704\uce58 \uc5c6\uc74c) \uc2dc\ud5d8 \u2014 \ub3c4\ucc29 \ud45c\uc2dc\uac00 \uc57d 15\ucd08 \ub2a6\ub2e4 \u2192 \ud604\uc7ac\ubcf4\ub2e4 10\ucd08 \uc77c\ucc0d \ub3c4\ucc29\uc73c\ub85c \ud310\uc815): \uc2dc\uac01\ud45c \uae30\uc900 \uc704\uce58(pos)\uc5d0\uc11c '\uc911\uac04 \uacbd\ub85c\uc5ed'(\uc2b9\ucc28\uc5ed\u00b7\ucd5c\uc885 \ubaa9\uc801\uc9c0 \uc81c\uc678)\uc5d0 \ub2ff\uc558\ub2e4\uace0 \ubcf4\ub294 \uc2dc\uac01\uc744
   //   \ud45c\uc2dc \ub3c4\ucc29 \uc2dc\uac01\ubcf4\ub2e4 \uc774\ub9cc\ud07c(\ucd08) \uc55e\ub2f9\uae34\ub2e4. 0 \uc774\uba74 \ub054. \ud45c\uc2dc\ud558\ub294 \ub3c4\ucc29 \uc2dc\uac01(etaMs\u00b7arr)\uc740 \uadf8\ub300\ub85c\uc774\uace0 \ub9c8\ucee4\u00b7\uc624\ubc84\ub808\uc774\uac00 \uc77d\ub294 pos(from/to/t0/t1/segs)\ub9cc \ub2f9\uaca8\uc9c4\ub2e4. (\uc601\uc810 \ucc3d\uc740 ride-track zeroLeadSec \uac00 \uac19\uc774 \uc77c\ucc0d \uc5f4\ub9b0\ub2e4)
   arriveEarlySec: 10,
-  posSegCount: 14,        // pos.segs \u2014 \uc55e\uc73c\ub85c \uadf8\ub9b4 \uad6c\uac04 \uc218(\uc751\ub2f5\uc774 \ub04a\uaca8\ub3c4 \uc2dc\uac01\ud45c\ub300\ub85c \uc774\uc5b4 \uadf8\ub9ac\uac8c)
+  // \u2605 2026-10-14 (\uc2e4\uae30\uae30 \ub85c\uadf8: \ubd80\ud3c9\uc5d0\uc11c \ub9c8\ucee4\uac00 \uba48\ucdc4\ub2e4 \u2014 \uad6c\uac04\ud45c\uac00 14\uad6c\uac04\ubfd0\uc774\ub77c \uc751\ub2f5\uc774 \ub04a\uae34 26\ubd84 \ub4a4 \ub05d\ub0ac\ub2e4): \ub0a8\uc740 \uad6c\uac04 \uc804\ubd80\ub97c \uc900\ub2e4(\uc0c1\ud55c\uc740 \uc548\uc804\uc7a5\uce58).
+  posSegCount: 80,        // pos.segs \u2014 \uc55e\uc73c\ub85c \uadf8\ub9b4 \uad6c\uac04 \uc218(\uc751\ub2f5\uc774 \ub04a\uaca8\ub3c4 \uc2dc\uac01\ud45c\ub300\ub85c \ub05d\uae4c\uc9c0 \uc774\uc5b4 \uadf8\ub9ac\uac8c)
   overdueSec: 60, overdueMaxMin: 15, overdueExtraMin: 0.5, overdueGain: 1, overdueMode: 'clamp',
   // \uc2b9\uac15\uc7a5\uc5d0\uc11c \uc5f4\ucc28\ub97c \uae30\ub2e4\ub9ac\ub294 \uc911(platformWaiting): \uc608\uc815 \ucd9c\ubc1c\uc774 platMinOverMin \ubd84 \ub118\uac8c \uc9c0\ub0ac\uace0 platGraceMin \ubd84 \uc548\uc774\uba74 \ub2a6\ub294 \uac83\uc73c\ub85c \ubcf4\uace0 \uc2b9\ucc28\uc5ed\ubd80\ud130 '\uc9c0\uae08 + platExtraMin \ubd84'\uc73c\ub85c \ubbfc\ub2e4(\uc608\uc804 \uc571\uc758 _platformLateShift).
   platMinOverMin: 1, platGraceMin: 4, platExtraMin: 0.5,
@@ -8481,7 +8482,7 @@ var RIDE_TRACK_DEFAULTS = {
   busStopNearReachM: 200, // \ub4a4 \uc815\ub958\uc7a5 '\ub2ff\uc558\ub2e4' \ubc18\uacbd
   busGpsSnapM: 500,       // \ubc84\uc2a4 \ud0d1\uc2b9 \uc911 GPS \ub97c \uc815\ub958\uc7a5 \ud22c\uc601\uc5d0 \uc4f0\ub294 \ubc18\uacbd(\uc9c0\ud558\ucca0/\uae30\ubcf8 200)
   busAdvanceSec: 8,       // \ubc84\uc2a4 \ud0d1\uc2b9 \uc911 GPS \ub85c \uc815\ub958\uc7a5\uc744 \ud558\ub098 \ub354 \uc62c\ub824\ub3c4 \ub418\ub294 \uac04\uaca9(\uae30\ubcf8 15)
-  zeroLeadSec: 25, zeroWinSec: 55, zeroSlideSec: 45, zeroNearM: 200, zeroFinalNearM: 250, zeroFarM: 600, zeroApplyLeadSec: 3, zeroKeepSec: 20, zeroFinalKeepMin: 30,
+  trailMaxSpeedMps: 60, zeroLeadSec: 25, zeroWinSec: 55, zeroSlideSec: 45, zeroNearM: 200, zeroFinalNearM: 250, zeroFarM: 600, zeroApplyLeadSec: 3, zeroKeepSec: 20, zeroFinalKeepMin: 30,
   // \u2605 2026-10-13 (YJ: "\uc2dc\uac04\ud45c\ubcf4\ub2e4 \ube60\ub974\uac8c \uc120\ud559\uc5d0 \uc654\uc5b4. \uc704\uce58\ub294 \ub9de\ud614\ub294\ub370 \uc2dc\uac04\uc774 \uc548\ub9de\ucdb0\uc838. \uc2dc\uac04\ub3c4 \uac19\uc774 \ubc00\uac70\ub098 \ub2f9\uae30\uba70 \uacc4\uc18d \uc601\uc810"): \uc2dc\uac01\ud45c \ucc3d(\ub3c4\ucc29 15\ucd08 \uc804~30\ucd08 \ub4a4) \ubc16\uc5d0\uc11c \ub2ff\uc740 \uc5f4\ucc28(\uc77c\ucc0d\u00b7\ub2a6\uac8c)\ub3c4 \ub193\uce58\uc9c0 \uc54a\ub3c4\ub85d
   //   pass:true \uc778 \uc815\ub958\uc7a5\uc740 '\ud45c\uc2dc \ub3c4\ucc29 \uc2dc\uac01 \uc55e\ub4a4' \ub113\uc740 \ucc3d\uc5d0\uc11c GPS \uac00 \uadf8 \uc815\ub958\uc7a5 150m \uc548(\uc815\ud655\ub3c4 60m \uc774\ud558 \uc88c\ud45c)\uc5d0 \ub4e0 \uac00\uc7a5 \uac00\uae4c\uc6b4 \uc21c\uac04\uc744 \ud1b5\uacfc \uc2dc\uac01(passMs)\uc73c\ub85c \ub3cc\ub824\uc900\ub2e4 \u2014 \uc571\uc740 \uadf8 \uc2dc\uac01\uc744 \ud1b5\uacfc \uc99d\uac70\ub85c \uc5d4\uc9c4\uc5d0 \ub2e4\uc2dc \ubcf4\ub0b8\ub2e4.
   passAheadSec: 300, passLateSec: 420, passBackSec: 300, passNearM: 150, passAccM: 60,
@@ -8758,9 +8759,24 @@ function rtNotYet(s, prev, tr, now, O) {
   if (dp + dn > L * O.notYetBetween) return null;
   return { distM: Math.round(dn) };
 }
+// \u2605 2026-10-14 (\uc2e4\uae30\uae30 \ub85c\uadf8: \uc571\uc744 \ub2e4\uc2dc \ucf1c\uc790 \uc313\uc600\ub358 \uc704\uce58\uac00 \ud55c\uaebc\ubc88\uc5d0 \uc640 \ubaa8\ub450 '\uc9c0\uae08' \uc2dc\uac01\uc774 \ucc0d\ud600, \uc9c0\ub09c \uc5ed \uc804\ubd80\uac00 19:16 \uc5d0 \uc9c0\ub09c \uac83\uc73c\ub85c \uc77d\ud614\ub2e4 \u2014 \ub3d9\uc218 +6.2\ubd84\u00b7\ubd80\ud3c9 +4.2\ubd84 \u2026):
+//   \uac19\uc740(\uac70\uc758 \uac19\uc740) \uc2dc\uac01\uc778\ub370 \uba40\ub9ac \ub5a8\uc5b4\uc9c4 \uc88c\ud45c\ub294 \uc0ac\uc2e4\uc77c \uc218 \uc5c6\ub2e4(\uc18d\ub3c4 \uc0c1\ud55c trailMaxSpeedMps). \ub4a4\uc5d0\uc11c\ubd80\ud130 \ubcf4\uba70 \uadf8\ub7f0 \uc55e \uc88c\ud45c\ub97c \ubc84\ub9b0\ub2e4 \u2014 \uac00\uc7a5 \ucd5c\uc2e0 \uc88c\ud45c\ub9cc \ub0a8\ub294\ub2e4.
+function rtSane(tr, O) {
+  var out = [], i, q, nx = null;
+  for (i = tr.length - 1; i >= 0; i--) {
+    q = tr[i];
+    if (nx) {
+      var dt = Math.max(1, Math.abs(nx.ts - q.ts) / 1000), accs = (nx.acc == null ? 50 : nx.acc) + (q.acc == null ? 50 : q.acc);
+      if (rtHav(q.lat, q.lng, nx.lat, nx.lng) - accs > O.trailMaxSpeedMps * dt + 60) continue;
+    }
+    out.push(q); nx = q;
+  }
+  return out.reverse();
+}
 function rtZero(P, tr, O) {
   var plan = P.plan || {}, stops = plan.stops || [], now = P.nowMs, out = { stops: [], final: null };
   if (!plan.boarded || !stops.length) return out;
+  tr = rtSane(tr, O);
   for (var k = 0; k < stops.length; k++) {
     var s = stops[k];
     if (!s || !isFinite(s.arrMs) || !isFinite(s.lat) || !isFinite(s.lng)) continue;

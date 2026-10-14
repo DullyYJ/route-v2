@@ -37,7 +37,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-14s20";
+var ENGINE_VERSION = "route-v2-2026-10-14s21";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -7813,7 +7813,8 @@ var RIDE_ETA_DEFAULTS = {
   // ★ 2026-10-14 (YJ: 인천1호선(실시간 위치 없음) 시험 — 도착 표시가 약 15초 늦다 → 현재보다 10초 일찍 도착으로 판정): 시각표 기준 위치(pos)에서 '중간 경로역'(승차역·최종 목적지 제외)에 닿았다고 보는 시각을
   //   표시 도착 시각보다 이만큼(초) 앞당긴다. 0 이면 끔. 표시하는 도착 시각(etaMs·arr)은 그대로이고 마커·오버레이가 읽는 pos(from/to/t0/t1/segs)만 당겨진다. (영점 창은 ride-track zeroLeadSec 가 같이 일찍 열린다)
   arriveEarlySec: 10,
-  posSegCount: 14,        // pos.segs — 앞으로 그릴 구간 수(응답이 끊겨도 시각표대로 이어 그리게)
+  // ★ 2026-10-14 (실기기 로그: 부평에서 마커가 멈췄다 — 구간표가 14구간뿐이라 응답이 끊긴 26분 뒤 끝났다): 남은 구간 전부를 준다(상한은 안전장치).
+  posSegCount: 80,        // pos.segs — 앞으로 그릴 구간 수(응답이 끊겨도 시각표대로 끝까지 이어 그리게)
   overdueSec: 60, overdueMaxMin: 15, overdueExtraMin: 0.5, overdueGain: 1, overdueMode: 'clamp',
   // 승강장에서 열차를 기다리는 중(platformWaiting): 예정 출발이 platMinOverMin 분 넘게 지났고 platGraceMin 분 안이면 늦는 것으로 보고 승차역부터 '지금 + platExtraMin 분'으로 민다(예전 앱의 _platformLateShift).
   platMinOverMin: 1, platGraceMin: 4, platExtraMin: 0.5,
@@ -8481,7 +8482,7 @@ var RIDE_TRACK_DEFAULTS = {
   busStopNearReachM: 200, // 뒤 정류장 '닿았다' 반경
   busGpsSnapM: 500,       // 버스 탑승 중 GPS 를 정류장 투영에 쓰는 반경(지하철/기본 200)
   busAdvanceSec: 8,       // 버스 탑승 중 GPS 로 정류장을 하나 더 올려도 되는 간격(기본 15)
-  zeroLeadSec: 25, zeroWinSec: 55, zeroSlideSec: 45, zeroNearM: 200, zeroFinalNearM: 250, zeroFarM: 600, zeroApplyLeadSec: 3, zeroKeepSec: 20, zeroFinalKeepMin: 30,
+  trailMaxSpeedMps: 60, zeroLeadSec: 25, zeroWinSec: 55, zeroSlideSec: 45, zeroNearM: 200, zeroFinalNearM: 250, zeroFarM: 600, zeroApplyLeadSec: 3, zeroKeepSec: 20, zeroFinalKeepMin: 30,
   // ★ 2026-10-13 (YJ: "시간표보다 빠르게 선학에 왔어. 위치는 맞혔는데 시간이 안맞춰져. 시간도 같이 밀거나 당기며 계속 영점"): 시각표 창(도착 15초 전~30초 뒤) 밖에서 닿은 열차(일찍·늦게)도 놓치지 않도록
   //   pass:true 인 정류장은 '표시 도착 시각 앞뒤' 넓은 창에서 GPS 가 그 정류장 150m 안(정확도 60m 이하 좌표)에 든 가장 가까운 순간을 통과 시각(passMs)으로 돌려준다 — 앱은 그 시각을 통과 증거로 엔진에 다시 보낸다.
   passAheadSec: 300, passLateSec: 420, passBackSec: 300, passNearM: 150, passAccM: 60,
@@ -8758,9 +8759,24 @@ function rtNotYet(s, prev, tr, now, O) {
   if (dp + dn > L * O.notYetBetween) return null;
   return { distM: Math.round(dn) };
 }
+// ★ 2026-10-14 (실기기 로그: 앱을 다시 켜자 쌓였던 위치가 한꺼번에 와 모두 '지금' 시각이 찍혀, 지난 역 전부가 19:16 에 지난 것으로 읽혔다 — 동수 +6.2분·부평 +4.2분 …):
+//   같은(거의 같은) 시각인데 멀리 떨어진 좌표는 사실일 수 없다(속도 상한 trailMaxSpeedMps). 뒤에서부터 보며 그런 앞 좌표를 버린다 — 가장 최신 좌표만 남는다.
+function rtSane(tr, O) {
+  var out = [], i, q, nx = null;
+  for (i = tr.length - 1; i >= 0; i--) {
+    q = tr[i];
+    if (nx) {
+      var dt = Math.max(1, Math.abs(nx.ts - q.ts) / 1000), accs = (nx.acc == null ? 50 : nx.acc) + (q.acc == null ? 50 : q.acc);
+      if (rtHav(q.lat, q.lng, nx.lat, nx.lng) - accs > O.trailMaxSpeedMps * dt + 60) continue;
+    }
+    out.push(q); nx = q;
+  }
+  return out.reverse();
+}
 function rtZero(P, tr, O) {
   var plan = P.plan || {}, stops = plan.stops || [], now = P.nowMs, out = { stops: [], final: null };
   if (!plan.boarded || !stops.length) return out;
+  tr = rtSane(tr, O);
   for (var k = 0; k < stops.length; k++) {
     var s = stops[k];
     if (!s || !isFinite(s.arrMs) || !isFinite(s.lat) || !isFinite(s.lng)) continue;
