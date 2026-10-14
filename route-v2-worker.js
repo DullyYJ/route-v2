@@ -18,7 +18,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-14s15";
+var ENGINE_VERSION = "route-v2-2026-10-14s16";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -10003,6 +10003,50 @@ function ntCreate(DATA) {
       var di = ntDayInfo(baseMs); setCtx(di);
       return _ttOfficialTimes(line, stn, dk, di.isHol);
     },
+    // ★ 2026-10-14 역 시간표(노선도에서 역을 눌렀을 때): { line, from(역), baseMs, day?('DAY'|'SAT'|'SUN') } →
+    //   { line, stn, dayCode, today, days:[{code,label}], nowMin, dirs:[{ dk:'상'|'하', toward(종점 방면 이름|null), times:[분…], first, last, nextMin, tomorrow }], noData }
+    //   · times 는 그날 해당 방향 출발 분(자정 넘으면 1440 이상). 앱은 시 단위로 묶어 그리기만 한다.
+    //   · 공식 시각표가 없는 노선(신분당·경의중앙·공항철도 …)은 dirs 가 비고 noData=true — 지어내지 않는다.
+    //   · 토요일 별도 자료가 있는 노선에서만 평일/토/일 세 갈래, 아니면 평일 / 토·일·공휴일 두 갈래.
+    //   · nextMin: 지금(nowMin) 이후 첫 열차. 자정 직후(04시 전)에는 전날 영업일의 자정 넘은 열차(1440+)까지 본다. 오늘 남은 열차가 없으면 tomorrow=true 와 내일 첫차.
+    timetable: function (q) {
+      var base = q.baseMs, di = ntDayInfo(base);
+      var line = String(q.line || ''), stn = String(q.from || '');
+      var nm = _ttNm(stn), rec = (_REAL_TT || {})[line + '|' + nm];
+      var satSep = !!(rec && rec.S);
+      var today = di.dayCode === 'SAT' && !satSep ? 'SUN' : di.dayCode;
+      var code = (q.day === 'DAY' || q.day === 'SAT' || q.day === 'SUN') ? q.day : today;
+      if (code === 'SAT' && !satSep) code = 'SUN';
+      setCtx({ isHol: code !== 'DAY', dayCode: code });
+      var days = satSep ? [{ code: 'DAY', label: '평일' }, { code: 'SAT', label: '토요일' }, { code: 'SUN', label: '일요일·공휴일' }]
+                        : [{ code: 'DAY', label: '평일' }, { code: 'SUN', label: '토·일·공휴일' }];
+      // 방향 이름: 이 역에서 노선 순서상 앞/뒤 이웃으로 가는 열차의 키(_boardDirKey 와 같은 판정)와 그쪽 종점
+      var ord = _ttOrderOf(line) || [], idx = ord.indexOf(nm), toward = {};
+      if (idx >= 0 && line !== '2호선') {        // 2호선은 순환선+지선이라 '종점 방면' 이름을 붙이지 않는다
+        var me = { lineName: line, name: nm };
+        var kf = idx + 1 < ord.length ? _boardDirKey(me, { name: ord[idx + 1] }) : null;
+        var kb = idx > 0 ? _boardDirKey(me, { name: ord[idx - 1] }) : null;
+        // 앞·뒤 이웃이 같은 키로 나오면(2호선 순환선 등) 어느 쪽이 어느 방향인지 알 수 없으니 이름을 붙이지 않는다
+        if (kf && kb && kf === kb) { /* 이름 없음 */ }
+        else { if (kf) toward[kf] = ord[ord.length - 1]; if (kb) toward[kb] = ord[0]; }
+      }
+      if (toward['상'] != null && toward['상'] === toward['하']) toward = {};
+      var dirs = [], k, dk;
+      for (k = 0; k < 2; k++) {
+        dk = k === 0 ? '상' : '하';
+        var tms = _ttOfficialTimes(line, stn, dk, _ctxHol);
+        if (!tms || !tms.length) continue;
+        var eff = di.nowMin, last = tms[tms.length - 1];
+        if (eff < 240 && last >= 1440) eff += 1440;
+        var nx = null, tom = false, i;
+        if (code === today || (today === 'SUN' && code === 'SUN')) {
+          for (i = 0; i < tms.length; i++) if (tms[i] >= eff) { nx = tms[i]; break; }
+          if (nx == null) { nx = tms[0] + 1440; tom = true; }
+        }
+        dirs.push({ dk: dk, toward: toward[dk] != null ? toward[dk] : null, times: tms.slice(), first: tms[0], last: last, nextMin: nx, tomorrow: tom });
+      }
+      return { line: line, stn: stn, dayCode: code, today: today, days: days, nowMin: di.nowMin, dirs: dirs, noData: dirs.length === 0 };
+    },
     dayInfo: ntDayInfo
   };
 }
@@ -10127,12 +10171,14 @@ async function ntAttachAll(env, od, baseMs, bf) {
 //        ?op=info  (같은 인자, atMin 없음; 기준 시각 = baseMs)             → { info:{found,depMin,firstMin,dir} }
 //        ?op=late&line=…&from=…&to=…&atMin=지금(분)&back=1&baseMs=…         → { dk, depMin, late:출발분|null }  (탑승을 늦게 눌렀을 때: backMin 분 전까지 이미 떠난 차가 있는가)
 //        ?op=fwd&line=…&from=내다음역&to=내릴역&term=열차종착역            → { fwd:true|false|null }  (실시간 도착정보 열차가 내 진행 방향인지)
+//        ?op=timetable&line=2호선&from=시청[&day=DAY|SAT|SUN][&baseMs=…]   → { dayCode, today, days, nowMin, dirs:[{dk,toward,times,first,last,nextMin,tomorrow}], noData }  (역 시간표)
 //   POST { items:[{ id, op, … }] } → { items:[{ id, … }] }  (한 번에 여러 개)
 function ntAnswer(nt, q) {
   var baseMs = q.baseMs != null && isFinite(+q.baseMs) && +q.baseMs > 0 ? +q.baseMs : Date.now();
   var line = String(q.line || ''), from = String(q.from || ''), to = q.to ? String(q.to) : '';
   if (!line || !from) return { error: 'line, from 필요' };
   if (q.op === 'fwd') return { fwd: nt.forward(line, from, to, q.term) };      // from=내 다음 역, to=내릴 역, term=열차 종착역
+  if (q.op === 'timetable') return nt.timetable({ line: line, from: from, baseMs: baseMs, day: q.day });   // 역 시간표(노선도에서 역을 눌렀을 때) — 앱은 그리기만
   var op = q.op || 'board';
   if (op === 'times') { var t = nt.boardTimes({ line: line, from: from, to: to, baseMs: baseMs }); return { dk: t.dk, times: t.times }; }
   if (op === 'info') { return { info: nt.metroInfo({ line: line, from: from, to: to, baseMs: baseMs, mins: 0 }) }; }
@@ -10163,7 +10209,7 @@ async function handleNextTrain(request, env) {
       return new Response(JSON.stringify({ ver: nt.version || null, items: outs }), { headers: H });
     }
     var u = new URL(request.url), g = function (k) { return u.searchParams.get(k); };
-    var a = ntAnswer(nt, { op: g('op'), line: g('line'), from: g('from'), to: g('to'), term: g('term'), atMin: g('atMin'), baseMs: g('baseMs') });
+    var a = ntAnswer(nt, { op: g('op'), line: g('line'), from: g('from'), to: g('to'), term: g('term'), atMin: g('atMin'), baseMs: g('baseMs'), day: g('day') });
     if (a.error) return new Response(JSON.stringify(a), { status: 400, headers: H });
     a.ver = nt.version || null; a.src = nt.src || null;
     return new Response(JSON.stringify(a), { headers: H });
