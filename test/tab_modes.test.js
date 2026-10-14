@@ -4,7 +4,7 @@
 const fs = require('fs'), assert = require('assert'), path = require('path');
 let src = fs.readFileSync(process.argv[2] || path.join(__dirname, '..', 'route-v2-worker.js'), 'utf8');
 const ei = src.lastIndexOf('\nexport {'); assert.ok(ei > 0); src = src.slice(0, ei) + '\n';
-const mod = new Function('fetch', 'caches', src + '\nreturn { buildSubway, addBus, dijkstra, subwayTabRoute, ENGINE_VERSION, XPEN, WPEN, pickMinTransfer, pickSubwayTab, tabNormalize, busSvcNameWindow, isBusOnlyRoute };')(async () => ({}), undefined);
+const mod = new Function('fetch', 'caches', src + '\nreturn { buildSubway, addBus, dijkstra, subwayTabRoute, ENGINE_VERSION, XPEN, WPEN, pickMinTransfer, pickSubwayTab, tabNormalize, busSvcNameWindow, isBusOnlyRoute, WALK_MAX_MIN, walkCapNodes, walkOkRoute };')(async () => ({}), undefined);
 let fail = 0; const t = (n, f) => { try { f(); console.log('  ok  ', n); } catch (e) { fail++; console.log('  FAIL', n, '\n      ', e.message.split('\n')[0]); } };
 
 const KM = 1 / 111.0;   // 위도 1km ≈ 0.009°
@@ -164,8 +164,8 @@ t('지하철 탭: 환승이 적어도 버스 위주(버스 112분+지하철 36�
   const r = mod.pickSubwayTab([busHeavy, subHeavy]);
   assert.strictEqual(r, subHeavy);
 });
-t('지하철 탭: 버스 없이 걸어서 닿는 지하철 경로(걷기 25분 이내)가 비슷한 시간이면 그것이 우선', () => {
-  const walk = RT(70, 1, [LG('walk', 20), LG('subway', 50)], 20);
+t('지하철 탭: 버스 없이 걸어서 닿는 지하철 경로(걷기 15분 미만)가 비슷한 시간이면 그것이 우선', () => {
+  const walk = RT(70, 1, [LG('walk', 14), LG('subway', 56)], 14);
   const bus = RT(62, 1, [LG('bus', 12), LG('subway', 50)], 2);
   assert.strictEqual(mod.pickSubwayTab([bus, walk]), walk);
 });
@@ -183,14 +183,17 @@ t('지하철 탭: 지하철 구간이 없는 후보는 나오지 않는다', () 
   assert.strictEqual(mod.pickSubwayTab([RT(30, 0, [LG('bus', 30)])]), null);
   assert.strictEqual(mod.pickSubwayTab([]), null);
 });
-t('최소환승: 걷기 20분 넘어 빠졌어도(35분 이내) 환승이 더 적고 더 빠르면 그 경로 (평내→종로 사례)', () => {
+t('최소환승: 걷기 15분 미만이면 환승이 적은 쪽, 15분 이상 걷는 경로는 (대중교통 대안이 있는 한) 뽑지 않는다 (걷기 15분 규칙)', () => {
   const lessBad = { transfers: 2, totalMin: 79, accessWalkMin: 3 };
-  const better = { transfers: 1, totalMin: 78, accessWalkMin: 24 };
-  assert.strictEqual(mod.pickMinTransfer([lessBad, better]), better);
-  const slower = { transfers: 1, totalMin: 85, accessWalkMin: 24 };
-  assert.strictEqual(mod.pickMinTransfer([lessBad, slower]), lessBad, '더 느리면 걷기 긴 경로를 쓰지 않는다');
-  const far = { transfers: 0, totalMin: 60, accessWalkMin: 53 };
-  assert.strictEqual(mod.pickMinTransfer([lessBad, far]), lessBad, '53분 걷는 경로는 여전히 제외');
+  const ok14 = { transfers: 1, totalMin: 85, accessWalkMin: 14 };
+  assert.strictEqual(mod.pickMinTransfer([lessBad, ok14]), ok14, '14분 걷기는 허용');
+  const w24 = { transfers: 1, totalMin: 78, accessWalkMin: 24 };
+  assert.strictEqual(mod.pickMinTransfer([lessBad, w24]), lessBad, '24분 걷는 경로는 제외');
+  const w15 = { transfers: 0, totalMin: 60, accessWalkMin: 15 };
+  assert.strictEqual(mod.pickMinTransfer([lessBad, w15]), lessBad, '15분 걷기도 제외');
+  const eg = { transfers: 0, totalMin: 50, accessWalkMin: 2, egressWalkMin: 16 };
+  assert.strictEqual(mod.pickMinTransfer([lessBad, eg]), lessBad, '마지막 걷기 16분도 제외');
+  assert.strictEqual(mod.pickMinTransfer([w24, w15]), w15, '전부 길면 그대로 둔다');
 });
 t('탭 마무리: 버스 탭은 지하철 없는 후보 중 가장 빠른 것(송도→강남: 63분 M6405 가 91분 9201 보다 앞)', () => {
   const m6405 = RT(63, 0, [LG('bus', 52)]);
@@ -255,6 +258,62 @@ t('dijkstra busW: 버스에 무게를 주면 긴 버스 대신 짧은 버스+지
   assert.ok(a && b, JSON.stringify([!!a, !!b]));
   const busMin = (r) => r.legs.filter((L) => L.mode === 'bus').reduce((x, L) => x + L.min, 0);
   assert.ok(busMin(b) <= busMin(a), '버스 시간 ' + busMin(b) + ' vs ' + busMin(a));
+});
+
+
+// ═════ 2026-10-14 (YJ: "걷기가 15분 이상인 것은 대중교통을 타게 해야해") — 변수 WALK_MAX_MIN ═════
+t('WALK_MAX_MIN 은 15 (조절 변수)', () => assert.strictEqual(mod.WALK_MAX_MIN, 15));
+t('walkCapNodes: 15분 안 후보가 있으면 15분 이상 후보는 뺀다, 전부 멀면 그대로 둔다', () => {
+  const near = ['B|a', 600], mid = ['B|b', 1100], far = ['S|c', 1500];
+  assert.deepStrictEqual(mod.walkCapNodes([far, mid, near]), [near, mid].filter((x) => x[1] < 14.5 * 60));
+  assert.deepStrictEqual(mod.walkCapNodes([far, ['B|d', 1300]]), [far, ['B|d', 1300]]);
+  // 지하철만(noBus)이면 가까운 버스 정류장이 있어도 역이 멀면 멀리 있는 역을 그대로 둔다
+  assert.deepStrictEqual(mod.walkCapNodes([near, far], false, true), [near, far]);
+});
+// 출발지에서 400m 정류장(N1)의 버스는 돌아가고(느림), 1.2km 정류장(F1)의 버스는 곧장 간다 → 예전엔 20분 걷고 빠른 쪽을 탔다
+const detourX = (farOnly) => build([
+  ...(farOnly ? [] : [['RN', '11', [['N1', 37.5, 127.0045], ['N2', 37.75, 127.15], ['N3', 37.5, 127.2995]]]]),
+  ['RF', '22', [['F1', 37.5, 127.0136], ['F2', 37.5, 127.2995]]]
+], true);
+t('걷기 15분: 1.2km(17분) 걸어야 하는 빠른 버스 대신 가까운(7분) 정류장의 버스를 탄다 — 최단시간/최소환승/걷기최소/버스 모두', () => {
+  const X = detourX(false);
+  for (const mode of ['minTime', 'minTransfer', 'minWalk']) {
+    const r = run(X, mode, { noSubway: true });
+    assert.ok(r, mode);
+    assert.ok(r.accessWalkMin < 15, mode + ' 처음 걷기 ' + r.accessWalkMin + '분');
+    assert.strictEqual(r.walkOver, undefined);
+    assert.ok(r.legs.some((L) => L.mode === 'bus' && L.busNo === '11'), mode + ' ' + JSON.stringify(r.legs.map((L) => L.busNo || L.mode)));
+  }
+});
+t('걷기 15분: 가까운 대중교통이 아예 없으면 어쩔 수 없이 멀리 걷고, walkOver 로 알린다(경로없음 아님)', () => {
+  const X = detourX(true);
+  const r = run(X, 'minTime', { noSubway: true });
+  assert.ok(r, '경로가 있어야 한다');
+  assert.ok(r.accessWalkMin >= 15, '처음 걷기 ' + r.accessWalkMin);
+  assert.strictEqual(r.walkOver, true);
+});
+t('걷기 15분: 도착지 쪽도 같다 — 마지막 정류장이 1.2km 떨어진 빠른 버스 대신 가까운 정류장에서 내리는 버스', () => {
+  const X = build([
+    ['RN', '33', [['M1', 37.5, 127.0005], ['M2', 37.75, 127.15], ['M3', 37.5, 127.2955]]],
+    ['RF', '44', [['G1', 37.5, 127.0005], ['G2', 37.5, 127.2864]]]
+  ], true);
+  const r = run(X, 'minTime', { noSubway: true });
+  assert.ok(r);
+  assert.ok(r.egressWalkMin < 15, '마지막 걷기 ' + r.egressWalkMin + '분');
+  assert.ok(r.legs.some((L) => L.busNo === '33'), JSON.stringify(r.legs.map((L) => L.busNo || L.mode)));
+});
+
+t('걷기 15분: 가까운 정류장의 버스가 목적지로 이어지지 않으면 상한을 풀고 먼 정류장 경로를 쓴다(경로없음 아님)', () => {
+  const X = build([
+    ['RW', '55', [['W1', 37.5, 127.0045], ['W2', 37.5, 126.80]]],      // 가깝지만 서쪽으로만 감
+    ['RF', '66', [['F1', 37.5, 127.0136], ['F2', 37.5, 127.2995]]]     // 17분 걸어야 하지만 목적지로 감
+  ], true);
+  for (const mode of ['minTime', 'minTransfer', 'minWalk']) {
+    const r = run(X, mode, { noSubway: true });
+    assert.ok(r, mode + ' 경로가 있어야 한다');
+    assert.ok(r.legs.some((L) => L.busNo === '66'), mode);
+    assert.strictEqual(r.walkOver, true, mode);
+  }
 });
 
 console.log(fail ? fail + ' 실패' : '전부 통과', '(엔진 ' + mod.ENGINE_VERSION + ')'); process.exit(fail ? 1 : 0);
