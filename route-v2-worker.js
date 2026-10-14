@@ -18,7 +18,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-14s17";
+var ENGINE_VERSION = "route-v2-2026-10-14s18";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -508,6 +508,10 @@ function busSvcNameWindow(no, rt) {
   const n = String(no || "");
   if (/^새벽/.test(n)) return { s: 210, e: 330 };
   if (/심야/.test(rt || "") && /^N\d/.test(n)) return { s: 1410, e: 300 };
+  // ★ 2026-10-14 (YJ 스샷: 낮 16시에 '심야A21'이 경로에 들어옴): 이름에 심야·올빼미가 들어간 노선(심야A21 등, 자료상 종류는 마을버스)과
+  //   종류가 심야버스인데 N번호가 아닌 노선(12심야 등)도 시각이 비어 있으면 낮에는 다니지 않는 것으로 취급한다(자료에 시각이 있으면 그것이 우선).
+  if (/^N\d/.test(n) || /심야|올빼미/.test(n)) return { s: 1410, e: 300 };
+  if (/심야/.test(rt || "")) return { s: 1320, e: 360 };
   return null;
 }
 function busSvcAllHoursType(rt) {
@@ -1248,6 +1252,7 @@ function dijkstraRaw(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
   const noB = !!(opt && opt.noBus);
   const isBusNode = (n) => n.charCodeAt(0) === 66;
   const nearSubOnly = !!(opt && opt.subwayNearest);
+  const busW = opt && opt.busW > 1 ? opt.busW : 1;   // ★ 2026-10-14: 버스 타는 시간(차내+기다림)에 매기는 배수 — 1보다 크면 버스를 덜 쓰는 경로를 찾는다(지하철 탭용)
   const cutoff = opt && opt.cutoff != null ? opt.cutoff : null;
   const enc = /* @__PURE__ */ __name2((n, st) => mustS ? n + "#" + st : n, "enc");
   const dec = /* @__PURE__ */ __name2((n) => mustS ? n.slice(0, n.length - 2) : n, "dec");
@@ -1434,7 +1439,7 @@ function dijkstraRaw(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
         ew = XP_LAST_HOP;
         xw = Math.max(0, _xw - (e.bw || XP_BASE_WAIT));
       }
-      const nd = d + (isW ? ew * wpen : ew) + (isX || busXfer ? xpen : 0) + bw + xw;
+      const nd = d + (isW ? ew * wpen : ek === "bus" && busW > 1 ? ew * busW : ew) + (isX || busXfer ? xpen : 0) + (busW > 1 ? bw * busW : bw) + xw;
       let ti = e.ti;
       if (ti === void 0) { ti = djId(e.to); e.ti = ti; }
       const to = ti * 2 + (mustS ? ride ? 1 : ust : 0);
@@ -7046,6 +7051,9 @@ function pickMinTransfer(cands) {
   const pool = elig.length ? elig : ok;
   let best = pool[0];
   for (const r of pool) if (r.transfers < best.transfers || r.transfers === best.transfers && r.totalMin < best.totalMin) best = r;
+  // ★ 2026-10-14 (YJ: 최소환승 탭이 최단시간보다 환승이 많은 경로를 보여줌 — 남양주 평내→종로): 처음 걷기가 20분을 넘어 후보에서 빠진 경로라도
+  //   (35분 이내이고) 환승이 더 적으면서 시간도 더 짧거나 같다면 모든 면에서 앞서므로 그 경로가 최소환승이다.
+  for (const r of ok) if (pool.indexOf(r) < 0 && (r.accessWalkMin || 0) <= 35 && r.transfers < best.transfers && r.totalMin <= best.totalMin) best = r;
   return best;
 }
 __name(pickMinTransfer, "pickMinTransfer");
@@ -7053,6 +7061,39 @@ __name(pickMinTransfer, "pickMinTransfer");
 //   ① 기본은 버스 없이 가까운 역까지 걸어가 지하철만 탄다(noBus).
 //   ② 가까운 역이 멀어(걸어서 12분 초과) 걷기가 길거나, 지하철만으로는 갈 수 없으면, 역까지 버스를 타는(버스+지하철) 경로를 쓴다.
 //   두 경로가 다 있으면 더 빠른 쪽. 둘 다 없을 때만 null.
+// ★ 2026-10-14 (YJ: "지하철은 지하철만 타는 것을 보여주고(필요시 버스·도보, 하지만 최소화)"): 예전엔 후보 중 '환승이 가장 적은 것'을 골라
+//   버스 31분+버스 81분+지하철 36분 같은 '버스 위주' 경로가 지하철 탭에 떴다. 이제 후보 중 '버스 타는 시간이 가장 짧은 것'을 고른다.
+//   후보에 '버스에 무게를 주고 찾은 지하철 경로(busW)'를 더해, 버스를 덜 타는 길이 있으면 놓치지 않게 한다.
+//   버스는 한 번만(여러 번 갈아타면 한 번당 10분 가산), 지하철을 버스보다 오래 타는 경로가 하나라도 있으면 그 안에서만 고른다.
+function legMinSum(r, mode) {
+  let t = 0;
+  for (const L of r && r.legs || []) if (L.mode === mode) t += L.min || 0;
+  return t;
+}
+function legCount(r, mode) {
+  let n = 0;
+  for (const L of r && r.legs || []) if (L.mode === mode) n++;
+  return n;
+}
+function subTabBusCost(r) {
+  return legMinSum(r, "bus") + 10 * Math.max(0, legCount(r, "bus") - 1);
+}
+function pickSubwayTab(cands) {
+  const ok = (cands || []).filter((r) => r && typeof r.totalMin === "number" && r.legs && r.legs.some((L) => L.mode === "subway"));
+  if (!ok.length) return null;
+  const fastest = Math.min(...ok.map((r) => r.totalMin));
+  let pool = ok.filter((r) => r.totalMin <= fastest + Math.max(10, fastest * 0.25) && (r.accessWalkMin || 0) <= 25);
+  if (!pool.length) pool = ok.filter((r) => r.totalMin === fastest);
+  const dom = pool.filter((r) => legMinSum(r, "subway") >= legMinSum(r, "bus"));
+  if (dom.length) pool = dom;
+  let best = pool[0];
+  for (const r of pool) {
+    const a = subTabBusCost(r), b = subTabBusCost(best);
+    if (a < b || a === b && (r.transfers < best.transfers || r.transfers === best.transfers && r.totalMin < best.totalMin)) best = r;
+  }
+  return best;
+}
+__name(pickSubwayTab, "pickSubwayTab");
 function subwayTabRoute(G, busCoord, busNm, SY, SX, EY, EX) {
   const _SUB_WALK_OK_MIN = 12;
   const _optPure = { mustSubway: true, subwayNearest: true, noBus: true };
@@ -7060,21 +7101,43 @@ function subwayTabRoute(G, busCoord, busNm, SY, SX, EY, EX) {
   if (_pure && (_optPure._nearWalkMin || 0) <= _SUB_WALK_OK_MIN) return _pure;
   // ★ 2026-10-13 (YJ: "탑승한 대중교통에서 지하철역까지 한 번에 갈 수 있으면 환승시키지 마, 비효율적이야"):
   //   예전에는 '출발지에서 가장 가까운 역'에서만 타게 강제해서, 첫 버스가 바로 다른 역(테크노파크)에 닿는데도 버스를 갈아타고 가까운 역(지식정보단지)까지 갔다.
-  //   버스로 역까지 가는 경우에는 어느 역이든 탈 수 있게 풀고, 후보(최단·최소환승) 중 환승이 적은 쪽을 고른다(가장 빠른 것보다 5분·20% 넘게 느리면 제외).
+  //   버스로 역까지 가는 경우에는 어느 역이든 탈 수 있게 풀고, 후보 중에서 고른다.
   const _cands = [
     dijkstra(G, busCoord, busNm, SY, SX, EY, EX, "minTime", { mustSubway: true }),
-    dijkstra(G, busCoord, busNm, SY, SX, EY, EX, "minTransfer", { mustSubway: true })
-  ].filter((r) => r && r.legs && r.legs.some((L) => L.mode === "subway"));
+    dijkstra(G, busCoord, busNm, SY, SX, EY, EX, "minTransfer", { mustSubway: true }),
+    dijkstra(G, busCoord, busNm, SY, SX, EY, EX, "minTime", { mustSubway: true, busW: 3 }),
+    dijkstra(G, busCoord, busNm, SY, SX, EY, EX, "minTime", { mustSubway: true, busW: 8 })
+  ];
   if (_pure) _cands.push(_pure);
-  if (!_cands.length) return null;
-  const _fastest = Math.min(..._cands.map((r) => r.totalMin));
-  let _pool = _cands.filter((r) => r.totalMin <= _fastest + Math.max(5, _fastest * 0.2) && (r.accessWalkMin || 0) <= 25);
-  if (!_pool.length) _pool = _cands.filter((r) => r.totalMin === _fastest);
-  let _best = _pool[0];
-  for (const r of _pool) if (r.transfers < _best.transfers || r.transfers === _best.transfers && r.totalMin < _best.totalMin) _best = r;
-  return _best;
+  return pickSubwayTab(_cands);
 }
 __name(subwayTabRoute, "subwayTabRoute");
+// 탭 규칙 마무리(순수 함수 — 시험용으로도 쓴다). out: {minTime,minTransfer,minWalk,subway,bus,direct}
+function isBusOnlyRoute(r) {
+  if (!r || typeof r.totalMin !== "number" || !r.legs) return false;
+  let nb = 0;
+  for (const L of r.legs) {
+    if (L.mode === "bus") nb++;
+    else if (L.mode !== "walk" && L.mode !== "transfer") return false;
+  }
+  return nb > 0;
+}
+function tabNormalize(out) {
+  const clone = (r) => r ? JSON.parse(JSON.stringify(r)) : r;
+  const bc = [out.bus, out.direct, out.minTime, out.minTransfer, out.minWalk].filter(isBusOnlyRoute);
+  if (bc.length) {
+    let b = bc[0];
+    for (const r of bc) if (r.totalMin < b.totalMin || r.totalMin === b.totalMin && (r.transfers || 0) < (b.transfers || 0)) b = r;
+    if (b !== out.bus && (!isBusOnlyRoute(out.bus) || b.totalMin < out.bus.totalMin)) out.bus = clone(b);
+  }
+  const lc = [out.minTransfer, out.minTime, out.minWalk, out.subway, out.bus, out.direct].filter((r) => r && typeof r.totalMin === "number" && typeof r.transfers === "number");
+  if (lc.length) {
+    const pm = pickMinTransfer(lc);
+    if (pm && pm !== out.minTransfer) out.minTransfer = clone(pm);
+  }
+  return out;
+}
+__name(tabNormalize, "tabNormalize");
 async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
   _liveCtx = ctx || null;
   const _tReq = Date.now(), _djC0 = DJ_STAT.calls, _djP0 = DJ_STAT.pops;
@@ -7384,8 +7447,13 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
     const _direct = buildDirectRedFinish(G, _directFetched, _liveStat, out.bus);
     if (_direct) {
       _liveStat.directUsed = true;
-      if (!out.bus || (out.bus.transfers || 0) === 0) out.bus = _direct;
-      else out.direct = _direct;
+      // ★ 2026-10-14 (YJ: 버스 탭은 가장 빠른 버스 전용 경로여야 한다 — 송도→강남에서 63분짜리 M6405 대신 91분짜리 9201이 떴다):
+      //   기본 버스 경로가 환승 0회여도 직행(실시간 대기 반영)으로 무조건 바꾸지 않고, 더 빠른(같으면 직행) 쪽을 버스 탭으로 쓴다. 느린 쪽은 direct 로 남긴다.
+      if (!out.bus) out.bus = _direct;
+      else if ((out.bus.transfers || 0) === 0) {
+        if (_direct.totalMin <= out.bus.totalMin) out.bus = _direct;
+        else out.direct = _direct;
+      } else out.direct = _direct;
     }
   } catch (e) {
     _liveStat.directErr = String(e && e.message || e).slice(0, 60);
@@ -7430,6 +7498,13 @@ async function handleRouteV2(request, env, url, SUBWAY_BUNDLE2, ctx) {
       if (_best !== _mtCur) out.minTime = _best;
     }
   } catch (e) {
+  }
+  // ★ 2026-10-14 (YJ: "최단시간은 최단시간, 최소환승은 최소환승, 지하철은 지하철, 버스는 버스만"): 탭을 내보내기 직전에 규칙을 한 번 더 못 박는다.
+  //   · 버스 탭 = 지하철·열차가 없는 후보(버스+도보) 중 가장 빠른 것   · 최소환승 탭 = 모든 후보 중 환승이 가장 적은 것(같으면 빠른 쪽)
+  try {
+    tabNormalize(out);
+  } catch (e) {
+    _liveStat.tabNormErr = String(e && e.message || e).slice(0, 60);
   }
   try {
     _liveStat.msBreak = {

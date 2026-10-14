@@ -4,7 +4,7 @@
 const fs = require('fs'), assert = require('assert'), path = require('path');
 let src = fs.readFileSync(process.argv[2] || path.join(__dirname, '..', 'route-v2-worker.js'), 'utf8');
 const ei = src.lastIndexOf('\nexport {'); assert.ok(ei > 0); src = src.slice(0, ei) + '\n';
-const mod = new Function('fetch', 'caches', src + '\nreturn { buildSubway, addBus, dijkstra, subwayTabRoute, ENGINE_VERSION, XPEN, WPEN, pickMinTransfer };')(async () => ({}), undefined);
+const mod = new Function('fetch', 'caches', src + '\nreturn { buildSubway, addBus, dijkstra, subwayTabRoute, ENGINE_VERSION, XPEN, WPEN, pickMinTransfer, pickSubwayTab, tabNormalize, busSvcNameWindow, isBusOnlyRoute };')(async () => ({}), undefined);
 let fail = 0; const t = (n, f) => { try { f(); console.log('  ok  ', n); } catch (e) { fail++; console.log('  FAIL', n, '\n      ', e.message.split('\n')[0]); } };
 
 const KM = 1 / 111.0;   // 위도 1km ≈ 0.009°
@@ -152,6 +152,109 @@ t('지하철 탭: 버스 한 번으로 닿는 역(S2)이 있으면 가까운 역
   const r = tabSub(Xb, far);
   assert.ok(r); assert.ok(modes(r).indexOf('subway') >= 0);
   assert.strictEqual(nBus(r), 1, '버스 ' + nBus(r) + ' ' + JSON.stringify(modes(r)));
+});
+
+
+// ═════ 2026-10-14 (YJ: "최단시간은 최단시간, 최소환승은 최소환승, 지하철은 지하철 위주(버스 최소), 버스는 버스만") ═════
+const LG = (mode, min) => ({ mode, min });
+const RT = (totalMin, transfers, legs, accessWalkMin) => ({ totalMin, transfers, legs, accessWalkMin: accessWalkMin || 2 });
+t('지하철 탭: 환승이 적어도 버스 위주(버스 112분+지하철 36분)는 버리고, 버스를 덜 타는 지하철 경로를 고른다 (스샷 151분 사례)', () => {
+  const busHeavy = RT(131, 2, [LG('bus', 31), LG('walk', 2), LG('bus', 81), LG('walk', 2), LG('subway', 36)]);
+  const subHeavy = RT(134, 3, [LG('bus', 28), LG('transfer', 2), LG('subway', 27), LG('transfer', 5), LG('subway', 52), LG('transfer', 4), LG('subway', 2)]);
+  const r = mod.pickSubwayTab([busHeavy, subHeavy]);
+  assert.strictEqual(r, subHeavy);
+});
+t('지하철 탭: 버스 없이 걸어서 닿는 지하철 경로(걷기 25분 이내)가 비슷한 시간이면 그것이 우선', () => {
+  const walk = RT(70, 1, [LG('walk', 20), LG('subway', 50)], 20);
+  const bus = RT(62, 1, [LG('bus', 12), LG('subway', 50)], 2);
+  assert.strictEqual(mod.pickSubwayTab([bus, walk]), walk);
+});
+t('지하철 탭: 너무 오래 걸리는(최단보다 25%·10분 이상) 지하철 경로는 버스를 덜 타도 고르지 않는다', () => {
+  const quick = RT(60, 2, [LG('bus', 20), LG('subway', 38)]);
+  const slow = RT(100, 1, [LG('bus', 5), LG('subway', 90)]);
+  assert.strictEqual(mod.pickSubwayTab([quick, slow]), quick);
+});
+t('지하철 탭: 버스를 여러 번 갈아타는 경로는 한 번당 10분 가산(같은 버스 시간이면 한 번 타는 쪽)', () => {
+  const two = RT(60, 3, [LG('bus', 6), LG('bus', 6), LG('subway', 45)]);
+  const one = RT(62, 2, [LG('bus', 14), LG('subway', 45)]);
+  assert.strictEqual(mod.pickSubwayTab([two, one]), one);
+});
+t('지하철 탭: 지하철 구간이 없는 후보는 나오지 않는다', () => {
+  assert.strictEqual(mod.pickSubwayTab([RT(30, 0, [LG('bus', 30)])]), null);
+  assert.strictEqual(mod.pickSubwayTab([]), null);
+});
+t('최소환승: 걷기 20분 넘어 빠졌어도(35분 이내) 환승이 더 적고 더 빠르면 그 경로 (평내→종로 사례)', () => {
+  const lessBad = { transfers: 2, totalMin: 79, accessWalkMin: 3 };
+  const better = { transfers: 1, totalMin: 78, accessWalkMin: 24 };
+  assert.strictEqual(mod.pickMinTransfer([lessBad, better]), better);
+  const slower = { transfers: 1, totalMin: 85, accessWalkMin: 24 };
+  assert.strictEqual(mod.pickMinTransfer([lessBad, slower]), lessBad, '더 느리면 걷기 긴 경로를 쓰지 않는다');
+  const far = { transfers: 0, totalMin: 60, accessWalkMin: 53 };
+  assert.strictEqual(mod.pickMinTransfer([lessBad, far]), lessBad, '53분 걷는 경로는 여전히 제외');
+});
+t('탭 마무리: 버스 탭은 지하철 없는 후보 중 가장 빠른 것(송도→강남: 63분 M6405 가 91분 9201 보다 앞)', () => {
+  const m6405 = RT(63, 0, [LG('bus', 52)]);
+  const b9201 = RT(102, 0, [LG('bus', 91)]);
+  const sub = RT(91, 2, [LG('subway', 74)]);
+  const out = { minTime: m6405, minTransfer: m6405, minWalk: RT(70, 1, [LG('bus', 17), LG('bus', 49)]), subway: sub, bus: b9201 };
+  mod.tabNormalize(out);
+  assert.strictEqual(out.bus.totalMin, 63);
+  assert.ok(mod.isBusOnlyRoute(out.bus));
+});
+t('탭 마무리: 버스 탭에는 지하철·열차가 든 경로가 절대 들어가지 않는다', () => {
+  const mix = RT(40, 1, [LG('bus', 10), LG('subway', 30)]);
+  const train = RT(30, 0, [LG('longdist', 30)]);
+  const busy = RT(90, 2, [LG('bus', 40), LG('bus', 40)]);
+  const out = { minTime: mix, minTransfer: train, subway: mix, bus: busy };
+  mod.tabNormalize(out);
+  assert.strictEqual(out.bus, busy);
+  assert.ok(mod.isBusOnlyRoute(out.bus) && !out.bus.legs.some((L) => L.mode === 'subway' || L.mode === 'longdist'));
+});
+t('탭 마무리: 최소환승 탭은 모든 후보 중 환승이 가장 적은 경로(최단시간보다 환승이 많을 수 없다)', () => {
+  const fast = RT(60, 1, [LG('subway', 60)]);
+  const less = RT(66, 2, [LG('bus', 30), LG('subway', 30)]);
+  const out = { minTime: fast, minTransfer: less, subway: fast, bus: RT(80, 3, [LG('bus', 80)]) };
+  mod.tabNormalize(out);
+  assert.ok(out.minTransfer.transfers <= out.minTime.transfers);
+});
+
+// ── 심야버스: 운행시각이 비어도 낮에는 다니지 않는다 (YJ 스샷: 16시에 '심야A21')
+t('busSvcNameWindow: 심야A21(마을버스)·N노선·12심야(심야버스)는 야간 창을 받고, 일반 노선은 null', () => {
+  const w = mod.busSvcNameWindow;
+  assert.deepStrictEqual(w('심야A21', '마을버스'), { s: 1410, e: 300 });
+  assert.deepStrictEqual(w('N37', '심야버스'), { s: 1410, e: 300 });
+  assert.deepStrictEqual(w('올빼미1', '지선버스'), { s: 1410, e: 300 });
+  assert.ok(w('12심야', '심야버스') && w('12심야', '심야버스').s >= 1200);
+  assert.strictEqual(w('370', '간선버스'), null);
+  assert.strictEqual(w('1302', '직행좌석버스'), null);
+  assert.deepStrictEqual(w('새벽A148', '마을버스'), { s: 210, e: 330 });
+});
+t('심야A21(운행시각 없음, 마을버스)은 낮 14시에는 경로에 없고 새벽 1시에는 나온다', () => {
+  const mk = (utcMs) => {
+    const sub = mod.buildSubway(B);
+    const G = { adj: sub.adj, ST: sub.ST, LN: sub.LN, _baseMs: utcMs };
+    const rows = [['11_SEL1', '심야A21', '마을버스', [['N1', Y, 127.0005], ['N2', Y, 127.299]]]].flatMap(([rk, no, rt, pts]) => pts.map((p, i) => ({ route_key: rk, route_no: no, route_type: rt, start_time: null, end_time: null, node_id: p[0], node_nm: p[0], seq: i + 1, lat: p[1], lng: p[2] })));
+    const bc = mod.addBus(G, rows, B);
+    return mod.dijkstra(G, bc.busCoord, bc.busNm, O[0], O[1], D[0], D[1], 'minTime', { noSubway: true });
+  };
+  assert.strictEqual(mk(Date.UTC(2026, 9, 14, 5, 30)), null, '14:30 KST 에는 심야버스가 없어야 한다');
+  const night = mk(Date.UTC(2026, 9, 13, 16, 0));   // 01:00 KST
+  assert.ok(night && nBus(night) >= 1, '01:00 KST 에는 심야버스가 다닌다');
+});
+
+// ── 버스 가중(busW): 버스를 덜 타는 지하철 경로를 찾는다
+t('dijkstra busW: 버스에 무게를 주면 긴 버스 대신 짧은 버스+지하철(버스 시간이 더 짧은 경로)을 고른다', () => {
+  const far = [37.5, 126.97];
+  // R7: 출발지 근처에서 곧장 S3(127.20) 앞까지 긴 버스(약 21km). R6: S1(127.003) 앞까지 짧은 버스.
+  const Xw = build([
+    ['R7', '7', [['L1', 37.5, 126.9705], ['L2', 37.5, 127.198]]],
+    ['R6', '6', [['H1', 37.5, 126.9705], ['H2', 37.5, 127.0025]]]
+  ]);
+  const a = mod.dijkstra(Xw.G, Xw.busCoord, Xw.busNm, far[0], far[1], D[0], D[1], 'minTime', { mustSubway: true });
+  const b = mod.dijkstra(Xw.G, Xw.busCoord, Xw.busNm, far[0], far[1], D[0], D[1], 'minTime', { mustSubway: true, busW: 8 });
+  assert.ok(a && b, JSON.stringify([!!a, !!b]));
+  const busMin = (r) => r.legs.filter((L) => L.mode === 'bus').reduce((x, L) => x + L.min, 0);
+  assert.ok(busMin(b) <= busMin(a), '버스 시간 ' + busMin(b) + ' vs ' + busMin(a));
 });
 
 console.log(fail ? fail + ' 실패' : '전부 통과', '(엔진 ' + mod.ENGINE_VERSION + ')'); process.exit(fail ? 1 : 0);
