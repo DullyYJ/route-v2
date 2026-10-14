@@ -37,7 +37,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-14s21";
+var ENGINE_VERSION = "route-v2-2026-10-14s22";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -8485,7 +8485,7 @@ var RIDE_TRACK_DEFAULTS = {
   trailMaxSpeedMps: 60, zeroLeadSec: 25, zeroWinSec: 55, zeroSlideSec: 45, zeroNearM: 200, zeroFinalNearM: 250, zeroFarM: 600, zeroApplyLeadSec: 3, zeroKeepSec: 20, zeroFinalKeepMin: 30,
   // \u2605 2026-10-13 (YJ: "\uc2dc\uac04\ud45c\ubcf4\ub2e4 \ube60\ub974\uac8c \uc120\ud559\uc5d0 \uc654\uc5b4. \uc704\uce58\ub294 \ub9de\ud614\ub294\ub370 \uc2dc\uac04\uc774 \uc548\ub9de\ucdb0\uc838. \uc2dc\uac04\ub3c4 \uac19\uc774 \ubc00\uac70\ub098 \ub2f9\uae30\uba70 \uacc4\uc18d \uc601\uc810"): \uc2dc\uac01\ud45c \ucc3d(\ub3c4\ucc29 15\ucd08 \uc804~30\ucd08 \ub4a4) \ubc16\uc5d0\uc11c \ub2ff\uc740 \uc5f4\ucc28(\uc77c\ucc0d\u00b7\ub2a6\uac8c)\ub3c4 \ub193\uce58\uc9c0 \uc54a\ub3c4\ub85d
   //   pass:true \uc778 \uc815\ub958\uc7a5\uc740 '\ud45c\uc2dc \ub3c4\ucc29 \uc2dc\uac01 \uc55e\ub4a4' \ub113\uc740 \ucc3d\uc5d0\uc11c GPS \uac00 \uadf8 \uc815\ub958\uc7a5 150m \uc548(\uc815\ud655\ub3c4 60m \uc774\ud558 \uc88c\ud45c)\uc5d0 \ub4e0 \uac00\uc7a5 \uac00\uae4c\uc6b4 \uc21c\uac04\uc744 \ud1b5\uacfc \uc2dc\uac01(passMs)\uc73c\ub85c \ub3cc\ub824\uc900\ub2e4 \u2014 \uc571\uc740 \uadf8 \uc2dc\uac01\uc744 \ud1b5\uacfc \uc99d\uac70\ub85c \uc5d4\uc9c4\uc5d0 \ub2e4\uc2dc \ubcf4\ub0b8\ub2e4.
-  passAheadSec: 300, passLateSec: 420, passBackSec: 300, passNearM: 150, passAccM: 60,
+  passAheadSec: 300, passLateSec: 420, passBackSec: 300, passNearM: 150, passAccM: 60, passInterpMaxGapSec: 30,
   // \u2605 2026-10-13 (YJ: "\ub9c8\ucee4\ub3c4 \uacc4\uc18d \uc5d4\uc9c4\uc5d0 \uc704\uce58\ub97c \ubb3c\uc5b4\ubcf4\uace0 \uc601\uc810 \uc7a1\uace0 \ubcf4\uc815\ud574\uc57c\uc9c0 \u2014 \ubc00\uac70\ub098 \ub2f9\uae30\uac70\ub098"): \ub2a6\uac8c \uc624\ub294 \uc5f4\ucc28 \u2014 \ud45c\uc2dc \ub3c4\ucc29 \uc2dc\uac01\uc774 \uc9c0\ub0ac\ub294\ub370 \uc2e0\uc120\ud55c GPS \uac00 '\uc55e \uc815\ub958\uc7a5\uacfc \uc774 \uc815\ub958\uc7a5 \uc0ac\uc774'\uc5d0\uc11c \uc774 \uc815\ub958\uc7a5\uacfc notYetFarM \ub118\uac8c \ub5a8\uc5b4\uc838 \uc788\uc73c\uba74 notYet:true(\uc544\uc9c1 \uc548 \ub2ff\uc74c). \uc571\uc740 \uc774 \uc99d\uac70\ub97c /ride-eta \uc5d0 \ubcf4\ub0b4\uace0 \uc5d4\uc9c4\uc774 \ub4a4 \uc2dc\uac01\uc744 \ubbfc\ub2e4.
   notYetFarM: 400, notYetMaxLateSec: 300, notYetBetween: 1.25, notYetAccM: 100
 };
@@ -8741,9 +8741,25 @@ function rtPassTime(s, tr, now, O) {
     if (q.ts < lo || q.ts > now + 1000) continue;
     if (q.acc != null && q.acc > O.passAccM) continue;
     var d = rtHav(q.lat, q.lng, s.lat, s.lng);
-    if (d <= O.passNearM && (best == null || d < best.d)) best = { d: d, ms: q.ts };
+    if (d <= O.passNearM && (best == null || d < best.d)) best = { d: d, ms: q.ts, i: i };
   }
-  return best ? { ms: best.ms, distM: Math.round(best.d) } : null;
+  if (!best) return null;
+  // \u2605 2026-10-14 (YJ: "\uc601\uc810 \uc870\uc808 gps \uc7a1\uc744 \ub54c \ucd08 \ub2e8\uc704\uae4c\uc9c0 \ud568\uaed8 \uc55e\ub4a4\ub85c \ubc00\uc5b4\uc918. \uba87 \ucd08\uac00 \uacc4\uc18d \uc313\uc774\uba74 \ub098\uc911\uc5d0 \uc624\ucc28\uac00 \ucee4\uc9c0\ub2c8\uae4c"):
+  //   '\uac00\uc7a5 \uac00\uae4c\uc6e0\ub358 \uc0d8\ud50c'\uc758 \uc2dc\uac01\uc740 \uc0d8\ud50c \uac04\uaca9(\uc218 \ucd08~\uc2ed\uc218 \ucd08)\ub9cc\ud07c \ud2c0\ub9b4 \uc218 \uc788\ub2e4. \uc55e\ub4a4 \uc0d8\ud50c \uc0ac\uc774\uc5d0\uc11c \uc815\ub958\uc7a5\uc5d0 \uac00\uc7a5 \uac00\uae4c\uc6e0\ub358 \uc21c\uac04\uc744 \uc9c1\uc120 \ubcf4\uac04\uc73c\ub85c \uad6c\ud574 \ucd08 \ub2e8\uc704(ms)\ub85c \uc4f4\ub2e4.
+  var ms = best.ms, dMin = best.d, bi = best.i, gapMs = O.passInterpMaxGapSec * 1000, cand = [bi - 1, bi];
+  for (var c = 0; c < cand.length; c++) {
+    var a = tr[cand[c]], b = tr[cand[c] + 1];
+    if (!a || !b || b.ts <= a.ts || b.ts - a.ts > gapMs || b.ts > now + 1000) continue;
+    if ((a.acc != null && a.acc > O.passAccM) || (b.acc != null && b.acc > O.passAccM)) continue;
+    var kx = 111320 * Math.cos(s.lat * Math.PI / 180), ax = (a.lng - s.lng) * kx, ay = (a.lat - s.lat) * 111320, bx = (b.lng - s.lng) * kx, by = (b.lat - s.lat) * 111320;
+    var vx = bx - ax, vy = by - ay, vv = vx * vx + vy * vy;
+    if (!(vv > 0)) continue;
+    var u = -(ax * vx + ay * vy) / vv;
+    if (u <= 0 || u >= 1) continue;
+    var px = ax + u * vx, py = ay + u * vy, dd = Math.sqrt(px * px + py * py);
+    if (dd < dMin - 0.5) { dMin = dd; ms = Math.round(a.ts + u * (b.ts - a.ts)); }
+  }
+  return { ms: ms, distM: Math.round(dMin) };
 }
 // \uc544\uc9c1 \uc548 \ub2ff\uc74c: \ud45c\uc2dc \ub3c4\ucc29 \uc2dc\uac01\uc774 \uc9c0\ub0ac\ub294\ub370(\ucd5c\ub300 notYetMaxLateSec) \ub9c8\uc9c0\ub9c9 \uc2e0\uc120\ud55c \uc88c\ud45c\uac00 \uc55e \uc815\ub958\uc7a5\uacfc \uc774 \uc815\ub958\uc7a5 '\uc0ac\uc774'\uc5d0 \uc788\uace0 \uc774 \uc815\ub958\uc7a5\uc5d0\uc11c notYetFarM \ub118\uac8c \uba40\ub2e4.
 //   (\uc774\ubbf8 \uc9c0\ub098\uccd0 \uba40\uc5b4\uc9c4 \uacbd\uc6b0\uc640 \uac00\ub974\uae30 \uc704\ud574 '\uc0ac\uc774'\uc77c \ub54c\ub9cc \u2014 \uc55e \uc815\ub958\uc7a5 \uc88c\ud45c\uac00 \uc5c6\uc73c\uba74 \ud310\uc815\ud558\uc9c0 \uc54a\ub294\ub2e4.)

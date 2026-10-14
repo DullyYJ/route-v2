@@ -37,7 +37,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-14s21";
+var ENGINE_VERSION = "route-v2-2026-10-14s22";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -8485,7 +8485,7 @@ var RIDE_TRACK_DEFAULTS = {
   trailMaxSpeedMps: 60, zeroLeadSec: 25, zeroWinSec: 55, zeroSlideSec: 45, zeroNearM: 200, zeroFinalNearM: 250, zeroFarM: 600, zeroApplyLeadSec: 3, zeroKeepSec: 20, zeroFinalKeepMin: 30,
   // ★ 2026-10-13 (YJ: "시간표보다 빠르게 선학에 왔어. 위치는 맞혔는데 시간이 안맞춰져. 시간도 같이 밀거나 당기며 계속 영점"): 시각표 창(도착 15초 전~30초 뒤) 밖에서 닿은 열차(일찍·늦게)도 놓치지 않도록
   //   pass:true 인 정류장은 '표시 도착 시각 앞뒤' 넓은 창에서 GPS 가 그 정류장 150m 안(정확도 60m 이하 좌표)에 든 가장 가까운 순간을 통과 시각(passMs)으로 돌려준다 — 앱은 그 시각을 통과 증거로 엔진에 다시 보낸다.
-  passAheadSec: 300, passLateSec: 420, passBackSec: 300, passNearM: 150, passAccM: 60,
+  passAheadSec: 300, passLateSec: 420, passBackSec: 300, passNearM: 150, passAccM: 60, passInterpMaxGapSec: 30,
   // ★ 2026-10-13 (YJ: "마커도 계속 엔진에 위치를 물어보고 영점 잡고 보정해야지 — 밀거나 당기거나"): 늦게 오는 열차 — 표시 도착 시각이 지났는데 신선한 GPS 가 '앞 정류장과 이 정류장 사이'에서 이 정류장과 notYetFarM 넘게 떨어져 있으면 notYet:true(아직 안 닿음). 앱은 이 증거를 /ride-eta 에 보내고 엔진이 뒤 시각을 민다.
   notYetFarM: 400, notYetMaxLateSec: 300, notYetBetween: 1.25, notYetAccM: 100
 };
@@ -8741,9 +8741,25 @@ function rtPassTime(s, tr, now, O) {
     if (q.ts < lo || q.ts > now + 1000) continue;
     if (q.acc != null && q.acc > O.passAccM) continue;
     var d = rtHav(q.lat, q.lng, s.lat, s.lng);
-    if (d <= O.passNearM && (best == null || d < best.d)) best = { d: d, ms: q.ts };
+    if (d <= O.passNearM && (best == null || d < best.d)) best = { d: d, ms: q.ts, i: i };
   }
-  return best ? { ms: best.ms, distM: Math.round(best.d) } : null;
+  if (!best) return null;
+  // ★ 2026-10-14 (YJ: "영점 조절 gps 잡을 때 초 단위까지 함께 앞뒤로 밀어줘. 몇 초가 계속 쌓이면 나중에 오차가 커지니까"):
+  //   '가장 가까웠던 샘플'의 시각은 샘플 간격(수 초~십수 초)만큼 틀릴 수 있다. 앞뒤 샘플 사이에서 정류장에 가장 가까웠던 순간을 직선 보간으로 구해 초 단위(ms)로 쓴다.
+  var ms = best.ms, dMin = best.d, bi = best.i, gapMs = O.passInterpMaxGapSec * 1000, cand = [bi - 1, bi];
+  for (var c = 0; c < cand.length; c++) {
+    var a = tr[cand[c]], b = tr[cand[c] + 1];
+    if (!a || !b || b.ts <= a.ts || b.ts - a.ts > gapMs || b.ts > now + 1000) continue;
+    if ((a.acc != null && a.acc > O.passAccM) || (b.acc != null && b.acc > O.passAccM)) continue;
+    var kx = 111320 * Math.cos(s.lat * Math.PI / 180), ax = (a.lng - s.lng) * kx, ay = (a.lat - s.lat) * 111320, bx = (b.lng - s.lng) * kx, by = (b.lat - s.lat) * 111320;
+    var vx = bx - ax, vy = by - ay, vv = vx * vx + vy * vy;
+    if (!(vv > 0)) continue;
+    var u = -(ax * vx + ay * vy) / vv;
+    if (u <= 0 || u >= 1) continue;
+    var px = ax + u * vx, py = ay + u * vy, dd = Math.sqrt(px * px + py * py);
+    if (dd < dMin - 0.5) { dMin = dd; ms = Math.round(a.ts + u * (b.ts - a.ts)); }
+  }
+  return { ms: ms, distM: Math.round(dMin) };
 }
 // 아직 안 닿음: 표시 도착 시각이 지났는데(최대 notYetMaxLateSec) 마지막 신선한 좌표가 앞 정류장과 이 정류장 '사이'에 있고 이 정류장에서 notYetFarM 넘게 멀다.
 //   (이미 지나쳐 멀어진 경우와 가르기 위해 '사이'일 때만 — 앞 정류장 좌표가 없으면 판정하지 않는다.)
