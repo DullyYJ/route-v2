@@ -18,7 +18,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-14s16";
+var ENGINE_VERSION = "route-v2-2026-10-14s17";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -9256,6 +9256,7 @@ function ntCreate(DATA) {
     if(_ctxDay === 'SAT' && rec.S) return rec.S;
     return rec.W || rec.D;
   }
+  var _TT_ALIAS = { '총신대입구': '이수', '이수': '총신대입구' };
   function _ttNm(n){ return String(n||'').replace(/\(.*?\)/g,'').replace(/역$/,'').replace(/\s+/g,'').trim(); }
 
   var _TT_SCHED_ALIAS = { '의정부선':'의정부경전철', '에버라인선':'용인경전철', '인천공항철도':'공항철도' };
@@ -10010,6 +10011,15 @@ function ntCreate(DATA) {
     //   · 토요일 별도 자료가 있는 노선에서만 평일/토/일 세 갈래, 아니면 평일 / 토·일·공휴일 두 갈래.
     //   · nextMin: 지금(nowMin) 이후 첫 열차. 자정 직후(04시 전)에는 전날 영업일의 자정 넘은 열차(1440+)까지 본다. 오늘 남은 열차가 없으면 tomorrow=true 와 내일 첫차.
     timetable: function (q) {
+      // 같은 역을 노선마다 다른 이름으로 부르는 곳(7호선 이수 = 4호선 총신대입구) — 첫 이름에 자료가 없으면 다른 이름으로 한 번 더
+      var r0 = this._timetable(q);
+      if (r0.noData) {
+        var alt = _TT_ALIAS[_ttNm(q.from)];
+        if (alt) { var r1 = this._timetable({ line: q.line, from: alt, baseMs: q.baseMs, day: q.day }); if (!r1.noData) { r1.stn = String(q.from || ''); return r1; } }
+      }
+      return r0;
+    },
+    _timetable: function (q) {
       var base = q.baseMs, di = ntDayInfo(base);
       var line = String(q.line || ''), stn = String(q.from || '');
       var nm = _ttNm(stn), rec = (_REAL_TT || {})[line + '|' + nm];
