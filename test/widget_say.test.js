@@ -17,7 +17,7 @@ const get = async (q) => JSON.parse(await (await w.fetch(new Request('https://x.
 let pass = 0, fail = 0;
 const t = async (n, f) => { try { await f(); pass++; console.log('  ok  ', n); } catch (e) { fail++; console.log('  FAIL', n, '\n      ', String(e.message || e).slice(0, 400)); } };
 (async () => {
-  await t('버전 s25', () => assert.strictEqual(V, 'route-v2-2026-10-15s25'));
+  await t('버전 s26', () => assert.strictEqual(V, 'route-v2-2026-10-15s26'));
   await t('기본: 출근/퇴근 버튼 글자·두 줄 이하·검증 시간', async () => {
     const a = await get('?kind=morn&baseMs=' + ms('2026-10-14T08:00:00')), b = await get('?kind=eve&baseMs=' + ms('2026-10-14T18:30:00'));
     assert.strictEqual(a.btn, '출근하기'); assert.strictEqual(b.btn, '퇴근하기');
@@ -52,6 +52,23 @@ const t = async (n, f) => { try { await f(); pass++; console.log('  ok  ', n); }
     const h = compose('morn', ms('2026-10-09T08:00:00'), null, []);               // 한글날
     assert(/한글날/.test(h.say[0]) && h.mood === 'comfort', h.say[0]);
     const l = compose('eve', ms('2026-10-14T22:10:00'), null, []); assert(/늦게/.test(l.say[0]) && l.mood === 'comfort');
+  });
+  await t('(10-15 YJ) 하루 마무리(퇴근)·하루 시작(출근) 응원이 매일 달라진다 — 날씨 말이 없는 날 두 번째 줄', async () => {
+    const day = (n) => ms('2026-11-' + String(1 + n).padStart(2, '0') + 'T18:30:00');
+    const eve = [], morn = [];
+    for (let i = 0; i < 28; i++) { eve.push(compose('eve', day(i), null, []).say[1]); morn.push(compose('morn', day(i) - 10 * 3600e3, null, []).say[1]); }
+    assert.strictEqual(new Set(eve).size, 28, '퇴근 28일 동안 같은 말이 없어야 한다'); assert.strictEqual(new Set(morn).size, 28, '출근 28일');
+    assert(eve.every(x => x.length >= 6 && x.length <= 36) && morn.every(x => x.length >= 6 && x.length <= 36));
+    assert(!eve.some(x => morn.includes(x)), '퇴근 말과 출근 말이 섞이면 안 된다');
+    assert(!eve.includes('오늘도 화이팅!') && !morn.includes('오늘도 수고 많았어요'));
+    const q = '?kind=eve&baseMs=' + day(3); assert.deepStrictEqual((await get(q)).say, (await get(q)).say);
+  });
+  await t('(10-15 YJ) 늦은 퇴근(21시 이후)도 첫 줄이 매일 달라지고, 막차 안내는 유지', async () => {
+    const lines = [], tips = [];
+    for (let i = 0; i < 12; i++) { const c = compose('eve', ms('2026-11-' + String(1 + i).padStart(2, '0') + 'T22:10:00'), null, []); lines.push(c.say[0]); tips.push(c.say[1]); assert.strictEqual(c.mood, 'comfort'); }
+    assert.strictEqual(new Set(lines).size, 12, lines.join('|')); assert(lines.every(x => x.length <= 36));
+    assert(tips.some(x => /막차/.test(x)));
+    assert(lines.some(x => /늦게까지 정말 수고했어요/.test(x)), '기존 문구도 풀에 남아 있다');
   });
   await t('노선 공지가 있으면 그 노선을 말하고 warn', async () => {
     ntceItems = [{ lineNmLst: '1호선', noftTtl: '1호선 지연', noftCn: '신호장애로 지연', noftOcrnDt: new Date(Date.now() + 9 * 3600e3 - 60e3).toISOString().slice(0, 19), nonstopYn: 'N' }];
