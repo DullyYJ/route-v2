@@ -37,7 +37,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-15s26";
+var ENGINE_VERSION = "route-v2-2026-10-15s27";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -10543,6 +10543,121 @@ async function handleWidgetSay(request, env, ctx) {
   return new Response(JSON.stringify({ ok: true, kind: kind, btn: kind === "eve" ? "퇴근하기" : "출근하기", say: c.say, mood: c.mood, validMin: WSAY_VALID_MIN, facts: c.facts, v: ENGINE_VERSION }), { status: 200, headers: H });
 }
 // ===== 위젯 응원 멘트 끝 =====
+// ===== 장면 엔진 (2026-10-15 YJ: 혼잡도 카드 창의 3D 캐릭터 장면 — "계산은 엔진이 한다, 앱은 그림만 그린다") =====
+//   POST /scene  { nowMs?, tzOffsetMin?, lat?, lng?, locked, key?, here, boarded, nodes:[{name,isSub,isBus,isWalk,isOrigin,lineName,hasLoc}] }
+//   · 어떤 장면을 보일지(경로 없음=idle / 버스 타기 전=wait / 타고 가는 중=ride / 내림=alight / 지하철 구간=없음 → 혼잡도),
+//     혼잡도 카드가 어느 구간(지하철 역·버스 정류장 목록)을 보여줄지, 시간대(새벽·아침·점심·오후·저녁·밤)·실제 날씨 종류, 대표 캐릭터·등장 순서, 안내 문구를 전부 여기서 정한다.
+//   · 앱(www/index.html)은 받은 값을 그리기만 한다(색·모양·움직임은 앱의 그림 규칙). 날씨는 subway-api 워커(/weather)의 값을 쓰고, 못 받으면 날씨를 지어내지 않는다(wxKnown:false).
+var SCENE_CHARS = ["dolsom", "lovel", "dudung", "sul", "ppopu", "chaeng"];
+var SCENE_HINT_BUS = "지하철 탑승시 혼잡도가 나와요!";
+var SCENE_SLOT_KO = { dawn: "새벽", morning: "아침", noon: "점심", afternoon: "오후", evening: "저녁", night: "밤" };
+var SCENE_WX_KO = { clear: "맑음", cloudy: "구름", overcast: "흐림", rain: "비", snow: "눈", fog: "안개" };
+var SCENE_WX_CACHE = {};
+function sceneHash(s) { var h = 2166136261; s = String(s); for (var i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; } return h >>> 0; }
+function sceneShuffle(list, seed) {
+  var a = list.slice(), s = seed >>> 0 || 1;
+  for (var i = a.length - 1; i > 0; i--) { s = (Math.imul(s, 1664525) + 1013904223) >>> 0; var j = (s >>> 8) % (i + 1), t = a[i]; a[i] = a[j]; a[j] = t; }
+  return a;
+}
+function sceneSlot(h) { return h >= 4 && h < 7 ? "dawn" : h >= 7 && h < 11 ? "morning" : h >= 11 && h < 14 ? "noon" : h >= 14 && h < 18 ? "afternoon" : h >= 18 && h < 21 ? "evening" : "night"; }
+function sceneWxKind(wx) {
+  if (!wx) return "clear";
+  var t = String(wx.txt || ""), r = typeof wx.rain === "number" ? wx.rain : -1;
+  if (/눈|진눈/.test(t)) return "snow";
+  if (/비|소나기|뇌우|천둥|우박/.test(t) || (!t && r >= 60)) return "rain";
+  if (/안개|박무|연무/.test(t)) return "fog";
+  if (/흐림/.test(t)) return "overcast";
+  if (/구름/.test(t)) return "cloudy";
+  return "clear";
+}
+function sceneLook(nowMs, tz, wx) {
+  var kd = new Date(nowMs + tz * 6e4), slot = sceneSlot(kd.getUTCHours()), wk = sceneWxKind(wx), mo = kd.getUTCMonth();
+  var season = mo >= 2 && mo <= 4 ? "spring" : mo >= 5 && mo <= 7 ? "summer" : mo >= 8 && mo <= 10 ? "autumn" : "winter";
+  var emo = wk === "snow" ? "❄️" : wk === "rain" ? "🌧️" : wk === "overcast" ? "☁️" : wk === "cloudy" ? "⛅" : wk === "fog" ? "🌫️" : slot === "night" ? "🌙" : slot === "dawn" ? "🌅" : slot === "evening" ? "🌇" : "☀️";
+  var known = !!wx;
+  return { slot: slot, slotKo: SCENE_SLOT_KO[slot], wk: wk, wxKo: known ? SCENE_WX_KO[wk] : "", wxKnown: known, temp: wx && typeof wx.temp === "number" ? Math.round(wx.temp) : null, season: season, night: slot === "night", lit: slot === "night" || slot === "evening" || slot === "dawn", hidesSun: wk === "overcast" || wk === "rain" || wk === "snow" || wk === "fog", emo: emo };
+}
+function sceneIsTr(n) { return !!(n && (n.isSub || n.isBus) && n.name); }
+// 지금 위치(here)에서 '타고 있거나 곧 탈' 구간의 노드: here 가 탈것이면 그것, 도보·출발이면 다음 탈것, 없으면 마지막으로 지난 탈것
+function sceneLegNode(nodes, here) {
+  var j, k, n = nodes[here];
+  if (sceneIsTr(n)) return { i: here, n: n };
+  for (j = here + 1; j < nodes.length; j++) if (sceneIsTr(nodes[j])) return { i: j, n: nodes[j] };
+  for (k = here - 1; k >= 0; k--) if (sceneIsTr(nodes[k])) return { i: k, n: nodes[k] };
+  return null;
+}
+function sceneBounds(nodes, i) {
+  var bus = !!nodes[i].isBus, ln = nodes[i].lineName || "", a = i, b = i;
+  function same(n) { return n && (bus ? n.isBus : n.isSub) && (n.lineName || "") === ln; }
+  while (a - 1 >= 0 && same(nodes[a - 1])) a--;
+  while (b + 1 < nodes.length && same(nodes[b + 1])) b++;
+  return [a, b];
+}
+// 장면에 쓸 짧은 노선 이름: 지하철 '9호선' → '9', 그 밖의 노선은 앞 2글자, 버스는 번호 그대로
+function sceneLineLabel(n) {
+  var ln = String((n && n.lineName) || "");
+  if (n && n.isBus) return ln.slice(0, 6);
+  var m = /^(\d+)\uD638\uC120/.exec(ln);
+  return m ? m[1] : ln.slice(0, 2);
+}
+// ★ 2026-10-15 (YJ 재지시): 혼잡도는 '지하철 탑승 확정' 뒤에만 보인다. 타기를 기다리는 동안(버스·지하철 모두)·버스를 타고 가는 동안·내린 뒤에는 혼잡도 없이 장면(애니메이션)만 보인다.
+//   · mode: idle(경로 없음) | wait(타기 전) | ride(버스 안) | alight(내림) | null(지하철 타고 가는 중 → 혼잡도)
+//   · venue: 'bus'(정류장·버스) | 'sub'(지하철역 입구) | 'street'(idle)
+function sceneDecide(inp, wx) {
+  inp = inp || {};
+  var nowMs = isFinite(inp.nowMs) ? +inp.nowMs : Date.now(), tz = isFinite(inp.tzOffsetMin) ? +inp.tzOffsetMin : 540;
+  var nodes = Array.isArray(inp.nodes) ? inp.nodes.slice(0, 200) : [], locked = inp.locked === true;
+  var look = sceneLook(nowMs, tz, wx || null);
+  var sigBase = nodes.map(function (n) { return (n.isBus ? "b" : n.isSub ? "s" : n.isWalk ? "w" : "o") + (n.lineName || "") + "|" + (n.name || ""); }).join(">");
+  var day = Math.floor((nowMs + tz * 6e4) / 864e5), seedStr = String(inp.key || sigBase) + "#" + day;
+  var out = { ok: true, mode: null, venue: "street", line: "", nearEnd: false, hint: null, tag: "", look: look, hero: SCENE_CHARS[sceneHash(seedStr) % SCENE_CHARS.length], cast: sceneShuffle(SCENE_CHARS, sceneHash(seedStr + "/" + Math.floor(nowMs / 6e5))), cong: { kind: null, idx: -1, sig: "" } };
+  var idleTag = look.emo + " " + look.slotKo + (look.wxKnown ? " \u00B7 " + look.wxKo + (look.temp != null ? " " + look.temp + "\u00B0" : "") : "");
+  if (!locked) { out.mode = "idle"; out.tag = idleTag; return out; }
+  if (!nodes.length) return out;
+  var here = Math.max(0, Math.min(isFinite(inp.here) ? inp.here | 0 : 0, nodes.length - 1)), leg = sceneLegNode(nodes, here), j;
+  if (!leg) return out;
+  var n = leg.n, bb = sceneBounds(nodes, leg.i), first = bb[0], last = bb[1], firstTr = -1, bus = !!n.isBus;
+  for (j = 0; j < nodes.length; j++) if (!nodes[j].isOrigin && !nodes[j].isWalk && (nodes[j].isBus || nodes[j].isSub)) { firstTr = j; break; }
+  var phase;
+  if (leg.i > here) phase = "wait";                                                        // 타러 가는 중(도보·환승 이동)
+  else if (leg.i < here) phase = "alight";                                                 // 내려서 목적지로 가는 중
+  else if (bus && here === last && last > first) phase = "alight";                          // 버스: 내릴 정류장에 닿음
+  else if (here === first && !(first === firstTr && inp.boarded === true)) phase = "wait";  // 첫 탈것이면 승차 확정 뒤에만 탄 것으로 본다
+  else phase = "ride";
+  if (!bus && phase === "ride") { out.cong = { kind: "sub", idx: leg.i === here ? here : leg.i, sig: "s|" + (n.lineName || "") + "|" + (nodes[here] && nodes[here].name || n.name) }; if (nodes[here] && nodes[here].isSub) out.cong.idx = here; return out; }   // 지하철 탑승 확정 → 혼잡도
+  out.mode = phase; out.venue = bus ? "bus" : "sub"; out.line = sceneLineLabel(n); out.hint = SCENE_HINT_BUS;
+  out.nearEnd = bus && phase === "ride" && here === last - 1;
+  var who = bus ? "\uD83D\uDE8C " + out.line + " \uBC84\uC2A4\uB97C" : "\uD83D\uDE87 " + (n.lineName || "\uC9C0\uD558\uCCA0") + " \uC5F4\uCC28\uB97C";
+  out.tag = phase === "wait" ? who + " \uAE30\uB2E4\uB9AC\uB294 \uC911" : phase === "ride" ? (out.nearEnd ? "\uD83D\uDD14 \uACE7 \uB0B4\uB824\uC694!" : "\uD83D\uDE8C \uBC84\uC2A4 \uD0C0\uACE0 \uAC00\uB294 \uC911") : "\uD83D\uDC4B \uB0B4\uB838\uC5B4\uC694, \uCE5C\uAD6C\uB4E4\uACFC \uB180\uC544\uC694";
+  return out;
+}
+
+async function sceneWeather(lat, lng) {
+  if (!(isFinite(lat) && isFinite(lng) && lat > 33 && lat < 39 && lng > 124 && lng < 132)) return null;
+  var key = Math.round(lat * 20) + "," + Math.round(lng * 20), c = SCENE_WX_CACHE[key], now = Date.now();
+  if (c && now - c.ts < 6e5) return c.wx;
+  try {
+    var ac = new AbortController(), t = setTimeout(function () { ac.abort(); }, 2500);
+    var r = await fetch(WSAY_WX_URL + "?lat=" + lat + "&lng=" + lng, { signal: ac.signal });
+    clearTimeout(t);
+    var j = r.ok ? await r.json() : null;
+    if (j && j.ok !== false && typeof j.temp === "number") { var wx = { temp: j.temp, rain: typeof j.rain === "number" ? j.rain : null, txt: String(j.txt || "").slice(0, 12) }; SCENE_WX_CACHE[key] = { ts: now, wx: wx }; return wx; }
+  } catch (e) {}
+  return c ? c.wx : null;
+}
+async function handleScene(request) {
+  var H = { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "POST, OPTIONS", "Access-Control-Allow-Headers": "content-type", "Cache-Control": "no-store" };
+  if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: H });
+  if (request.method !== "POST") return new Response(JSON.stringify({ error: "POST only" }), { status: 405, headers: H });
+  var body;
+  try { body = await request.json(); } catch (e) { return new Response(JSON.stringify({ error: "JSON 아님" }), { status: 400, headers: H }); }
+  var wx = await sceneWeather(Number(body && body.lat), Number(body && body.lng)), out;
+  try { out = sceneDecide(body, wx); } catch (e2) { return new Response(JSON.stringify({ error: String(e2 && e2.message || e2) }), { status: 500, headers: H }); }
+  out.v = ENGINE_VERSION;
+  return new Response(JSON.stringify(out), { headers: H });
+}
+// ===== 장면 엔진 끝 =====
+
 async function handleFetch(request, env, ctx) {
   try { await holEnsure(env); } catch (e) {}
   const url = new URL(request.url);
@@ -10552,6 +10667,7 @@ async function handleFetch(request, env, ctx) {
   if (url.pathname === "/next-train") return handleNextTrain(request, env);
   if (url.pathname === "/holidays") return handleHolidays(request, env);
   if (url.pathname === "/widget-say") return handleWidgetSay(request, env, ctx);
+  if (url.pathname === "/scene") return handleScene(request);
   if (url.pathname === "/stops-near") {
     const lat = parseFloat(url.searchParams.get("lat"));
     const lng = parseFloat(url.searchParams.get("lng"));
