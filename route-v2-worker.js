@@ -37,7 +37,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-15s23";
+var ENGINE_VERSION = "route-v2-2026-10-15s24";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -7812,7 +7812,8 @@ var RIDE_ETA_DEFAULTS = {
   stopDwellSec: 25,
   // ★ 2026-10-14 (YJ: 인천1호선(실시간 위치 없음) 시험 — 도착 표시가 약 15초 늦다 → 현재보다 10초 일찍 도착으로 판정): 시각표 기준 위치(pos)에서 '중간 경로역'(승차역·최종 목적지 제외)에 닿았다고 보는 시각을
   //   표시 도착 시각보다 이만큼(초) 앞당긴다. 0 이면 끔. 표시하는 도착 시각(etaMs·arr)은 그대로이고 마커·오버레이가 읽는 pos(from/to/t0/t1/segs)만 당겨진다. (영점 창은 ride-track zeroLeadSec 가 같이 일찍 열린다)
-  arriveEarlySec: 10,
+  // ★ 2026-10-15 (YJ: 마커가 다음 역에 너무 일찍 올라간다 → 10초를 5초로): 값만 10 → 5.
+  arriveEarlySec: 5,
   // ★ 2026-10-14 (실기기 로그: 부평에서 마커가 멈췄다 — 구간표가 14구간뿐이라 응답이 끊긴 26분 뒤 끝났다): 남은 구간 전부를 준다(상한은 안전장치).
   posSegCount: 80,        // pos.segs — 앞으로 그릴 구간 수(응답이 끊겨도 시각표대로 끝까지 이어 그리게)
   overdueSec: 60, overdueMaxMin: 15, overdueExtraMin: 0.5, overdueGain: 1, overdueMode: 'clamp',
