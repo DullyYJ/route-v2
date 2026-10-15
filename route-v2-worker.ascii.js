@@ -37,7 +37,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-15s27";
+var ENGINE_VERSION = "route-v2-2026-10-16s28";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -10549,7 +10549,7 @@ async function handleWidgetSay(request, env, ctx) {
 //     \ud63c\uc7a1\ub3c4 \uce74\ub4dc\uac00 \uc5b4\ub290 \uad6c\uac04(\uc9c0\ud558\ucca0 \uc5ed\u00b7\ubc84\uc2a4 \uc815\ub958\uc7a5 \ubaa9\ub85d)\uc744 \ubcf4\uc5ec\uc904\uc9c0, \uc2dc\uac04\ub300(\uc0c8\ubcbd\u00b7\uc544\uce68\u00b7\uc810\uc2ec\u00b7\uc624\ud6c4\u00b7\uc800\ub141\u00b7\ubc24)\u00b7\uc2e4\uc81c \ub0a0\uc528 \uc885\ub958, \ub300\ud45c \uce90\ub9ad\ud130\u00b7\ub4f1\uc7a5 \uc21c\uc11c, \uc548\ub0b4 \ubb38\uad6c\ub97c \uc804\ubd80 \uc5ec\uae30\uc11c \uc815\ud55c\ub2e4.
 //   \u00b7 \uc571(www/index.html)\uc740 \ubc1b\uc740 \uac12\uc744 \uadf8\ub9ac\uae30\ub9cc \ud55c\ub2e4(\uc0c9\u00b7\ubaa8\uc591\u00b7\uc6c0\uc9c1\uc784\uc740 \uc571\uc758 \uadf8\ub9bc \uaddc\uce59). \ub0a0\uc528\ub294 subway-api \uc6cc\ucee4(/weather)\uc758 \uac12\uc744 \uc4f0\uace0, \ubabb \ubc1b\uc73c\uba74 \ub0a0\uc528\ub97c \uc9c0\uc5b4\ub0b4\uc9c0 \uc54a\ub294\ub2e4(wxKnown:false).
 var SCENE_CHARS = ["dolsom", "lovel", "dudung", "sul", "ppopu", "chaeng"];
-var SCENE_HINT_BUS = "\uc9c0\ud558\ucca0 \ud0d1\uc2b9\uc2dc \ud63c\uc7a1\ub3c4\uac00 \ub098\uc640\uc694!";
+var SCENE_HINT_BUS = "\uc9c0\ud558\ucca0\uc744 \ud0c0\uba74 \ud63c\uc7a1\ub3c4\uac00 \ub098\uc640\uc694";
 var SCENE_SLOT_KO = { dawn: "\uc0c8\ubcbd", morning: "\uc544\uce68", noon: "\uc810\uc2ec", afternoon: "\uc624\ud6c4", evening: "\uc800\ub141", night: "\ubc24" };
 var SCENE_WX_KO = { clear: "\ub9d1\uc74c", cloudy: "\uad6c\ub984", overcast: "\ud750\ub9bc", rain: "\ube44", snow: "\ub208", fog: "\uc548\uac1c" };
 var SCENE_WX_CACHE = {};

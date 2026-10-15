@@ -14,7 +14,7 @@ const post = async (b) => JSON.parse(await (await w.fetch(new Request('https://x
 let pass = 0, fail = 0;
 const t = async (n, f) => { try { await f(); pass++; console.log('  ok  ', n); } catch (e) { fail++; console.log('  FAIL', n, '\n      ', String(e.message || e).slice(0, 500)); } };
 (async () => {
-  await t('버전 s27', () => assert.strictEqual(V, 'route-v2-2026-10-15s27'));
+  await t('버전 s28', () => assert.strictEqual(V, 'route-v2-2026-10-16s28'));
   await t('워커의 판정 함수 = 앱 저장소 engine/scene.js (단일 출처 복사본 일치)', () => {
     const p = ['/home/claude/work/app/Subway-app/engine/scene.js', path.join(__dirname, '..', '..', 'Subway-app', 'engine', 'scene.js')].find(f => fs.existsSync(f));
     if (!p) { console.log('       (engine/scene.js 가 없어 건너뜀)'); return; }
@@ -25,7 +25,7 @@ const t = async (n, f) => { try { await f(); pass++; console.log('  ok  ', n); }
     const N = (o) => Object.assign({ name: '', isSub: false, isBus: false, isWalk: false, isOrigin: false, lineName: '', hasLoc: true }, o);
     const nodes = [N({ isOrigin: true, name: 'o' }), N({ isWalk: true, name: 'w' }), N({ isBus: true, name: 'a', lineName: '1' }), N({ isBus: true, name: 'b', lineName: '1' }), N({ isBus: true, name: 'c', lineName: '1' }), N({ isSub: true, name: 's', lineName: '2호선' }), N({ isSub: true, name: 't', lineName: '2호선' })];
     assert.strictEqual(decide({ locked: true, here: 1, nodes }, null).mode, 'wait'); assert.strictEqual(decide({ locked: true, here: 2, boarded: true, nodes }, null).mode, 'ride');
-    assert.strictEqual(decide({ locked: true, here: 5, boarded: true, nodes }, null).mode, 'wait'); assert.strictEqual(decide({ locked: true, here: 6, boarded: true, nodes }, null).cong.kind, 'sub'); assert.strictEqual(hint, '지하철 탑승시 혼잡도가 나와요!');
+    assert.strictEqual(decide({ locked: true, here: 5, boarded: true, nodes }, null).mode, 'wait'); assert.strictEqual(decide({ locked: true, here: 6, boarded: true, nodes }, null).cong.kind, 'sub'); assert.strictEqual(hint, '지하철을 타면 혼잡도가 나와요');
   });
   await t('HTTP: 날씨를 엔진이 직접 받아 장면에 싣는다 · 10분 캐시 · 실패하면 날씨를 지어내지 않는다 · POST 만', async () => {
     wxBody = { ok: true, temp: -2, rain: 80, txt: '눈' }; wxMode = 'ok';

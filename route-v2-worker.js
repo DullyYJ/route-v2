@@ -37,7 +37,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-15s27";
+var ENGINE_VERSION = "route-v2-2026-10-16s28";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -10549,7 +10549,7 @@ async function handleWidgetSay(request, env, ctx) {
 //     혼잡도 카드가 어느 구간(지하철 역·버스 정류장 목록)을 보여줄지, 시간대(새벽·아침·점심·오후·저녁·밤)·실제 날씨 종류, 대표 캐릭터·등장 순서, 안내 문구를 전부 여기서 정한다.
 //   · 앱(www/index.html)은 받은 값을 그리기만 한다(색·모양·움직임은 앱의 그림 규칙). 날씨는 subway-api 워커(/weather)의 값을 쓰고, 못 받으면 날씨를 지어내지 않는다(wxKnown:false).
 var SCENE_CHARS = ["dolsom", "lovel", "dudung", "sul", "ppopu", "chaeng"];
-var SCENE_HINT_BUS = "지하철 탑승시 혼잡도가 나와요!";
+var SCENE_HINT_BUS = "지하철을 타면 혼잡도가 나와요";
 var SCENE_SLOT_KO = { dawn: "새벽", morning: "아침", noon: "점심", afternoon: "오후", evening: "저녁", night: "밤" };
 var SCENE_WX_KO = { clear: "맑음", cloudy: "구름", overcast: "흐림", rain: "비", snow: "눈", fog: "안개" };
 var SCENE_WX_CACHE = {};
