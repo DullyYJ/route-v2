@@ -37,7 +37,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-14s22";
+var ENGINE_VERSION = "route-v2-2026-10-15s23";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -10399,6 +10399,112 @@ async function handleRideEtaNT(request, env) {
 }
 
 // ===== next-train \ub05d =====
+
+// ===== \uc704\uc82f \uc751\uc6d0 \uba58\ud2b8 (2026-10-15 YJ: \uce90\ub9ad\ud130 \uc2dc\uacc4 \uc704\uc82f \u2014 \ucd9c\ud1f4\uadfc \uc2dc\uac01\uc774 \ub418\uba74 \uce90\ub9ad\ud130\uac00 \uc0c1\ud669\uc5d0 \ub9de\ub294 \uc751\uc6d0\u00b7\uc704\ub85c\uc758 \ub9d0\uc744 \ud55c\ub2e4) =====
+//   GET /widget-say?kind=morn|eve[&baseMs=][&lat=&lng=][&lines=1\ud638\uc120,2\ud638\uc120]
+//   \u00b7 \ub9d0\uc744 \uace0\ub974\ub294 \uacc4\uc0b0\uc740 \uc804\ubd80 \uc5ec\uae30\uc11c \ud55c\ub2e4(\uc694\uc77c\u00b7\uacf5\ud734\uc77c\u00b7\ub0a0\uc528\u00b7\ub178\uc120 \uacf5\uc9c0\u00b7\uc2dc\uac01\ub300). \uc704\uc82f(\ub124\uc774\ud2f0\ube0c)\uc740 \ubc1b\uc740 \uae00\uc744 \ub9d0\ud48d\uc120\uc5d0 \uadf8\ub9ac\uae30\ub9cc \ud55c\ub2e4.
+//   \u00b7 \ub0a0\uc528\ub294 subway-api \uc6cc\ucee4(/weather)\uc758 \uac12\uc744 \uc4f0\uace0(\uc5c6\uc73c\uba74 \uac74\ub108\ub700), \ub178\uc120 \uacf5\uc9c0\ub294 lines \ub97c \uc900 \uacbd\uc6b0\uc5d0\ub9cc \ubcf8\ub2e4. \uc5c6\ub294 \uac12\uc740 \uc9c0\uc5b4\ub0b4\uc9c0 \uc54a\ub294\ub2e4.
+//   \u00b7 \uac19\uc740 \ub0a0 \uac19\uc740 \uc885\ub958\ub294 \uac19\uc740 \ub9d0(\ub0a0\uc9dc\ub85c \uc21c\ud658) \u2014 \uc704\uc82f\uc774 \uc5ec\ub7ec \ubc88 \ubb3c\uc5b4\ub3c4 \ub9d0\uc774 \ubc14\ub00c\uc9c0 \uc54a\ub294\ub2e4.
+var WSAY_WX_URL = "https://gentle-lab-7e47subway-api.phg0643.workers.dev/weather";
+var WSAY_VALID_MIN = 90;
+var WSAY_DOW = {
+  morn: [
+    ["\uc77c\uc694\uc77c \uc774\ub3d9, \uc5ec\uc720\ub86d\uac8c \ub2e4\ub140\uc624\uc138\uc694", "\uc77c\uc694\uc77c\uc5d4 \uc11c\ub450\ub974\uc9c0 \uc54a\uc544\ub3c4 \uad1c\ucc2e\uc544\uc694", "\ud55c \uc8fc \uc7ac\ucda9\uc804\ud558\uba70 \ubb34\uc0ac\ud788 \ub2e4\ub140\uc624\uc138\uc694"],
+    ["\ud55c \uc8fc\uc758 \uc2dc\uc791, \uac00\ubccd\uac8c \ucd9c\ubc1c\ud574\uc694", "\uc6d4\uc694\uc77c \uc544\uce68, \ucee4\ud53c \ud55c \uc794\uc758 \uc5ec\uc720 \ucc59\uae30\uc138\uc694", "\uc0c8\ub85c\uc6b4 \ud55c \uc8fc, \ubb34\ub9ac\ud558\uc9c0 \ub9d0\uace0 \ucc28\uadfc\ucc28\uadfc"],
+    ["\ud654\uc694\uc77c, \ub9ac\ub4ec \ud0c0\uae30 \uc88b\uc740 \ub0a0\uc774\uc5d0\uc694", "\uc5b4\uc81c\ubcf4\ub2e4 \ud55c\uacb0 \uc218\uc6d4\ud560 \uac70\uc608\uc694", "\ud654\uc694\uc77c \uc544\uce68, \uc624\ub298 \ud560 \uc77c \ud558\ub098\ub9cc \ud655\uc2e4\ud788"],
+    ["\ubc8c\uc368 \uc218\uc694\uc77c, \ubc18\ud658\uc810\uc774\uc5d0\uc694", "\ud55c \uc8fc\uc758 \ud55c\uac00\uc6b4\ub370, \ud398\uc774\uc2a4 \uc720\uc9c0\ud558\uc138\uc694", "\uc218\uc694\uc77c, \uc810\uc2ec \uba54\ub274 \ubbf8\ub9ac \uc815\ud574\ub450\uba74 \uae30\ubd84 \uc88b\uc544\uc694"],
+    ["\ubaa9\uc694\uc77c, \ub0b4\uc77c\uc774\uba74 \uae08\uc694\uc77c\uc774\uc5d0\uc694", "\uace0\ube44\ub9cc \ub118\uae30\uba74 \uc8fc\ub9d0\uc774 \ubcf4\uc5ec\uc694", "\ubaa9\uc694\uc77c \uc544\uce68, \uc870\uae08\ub9cc \ub354 \ud798\ub0b4\uc694"],
+    ["\uae08\uc694\uc77c\uc774\uc5d0\uc694, \ub9c8\ubb34\ub9ac \uc798\ud558\uace0 \uc990\uaca8\uc694", "\uae08\uc694\uc77c \uc544\uce68\uc740 \ubc1c\uac78\uc74c\ub3c4 \uac00\ubccd\uc8e0", "\uc624\ub298\ub9cc \uc9c0\ub098\uba74 \uc8fc\ub9d0, \ud654\uc774\ud305"],
+    ["\ud1a0\uc694\uc77c\uc5d0\ub3c4 \ub098\uc11c\ub294 \ub2f9\uc2e0, \uba4b\uc838\uc694", "\uc8fc\ub9d0 \uc774\ub3d9, \uc624\ub298\uc740 \uc77c\ucc0d \ub9c8\uce58\uae38", "\ud1a0\uc694\uc77c, \uac08 \uae38\uc740 \uc9e7\uac8c \ub9c8\uc74c\uc740 \uac00\ubccd\uac8c"]
+  ],
+  eve: [
+    ["\uc77c\uc694\uc77c\uae4c\uc9c0 \uc218\uace0\ud588\uc5b4\uc694, \ub0b4\uc77c\uc744 \uc704\ud574 \uc77c\ucc0d \uc26c\uc5b4\uc694", "\ud55c \uc8fc \uc798 \ub9c8\ucce4\uc5b4\uc694", "\uc77c\uc694\uc77c \uc800\ub141, \ub530\ub73b\ud558\uac8c \ub9c8\ubb34\ub9ac\ud558\uc138\uc694"],
+    ["\uc6d4\uc694\uc77c \ubb34\uc0ac\ud788 \ub05d, \ud479 \uc26c\uc138\uc694", "\ud55c \uc8fc\uc758 \uccab \uace0\ube44 \ud1b5\uacfc, \uc218\uace0\ud588\uc5b4\uc694", "\uc6d4\uc694\uc77c \ud1f4\uadfc, \uc800\ub141\uc740 \ub9db\uc788\ub294 \uac78\ub85c"],
+    ["\ud654\uc694\uc77c\ub3c4 \ud074\ub9ac\uc5b4, \uc798\ud558\uace0 \uc788\uc5b4\uc694", "\uc624\ub298 \ud558\ub8e8\ub3c4 \uc218\uace0 \ub9ce\uc558\uc5b4\uc694", "\ud654\uc694\uc77c \uc800\ub141, \uc77c\ucc0d \uc26c\uc5b4\ub450\uba74 \ub0b4\uc77c\uc774 \ud3b8\ud574\uc694"],
+    ["\uc808\ubc18 \uc654\uc5b4\uc694, \ub0a8\uc740 \uc774\ud2c0\ub3c4 \uac00\ubccd\uac8c", "\uc218\uc694\uc77c \ud1f4\uadfc, \uace0\uc0dd \ub9ce\uc558\uc5b4\uc694", "\ubc18\ud658\uc810 \ud1b5\uacfc, \uc624\ub298\uc740 \uc880 \uc26c\uc138\uc694"],
+    ["\ub0b4\uc77c\ub9cc \ubc84\ud2f0\uba74 \uae08\uc694\uc77c\uc774\uc5d0\uc694", "\ubaa9\uc694\uc77c\uae4c\uc9c0 \ub2ec\ub824\uc628 \ub2f9\uc2e0, \ub300\ub2e8\ud574\uc694", "\uc624\ub298 \uc800\ub141\uc740 \uc88b\uc544\ud558\ub294 \uac83 \ud558\ub098 \ud558\uc138\uc694"],
+    ["\ud55c \uc8fc \ub9c8\ubb34\ub9ac, \uc990\uac70\uc6b4 \uc8fc\ub9d0 \ubcf4\ub0b4\uc138\uc694", "\uae08\uc694\uc77c \ud1f4\uadfc, \uc548\uc804\ud558\uac8c \ub4e4\uc5b4\uac00\uc138\uc694", "\uae08\uc694\uc77c \ud1f4\uadfc\uae38\uc774 \uc81c\uc77c \uac00\ubccd\uc8e0"],
+    ["\uc8fc\ub9d0 \uadfc\ubb34\uae4c\uc9c0 \uc815\ub9d0 \uc218\uace0\ud588\uc5b4\uc694", "\ud1a0\uc694\uc77c\uae4c\uc9c0 \uc77c\ud55c \ub2f9\uc2e0, \ub0b4\uc77c\uc740 \ud479 \uc26c\uc5b4\uc694", "\uc624\ub298\uc740 \uc815\ub9d0 \uace0\uc0dd \ub9ce\uc558\uc5b4\uc694"]
+  ]
+};
+var WSAY_RAIN = {
+  morn: ["\ube44 \uc18c\uc2dd\uc774 \uc788\uc5b4\uc694. \uc6b0\uc0b0 \ucc59\uae30\uace0 \ucc9c\ucc9c\ud788 \uac00\uc694", "\ube44 \uc624\ub294 \uae38\uc774\ub77c \ubbf8\ub044\ub7ec\uc6b8 \uc218 \uc788\uc5b4\uc694. \uc6b0\uc0b0 \uaf2d \ucc59\uae30\uc138\uc694"],
+  eve: ["\ube44 \uc624\ub294\ub370 \uc6b0\uc0b0 \uc788\uc8e0? \uc870\uc2ec\ud788 \ub4e4\uc5b4\uac00\uc694", "\ube44 \uc624\ub294 \ud1f4\uadfc\uae38, \ubbf8\ub044\ub7ec\uc6b4 \uae38 \uc870\uc2ec\ud558\uc138\uc694"]
+};
+function wsayPick(list, seed) { return list[Math.abs(seed) % list.length]; }
+// \uc21c\uc218 \uacc4\uc0b0(\uc2dc\ud5d8\uc6a9\uc73c\ub85c \ubd84\ub9ac): kind, \uae30\uc900 \uc2dc\uac01(ms), \ub0a0\uc528 {temp,rain,txt}|null, \ub178\uc120 \uacf5\uc9c0 [{line,title}] \u2192 { say:[], mood, facts }
+function wsayCompose(kind, nowMs, wx, notices) {
+  var eve = kind === "eve";
+  var k = eve ? "eve" : "morn";
+  var kd = new Date(nowMs + 324e5), y = kd.getUTCFullYear(), m = kd.getUTCMonth() + 1, d = kd.getUTCDate();
+  var dowRaw = kd.getUTCDay(), hol = holName(y, m, d), hour = kd.getUTCHours();
+  var doy = Math.floor((Date.UTC(y, m - 1, d) - Date.UTC(y, 0, 1)) / 864e5), week = Math.floor(doy / 7);
+  var seed = y * 400 + doy + (eve ? 7 : 0);
+  var say = [], mood = "cheer";
+  var notice = (notices && notices.length) ? notices[0] : null;
+  var rain = wx && typeof wx.rain === "number" ? wx.rain : null, temp = wx && typeof wx.temp === "number" ? wx.temp : null;
+  // 1) \ud070 \uc77c\ubd80\ud130: \ub178\uc120 \uacf5\uc9c0 \u2192 \ub0a0\uc528 \u2192 \uc26c\ub294 \ub0a0 \uadfc\ubb34 \u2192 \ub2a6\uc740 \uc2dc\uac01 \u2192 \uc694\uc77c \uba58\ud2b8
+  if (notice) {
+    mood = "warn";
+    say.push(String(notice.line) + " \uc9c0\uc5f0\u00b7\uc6b4\ud589 \uc18c\uc2dd\uc774 \uc788\uc5b4\uc694");
+    say.push(eve ? "\uc11c\ub450\ub974\uc9c0 \ub9d0\uace0 \uc548\uc804\ud558\uac8c \uac00\uc694" : "\uc870\uae08 \uc77c\ucc0d \ub098\uc11c\uba74 \ub9c8\uc74c\uc774 \ud3b8\ud574\uc694");
+  } else if (rain != null && rain >= 60) {
+    mood = "comfort";
+    say.push(wsayPick(WSAY_RAIN[k], seed));
+    say.push(wsayPick(WSAY_DOW[k][dowRaw], week));
+  } else if (temp != null && (temp <= 2 || temp >= 30)) {
+    mood = "comfort";
+    say.push(temp <= 2 ? (eve ? "\ub9ce\uc774 \ucd94\uc6cc\uc694. \ub530\ub73b\ud558\uac8c \ub4e4\uc5b4\uac00\uc694" : "\ub9ce\uc774 \ucd94\uc6cc\uc694. \ub530\ub73b\ud558\uac8c \uc785\uace0 \ub098\uc624\uc138\uc694") : (eve ? "\ub354\uc6b4 \ud558\ub8e8\uc600\uc8e0. \uc2dc\uc6d0\ud55c \ubb3c \ud55c \uc794 \uc5b4\ub54c\uc694" : "\ub354\uc6b0\ub2c8 \ubb3c \ud55c \ubcd1 \ucc59\uae30\uc138\uc694"));
+    say.push(wsayPick(WSAY_DOW[k][dowRaw], week));
+  } else if (hol) {
+    mood = "comfort";
+    say.push(hol + "\uc778\ub370 " + (eve ? "\uc218\uace0 \ub9ce\uc558\uc5b4\uc694" : "\ub098\uc11c\ub2c8 \ub300\ub2e8\ud574\uc694"));
+    say.push(eve ? "\uc624\ub298\uc740 \uc815\ub9d0 \ud479 \uc26c\uc5b4\uc694" : "\uadf8\ub798\ub3c4 \uc870\uc2ec\ud788 \ub2e4\ub140\uc640\uc694");
+  } else if (eve && hour >= 21) {
+    mood = "comfort";
+    say.push("\ub2a6\uac8c\uae4c\uc9c0 \uc815\ub9d0 \uc218\uace0\ud588\uc5b4\uc694");
+    say.push("\ub9c9\ucc28 \uc2dc\uac04\ub9cc \ud55c \ubc88 \ud655\uc778\ud574 \ub450\uc138\uc694");
+  } else {
+    say.push(wsayPick(WSAY_DOW[k][dowRaw], week));
+    if (rain != null && rain >= 40) say.push("\ube44\uac00 \uc62c \uc218\ub3c4 \uc788\uc5b4 \uc6b0\uc0b0 \ud558\ub098 \ucc59\uae30\uba74 \uc88b\uc544\uc694");
+    else if (temp != null && temp <= 8) say.push("\uc300\uc300\ud558\ub2c8 \uac89\uc637 \ucc59\uae30\uc138\uc694");
+    else if (temp != null && temp >= 28) say.push("\ub354\uc6b0\ub2c8 \ubb3c \ud55c \ubcd1 \ucc59\uae30\uc138\uc694");
+    else say.push(eve ? "\uc624\ub298\ub3c4 \uc218\uace0 \ub9ce\uc558\uc5b4\uc694" : "\uc624\ub298\ub3c4 \ud654\uc774\ud305!");
+  }
+  return { say: say.slice(0, 2), mood: mood, facts: { dow: dowRaw, holiday: hol, temp: temp, rain: rain, notice: notice ? notice.line : null, hour: hour } };
+}
+async function handleWidgetSay(request, env, ctx) {
+  var H = { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*", "Cache-Control": "no-store" };
+  var u = new URL(request.url), kind = u.searchParams.get("kind") === "eve" ? "eve" : "morn";
+  var bm = Number(u.searchParams.get("baseMs")), nowMs = (bm > 1e12 && bm < 4e12) ? bm : Date.now();
+  var lat = Number(u.searchParams.get("lat")), lng = Number(u.searchParams.get("lng"));
+  var wx = null, notices = [];
+  var tasks = [];
+  if (isFinite(lat) && isFinite(lng) && u.searchParams.get("lat") && u.searchParams.get("lng") && lat > 33 && lat < 39 && lng > 124 && lng < 132) {
+    tasks.push((async function () {
+      try {
+        var ac = new AbortController(), t = setTimeout(function () { ac.abort(); }, 2500);
+        var r = await fetch(WSAY_WX_URL + "?lat=" + lat + "&lng=" + lng, { signal: ac.signal });
+        clearTimeout(t);
+        var j = r.ok ? await r.json() : null;
+        if (j && j.ok !== false && typeof j.temp === "number") wx = { temp: j.temp, rain: typeof j.rain === "number" ? j.rain : null, txt: String(j.txt || "").slice(0, 12) };
+      } catch (e) { wx = null; }
+    })());
+  }
+  var want = String(u.searchParams.get("lines") || "").split(",").map(function (v) { return v.trim(); }).filter(Boolean).slice(0, 8);
+  if (want.length) {
+    tasks.push((async function () {
+      try {
+        var r = await lineNotices(env, ctx);
+        for (var i = 0; i < want.length; i++) { var n = r && r.lines && r.lines[want[i]]; if (n && !n.cleared) notices.push({ line: want[i], title: String(n.title || "").slice(0, 40) }); }
+      } catch (e) { notices = []; }
+    })());
+  }
+  await Promise.all(tasks);
+  var c = wsayCompose(kind, nowMs, wx, notices);
+  return new Response(JSON.stringify({ ok: true, kind: kind, btn: kind === "eve" ? "\ud1f4\uadfc\ud558\uae30" : "\ucd9c\uadfc\ud558\uae30", say: c.say, mood: c.mood, validMin: WSAY_VALID_MIN, facts: c.facts, v: ENGINE_VERSION }), { status: 200, headers: H });
+}
+// ===== \uc704\uc82f \uc751\uc6d0 \uba58\ud2b8 \ub05d =====
 async function handleFetch(request, env, ctx) {
   try { await holEnsure(env); } catch (e) {}
   const url = new URL(request.url);
@@ -10407,6 +10513,7 @@ async function handleFetch(request, env, ctx) {
   if (url.pathname === "/ride-standby") return handleRideStandby(request);
   if (url.pathname === "/next-train") return handleNextTrain(request, env);
   if (url.pathname === "/holidays") return handleHolidays(request, env);
+  if (url.pathname === "/widget-say") return handleWidgetSay(request, env, ctx);
   if (url.pathname === "/stops-near") {
     const lat = parseFloat(url.searchParams.get("lat"));
     const lng = parseFloat(url.searchParams.get("lng"));

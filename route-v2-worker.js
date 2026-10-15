@@ -37,7 +37,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-14s22";
+var ENGINE_VERSION = "route-v2-2026-10-15s23";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -10399,6 +10399,112 @@ async function handleRideEtaNT(request, env) {
 }
 
 // ===== next-train 끝 =====
+
+// ===== 위젯 응원 멘트 (2026-10-15 YJ: 캐릭터 시계 위젯 — 출퇴근 시각이 되면 캐릭터가 상황에 맞는 응원·위로의 말을 한다) =====
+//   GET /widget-say?kind=morn|eve[&baseMs=][&lat=&lng=][&lines=1호선,2호선]
+//   · 말을 고르는 계산은 전부 여기서 한다(요일·공휴일·날씨·노선 공지·시각대). 위젯(네이티브)은 받은 글을 말풍선에 그리기만 한다.
+//   · 날씨는 subway-api 워커(/weather)의 값을 쓰고(없으면 건너뜀), 노선 공지는 lines 를 준 경우에만 본다. 없는 값은 지어내지 않는다.
+//   · 같은 날 같은 종류는 같은 말(날짜로 순환) — 위젯이 여러 번 물어도 말이 바뀌지 않는다.
+var WSAY_WX_URL = "https://gentle-lab-7e47subway-api.phg0643.workers.dev/weather";
+var WSAY_VALID_MIN = 90;
+var WSAY_DOW = {
+  morn: [
+    ["일요일 이동, 여유롭게 다녀오세요", "일요일엔 서두르지 않아도 괜찮아요", "한 주 재충전하며 무사히 다녀오세요"],
+    ["한 주의 시작, 가볍게 출발해요", "월요일 아침, 커피 한 잔의 여유 챙기세요", "새로운 한 주, 무리하지 말고 차근차근"],
+    ["화요일, 리듬 타기 좋은 날이에요", "어제보다 한결 수월할 거예요", "화요일 아침, 오늘 할 일 하나만 확실히"],
+    ["벌써 수요일, 반환점이에요", "한 주의 한가운데, 페이스 유지하세요", "수요일, 점심 메뉴 미리 정해두면 기분 좋아요"],
+    ["목요일, 내일이면 금요일이에요", "고비만 넘기면 주말이 보여요", "목요일 아침, 조금만 더 힘내요"],
+    ["금요일이에요, 마무리 잘하고 즐겨요", "금요일 아침은 발걸음도 가볍죠", "오늘만 지나면 주말, 화이팅"],
+    ["토요일에도 나서는 당신, 멋져요", "주말 이동, 오늘은 일찍 마치길", "토요일, 갈 길은 짧게 마음은 가볍게"]
+  ],
+  eve: [
+    ["일요일까지 수고했어요, 내일을 위해 일찍 쉬어요", "한 주 잘 마쳤어요", "일요일 저녁, 따뜻하게 마무리하세요"],
+    ["월요일 무사히 끝, 푹 쉬세요", "한 주의 첫 고비 통과, 수고했어요", "월요일 퇴근, 저녁은 맛있는 걸로"],
+    ["화요일도 클리어, 잘하고 있어요", "오늘 하루도 수고 많았어요", "화요일 저녁, 일찍 쉬어두면 내일이 편해요"],
+    ["절반 왔어요, 남은 이틀도 가볍게", "수요일 퇴근, 고생 많았어요", "반환점 통과, 오늘은 좀 쉬세요"],
+    ["내일만 버티면 금요일이에요", "목요일까지 달려온 당신, 대단해요", "오늘 저녁은 좋아하는 것 하나 하세요"],
+    ["한 주 마무리, 즐거운 주말 보내세요", "금요일 퇴근, 안전하게 들어가세요", "금요일 퇴근길이 제일 가볍죠"],
+    ["주말 근무까지 정말 수고했어요", "토요일까지 일한 당신, 내일은 푹 쉬어요", "오늘은 정말 고생 많았어요"]
+  ]
+};
+var WSAY_RAIN = {
+  morn: ["비 소식이 있어요. 우산 챙기고 천천히 가요", "비 오는 길이라 미끄러울 수 있어요. 우산 꼭 챙기세요"],
+  eve: ["비 오는데 우산 있죠? 조심히 들어가요", "비 오는 퇴근길, 미끄러운 길 조심하세요"]
+};
+function wsayPick(list, seed) { return list[Math.abs(seed) % list.length]; }
+// 순수 계산(시험용으로 분리): kind, 기준 시각(ms), 날씨 {temp,rain,txt}|null, 노선 공지 [{line,title}] → { say:[], mood, facts }
+function wsayCompose(kind, nowMs, wx, notices) {
+  var eve = kind === "eve";
+  var k = eve ? "eve" : "morn";
+  var kd = new Date(nowMs + 324e5), y = kd.getUTCFullYear(), m = kd.getUTCMonth() + 1, d = kd.getUTCDate();
+  var dowRaw = kd.getUTCDay(), hol = holName(y, m, d), hour = kd.getUTCHours();
+  var doy = Math.floor((Date.UTC(y, m - 1, d) - Date.UTC(y, 0, 1)) / 864e5), week = Math.floor(doy / 7);
+  var seed = y * 400 + doy + (eve ? 7 : 0);
+  var say = [], mood = "cheer";
+  var notice = (notices && notices.length) ? notices[0] : null;
+  var rain = wx && typeof wx.rain === "number" ? wx.rain : null, temp = wx && typeof wx.temp === "number" ? wx.temp : null;
+  // 1) 큰 일부터: 노선 공지 → 날씨 → 쉬는 날 근무 → 늦은 시각 → 요일 멘트
+  if (notice) {
+    mood = "warn";
+    say.push(String(notice.line) + " 지연·운행 소식이 있어요");
+    say.push(eve ? "서두르지 말고 안전하게 가요" : "조금 일찍 나서면 마음이 편해요");
+  } else if (rain != null && rain >= 60) {
+    mood = "comfort";
+    say.push(wsayPick(WSAY_RAIN[k], seed));
+    say.push(wsayPick(WSAY_DOW[k][dowRaw], week));
+  } else if (temp != null && (temp <= 2 || temp >= 30)) {
+    mood = "comfort";
+    say.push(temp <= 2 ? (eve ? "많이 추워요. 따뜻하게 들어가요" : "많이 추워요. 따뜻하게 입고 나오세요") : (eve ? "더운 하루였죠. 시원한 물 한 잔 어때요" : "더우니 물 한 병 챙기세요"));
+    say.push(wsayPick(WSAY_DOW[k][dowRaw], week));
+  } else if (hol) {
+    mood = "comfort";
+    say.push(hol + "인데 " + (eve ? "수고 많았어요" : "나서니 대단해요"));
+    say.push(eve ? "오늘은 정말 푹 쉬어요" : "그래도 조심히 다녀와요");
+  } else if (eve && hour >= 21) {
+    mood = "comfort";
+    say.push("늦게까지 정말 수고했어요");
+    say.push("막차 시간만 한 번 확인해 두세요");
+  } else {
+    say.push(wsayPick(WSAY_DOW[k][dowRaw], week));
+    if (rain != null && rain >= 40) say.push("비가 올 수도 있어 우산 하나 챙기면 좋아요");
+    else if (temp != null && temp <= 8) say.push("쌀쌀하니 겉옷 챙기세요");
+    else if (temp != null && temp >= 28) say.push("더우니 물 한 병 챙기세요");
+    else say.push(eve ? "오늘도 수고 많았어요" : "오늘도 화이팅!");
+  }
+  return { say: say.slice(0, 2), mood: mood, facts: { dow: dowRaw, holiday: hol, temp: temp, rain: rain, notice: notice ? notice.line : null, hour: hour } };
+}
+async function handleWidgetSay(request, env, ctx) {
+  var H = { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*", "Cache-Control": "no-store" };
+  var u = new URL(request.url), kind = u.searchParams.get("kind") === "eve" ? "eve" : "morn";
+  var bm = Number(u.searchParams.get("baseMs")), nowMs = (bm > 1e12 && bm < 4e12) ? bm : Date.now();
+  var lat = Number(u.searchParams.get("lat")), lng = Number(u.searchParams.get("lng"));
+  var wx = null, notices = [];
+  var tasks = [];
+  if (isFinite(lat) && isFinite(lng) && u.searchParams.get("lat") && u.searchParams.get("lng") && lat > 33 && lat < 39 && lng > 124 && lng < 132) {
+    tasks.push((async function () {
+      try {
+        var ac = new AbortController(), t = setTimeout(function () { ac.abort(); }, 2500);
+        var r = await fetch(WSAY_WX_URL + "?lat=" + lat + "&lng=" + lng, { signal: ac.signal });
+        clearTimeout(t);
+        var j = r.ok ? await r.json() : null;
+        if (j && j.ok !== false && typeof j.temp === "number") wx = { temp: j.temp, rain: typeof j.rain === "number" ? j.rain : null, txt: String(j.txt || "").slice(0, 12) };
+      } catch (e) { wx = null; }
+    })());
+  }
+  var want = String(u.searchParams.get("lines") || "").split(",").map(function (v) { return v.trim(); }).filter(Boolean).slice(0, 8);
+  if (want.length) {
+    tasks.push((async function () {
+      try {
+        var r = await lineNotices(env, ctx);
+        for (var i = 0; i < want.length; i++) { var n = r && r.lines && r.lines[want[i]]; if (n && !n.cleared) notices.push({ line: want[i], title: String(n.title || "").slice(0, 40) }); }
+      } catch (e) { notices = []; }
+    })());
+  }
+  await Promise.all(tasks);
+  var c = wsayCompose(kind, nowMs, wx, notices);
+  return new Response(JSON.stringify({ ok: true, kind: kind, btn: kind === "eve" ? "퇴근하기" : "출근하기", say: c.say, mood: c.mood, validMin: WSAY_VALID_MIN, facts: c.facts, v: ENGINE_VERSION }), { status: 200, headers: H });
+}
+// ===== 위젯 응원 멘트 끝 =====
 async function handleFetch(request, env, ctx) {
   try { await holEnsure(env); } catch (e) {}
   const url = new URL(request.url);
@@ -10407,6 +10513,7 @@ async function handleFetch(request, env, ctx) {
   if (url.pathname === "/ride-standby") return handleRideStandby(request);
   if (url.pathname === "/next-train") return handleNextTrain(request, env);
   if (url.pathname === "/holidays") return handleHolidays(request, env);
+  if (url.pathname === "/widget-say") return handleWidgetSay(request, env, ctx);
   if (url.pathname === "/stops-near") {
     const lat = parseFloat(url.searchParams.get("lat"));
     const lng = parseFloat(url.searchParams.get("lng"));
