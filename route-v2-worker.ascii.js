@@ -37,7 +37,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-16s28";
+var ENGINE_VERSION = "route-v2-2026-10-16s29";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -10610,9 +10610,10 @@ function sceneDecide(inp, wx) {
   var look = sceneLook(nowMs, tz, wx || null);
   var sigBase = nodes.map(function (n) { return (n.isBus ? "b" : n.isSub ? "s" : n.isWalk ? "w" : "o") + (n.lineName || "") + "|" + (n.name || ""); }).join(">");
   var day = Math.floor((nowMs + tz * 6e4) / 864e5), seedStr = String(inp.key || sigBase) + "#" + day;
-  var out = { ok: true, mode: null, venue: "street", line: "", nearEnd: false, hint: null, tag: "", look: look, hero: SCENE_CHARS[sceneHash(seedStr) % SCENE_CHARS.length], cast: sceneShuffle(SCENE_CHARS, sceneHash(seedStr + "/" + Math.floor(nowMs / 6e5))), cong: { kind: null, idx: -1, sig: "" } };
+  var out = { ok: true, fill: false, mode: null, venue: "street", line: "", nearEnd: false, hint: null, tag: "", look: look, hero: SCENE_CHARS[sceneHash(seedStr) % SCENE_CHARS.length], cast: sceneShuffle(SCENE_CHARS, sceneHash(seedStr + "/" + Math.floor(nowMs / 6e5))), cong: { kind: null, idx: -1, sig: "" } };
   var idleTag = look.emo + " " + look.slotKo + (look.wxKnown ? " \u00B7 " + look.wxKo + (look.temp != null ? " " + look.temp + "\u00B0" : "") : "");
-  if (!locked) { out.mode = "idle"; out.tag = idleTag; return out; }
+  // fill: \uacbd\ub85c\uac00 \uc5c6\uace0(\uacbd\ub85c \uacb0\uacfc\ub3c4 \uc548 \ub098\uc628 \ub54c) \ud648 \ud654\uba74\uc744 \ud55c \ud654\uba74\uc5d0 \uaf49 \ucc44\uc6cc \ubcf4\uc77c \ub54c\ub9cc true. \uacbd\ub85c \uacb0\uacfc\uac00 \ub098\uc624\uae30 \uc2dc\uc791\ud558\uba74(\ud655\uc815 \uc804\uc774\ub77c\ub3c4) false \u2192 \uc571\uc740 \ud3c9\uc18c \ud06c\uae30\ub85c \ub3cc\ub9b0\ub2e4
+  if (!locked) { out.mode = "idle"; out.tag = idleTag; out.fill = inp.routeShown !== true; return out; }
   if (!nodes.length) return out;
   var here = Math.max(0, Math.min(isFinite(inp.here) ? inp.here | 0 : 0, nodes.length - 1)), leg = sceneLegNode(nodes, here), j;
   if (!leg) return out;

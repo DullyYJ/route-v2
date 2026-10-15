@@ -17,7 +17,7 @@ const get = async (q) => JSON.parse(await (await w.fetch(new Request('https://x.
 let pass = 0, fail = 0;
 const t = async (n, f) => { try { await f(); pass++; console.log('  ok  ', n); } catch (e) { fail++; console.log('  FAIL', n, '\n      ', String(e.message || e).slice(0, 400)); } };
 (async () => {
-  await t('버전 s28', () => assert.strictEqual(V, 'route-v2-2026-10-16s28'));
+  await t('버전 s29', () => assert.strictEqual(V, 'route-v2-2026-10-16s29'));
   await t('기본: 출근/퇴근 버튼 글자·두 줄 이하·검증 시간', async () => {
     const a = await get('?kind=morn&baseMs=' + ms('2026-10-14T08:00:00')), b = await get('?kind=eve&baseMs=' + ms('2026-10-14T18:30:00'));
     assert.strictEqual(a.btn, '출근하기'); assert.strictEqual(b.btn, '퇴근하기');
