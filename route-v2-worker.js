@@ -37,7 +37,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-15s24";
+var ENGINE_VERSION = "route-v2-2026-10-15s25";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -7814,6 +7814,10 @@ var RIDE_ETA_DEFAULTS = {
   //   표시 도착 시각보다 이만큼(초) 앞당긴다. 0 이면 끔. 표시하는 도착 시각(etaMs·arr)은 그대로이고 마커·오버레이가 읽는 pos(from/to/t0/t1/segs)만 당겨진다. (영점 창은 ride-track zeroLeadSec 가 같이 일찍 열린다)
   // ★ 2026-10-15 (YJ: 마커가 다음 역에 너무 일찍 올라간다 → 10초를 5초로): 값만 10 → 5.
   arriveEarlySec: 5,
+  // ★ 2026-10-15 (YJ: "계속 5초씩 땡기니까 조금 안 맞는다. 경유역에 도착하며 영점을 맞추고, 도착시간을 초 단위로 다시 맞춘 뒤 이후 마커 도착 표시를 5초 당기자 — 역·정류장마다 영점을 잡고 가니 마커가 빨리 도착했다고 안 나올 것"):
+  //   당김(arriveEarlySec)은 GPS 영점(src 'gps' 통과)이 하나라도 잡힌 뒤, 그 영점 역보다 뒤의 중간역에만 적용한다 — 영점이 없으면(승차 직후·지하) 시각표 그대로.
+  //   영점이 잡히면 뒤 도착 시각(etaMs)이 초 단위로 맞춰지고(ride-track 영점 보간), 그 맞춰진 시각에서 5초만 당긴다. false 로 두면 예전처럼 항상 당긴다.
+  arriveEarlyAfterZero: true,
   // ★ 2026-10-14 (실기기 로그: 부평에서 마커가 멈췄다 — 구간표가 14구간뿐이라 응답이 끊긴 26분 뒤 끝났다): 남은 구간 전부를 준다(상한은 안전장치).
   posSegCount: 80,        // pos.segs — 앞으로 그릴 구간 수(응답이 끊겨도 시각표대로 끝까지 이어 그리게)
   overdueSec: 60, overdueMaxMin: 15, overdueExtraMin: 0.5, overdueGain: 1, overdueMode: 'clamp',
@@ -7878,8 +7882,9 @@ function _rePos(input, r) {
   var ps = input.passes || [];
   for (i = 0; i < ps.length; i++) { var pi = +ps[i].idx; if (isFinite(pi) && pi >= 0 && pi < nodes.length && pi > fl) fl = pi; }
   // 중간 경로역(승차역·최종 목적지 제외)은 arriveEarlySec 만큼 일찍 닿은 것으로 본다 — idxs 안의 자리 k 로 판단
-  var early = Math.max(0, +O.arriveEarlySec || 0) * 1000, last = idxs.length - 1;
-  function eff(kk) { return out[idxs[kk]] - ((kk > 0 && kk < last) ? early : 0); }
+  var early = Math.max(0, +O.arriveEarlySec || 0) * 1000, last = idxs.length - 1, zeroIdx = -1;
+  if (O.arriveEarlyAfterZero !== false) { for (i = 0; i < ps.length; i++) { var zi = +ps[i].idx; if (ps[i].src === 'gps' && isFinite(zi) && zi > zeroIdx) zeroIdx = zi; } if (zeroIdx < 0) early = 0; }   // 영점이 없으면 당기지 않는다
+  function eff(kk) { return out[idxs[kk]] - ((kk > 0 && kk < last && idxs[kk] > zeroIdx) ? early : 0); }
   var f = idxs[0], k;
   for (k = 0; k < idxs.length; k++) { if (eff(k) <= nowMs) f = idxs[k]; else break; }
   if (fl > f) f = fl;

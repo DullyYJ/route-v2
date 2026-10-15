@@ -37,7 +37,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-15s24";
+var ENGINE_VERSION = "route-v2-2026-10-15s25";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -7814,6 +7814,10 @@ var RIDE_ETA_DEFAULTS = {
   //   \ud45c\uc2dc \ub3c4\ucc29 \uc2dc\uac01\ubcf4\ub2e4 \uc774\ub9cc\ud07c(\ucd08) \uc55e\ub2f9\uae34\ub2e4. 0 \uc774\uba74 \ub054. \ud45c\uc2dc\ud558\ub294 \ub3c4\ucc29 \uc2dc\uac01(etaMs\u00b7arr)\uc740 \uadf8\ub300\ub85c\uc774\uace0 \ub9c8\ucee4\u00b7\uc624\ubc84\ub808\uc774\uac00 \uc77d\ub294 pos(from/to/t0/t1/segs)\ub9cc \ub2f9\uaca8\uc9c4\ub2e4. (\uc601\uc810 \ucc3d\uc740 ride-track zeroLeadSec \uac00 \uac19\uc774 \uc77c\ucc0d \uc5f4\ub9b0\ub2e4)
   // \u2605 2026-10-15 (YJ: \ub9c8\ucee4\uac00 \ub2e4\uc74c \uc5ed\uc5d0 \ub108\ubb34 \uc77c\ucc0d \uc62c\ub77c\uac04\ub2e4 \u2192 10\ucd08\ub97c 5\ucd08\ub85c): \uac12\ub9cc 10 \u2192 5.
   arriveEarlySec: 5,
+  // \u2605 2026-10-15 (YJ: "\uacc4\uc18d 5\ucd08\uc529 \ub561\uae30\ub2c8\uae4c \uc870\uae08 \uc548 \ub9de\ub294\ub2e4. \uacbd\uc720\uc5ed\uc5d0 \ub3c4\ucc29\ud558\uba70 \uc601\uc810\uc744 \ub9de\ucd94\uace0, \ub3c4\ucc29\uc2dc\uac04\uc744 \ucd08 \ub2e8\uc704\ub85c \ub2e4\uc2dc \ub9de\ucd98 \ub4a4 \uc774\ud6c4 \ub9c8\ucee4 \ub3c4\ucc29 \ud45c\uc2dc\ub97c 5\ucd08 \ub2f9\uae30\uc790 \u2014 \uc5ed\u00b7\uc815\ub958\uc7a5\ub9c8\ub2e4 \uc601\uc810\uc744 \uc7a1\uace0 \uac00\ub2c8 \ub9c8\ucee4\uac00 \ube68\ub9ac \ub3c4\ucc29\ud588\ub2e4\uace0 \uc548 \ub098\uc62c \uac83"):
+  //   \ub2f9\uae40(arriveEarlySec)\uc740 GPS \uc601\uc810(src 'gps' \ud1b5\uacfc)\uc774 \ud558\ub098\ub77c\ub3c4 \uc7a1\ud78c \ub4a4, \uadf8 \uc601\uc810 \uc5ed\ubcf4\ub2e4 \ub4a4\uc758 \uc911\uac04\uc5ed\uc5d0\ub9cc \uc801\uc6a9\ud55c\ub2e4 \u2014 \uc601\uc810\uc774 \uc5c6\uc73c\uba74(\uc2b9\ucc28 \uc9c1\ud6c4\u00b7\uc9c0\ud558) \uc2dc\uac01\ud45c \uadf8\ub300\ub85c.
+  //   \uc601\uc810\uc774 \uc7a1\ud788\uba74 \ub4a4 \ub3c4\ucc29 \uc2dc\uac01(etaMs)\uc774 \ucd08 \ub2e8\uc704\ub85c \ub9de\ucdb0\uc9c0\uace0(ride-track \uc601\uc810 \ubcf4\uac04), \uadf8 \ub9de\ucdb0\uc9c4 \uc2dc\uac01\uc5d0\uc11c 5\ucd08\ub9cc \ub2f9\uae34\ub2e4. false \ub85c \ub450\uba74 \uc608\uc804\ucc98\ub7fc \ud56d\uc0c1 \ub2f9\uae34\ub2e4.
+  arriveEarlyAfterZero: true,
   // \u2605 2026-10-14 (\uc2e4\uae30\uae30 \ub85c\uadf8: \ubd80\ud3c9\uc5d0\uc11c \ub9c8\ucee4\uac00 \uba48\ucdc4\ub2e4 \u2014 \uad6c\uac04\ud45c\uac00 14\uad6c\uac04\ubfd0\uc774\ub77c \uc751\ub2f5\uc774 \ub04a\uae34 26\ubd84 \ub4a4 \ub05d\ub0ac\ub2e4): \ub0a8\uc740 \uad6c\uac04 \uc804\ubd80\ub97c \uc900\ub2e4(\uc0c1\ud55c\uc740 \uc548\uc804\uc7a5\uce58).
   posSegCount: 80,        // pos.segs \u2014 \uc55e\uc73c\ub85c \uadf8\ub9b4 \uad6c\uac04 \uc218(\uc751\ub2f5\uc774 \ub04a\uaca8\ub3c4 \uc2dc\uac01\ud45c\ub300\ub85c \ub05d\uae4c\uc9c0 \uc774\uc5b4 \uadf8\ub9ac\uac8c)
   overdueSec: 60, overdueMaxMin: 15, overdueExtraMin: 0.5, overdueGain: 1, overdueMode: 'clamp',
@@ -7878,8 +7882,9 @@ function _rePos(input, r) {
   var ps = input.passes || [];
   for (i = 0; i < ps.length; i++) { var pi = +ps[i].idx; if (isFinite(pi) && pi >= 0 && pi < nodes.length && pi > fl) fl = pi; }
   // \uc911\uac04 \uacbd\ub85c\uc5ed(\uc2b9\ucc28\uc5ed\u00b7\ucd5c\uc885 \ubaa9\uc801\uc9c0 \uc81c\uc678)\uc740 arriveEarlySec \ub9cc\ud07c \uc77c\ucc0d \ub2ff\uc740 \uac83\uc73c\ub85c \ubcf8\ub2e4 \u2014 idxs \uc548\uc758 \uc790\ub9ac k \ub85c \ud310\ub2e8
-  var early = Math.max(0, +O.arriveEarlySec || 0) * 1000, last = idxs.length - 1;
-  function eff(kk) { return out[idxs[kk]] - ((kk > 0 && kk < last) ? early : 0); }
+  var early = Math.max(0, +O.arriveEarlySec || 0) * 1000, last = idxs.length - 1, zeroIdx = -1;
+  if (O.arriveEarlyAfterZero !== false) { for (i = 0; i < ps.length; i++) { var zi = +ps[i].idx; if (ps[i].src === 'gps' && isFinite(zi) && zi > zeroIdx) zeroIdx = zi; } if (zeroIdx < 0) early = 0; }   // \uc601\uc810\uc774 \uc5c6\uc73c\uba74 \ub2f9\uae30\uc9c0 \uc54a\ub294\ub2e4
+  function eff(kk) { return out[idxs[kk]] - ((kk > 0 && kk < last && idxs[kk] > zeroIdx) ? early : 0); }
   var f = idxs[0], k;
   for (k = 0; k < idxs.length; k++) { if (eff(k) <= nowMs) f = idxs[k]; else break; }
   if (fl > f) f = fl;
