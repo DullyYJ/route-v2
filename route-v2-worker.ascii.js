@@ -37,7 +37,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-16s30";
+var ENGINE_VERSION = "route-v2-2026-10-16s31";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -10619,6 +10619,10 @@ function sceneDecide(inp, wx) {
   if (!leg) return out;
   var n = leg.n, bb = sceneBounds(nodes, leg.i), first = bb[0], last = bb[1], firstTr = -1, bus = !!n.isBus;
   for (j = 0; j < nodes.length; j++) if (!nodes[j].isOrigin && !nodes[j].isWalk && (nodes[j].isBus || nodes[j].isSub)) { firstTr = j; break; }
+  // (YJ 10:23) \ub300\ud45c \uce90\ub9ad\ud130\ub294 \uacbd\ub85c\ub97c \ud655\uc815\ud560 \ub54c\ub9c8\ub2e4, \uadf8\ub9ac\uace0 \ud0c8\uac83 \uad6c\uac04(leg)\ub9c8\ub2e4 \uc0c8\ub85c \ubf51\ub294\ub2e4 \u2014 \uac19\uc740 \uacbd\ub85c\ub77c\ub3c4 \uad6c\uac04\uc774 \ubc14\ub00c\uba74 \ub2e4\ub978 \uce90\ub9ad\ud130\uac00 \uae30\ub2e4\ub9b0\ub2e4
+  var seedL = seedStr + "/L" + first;
+  out.hero = SCENE_CHARS[(sceneHash(seedL) >>> 8) % SCENE_CHARS.length];
+  out.cast = sceneShuffle(SCENE_CHARS, sceneHash(seedL + "/" + Math.floor(nowMs / 6e5)));
   var phase;
   if (leg.i > here) phase = "wait";                                                        // \ud0c0\ub7ec \uac00\ub294 \uc911(\ub3c4\ubcf4\u00b7\ud658\uc2b9 \uc774\ub3d9)
   else if (leg.i < here) phase = "alight";                                                 // \ub0b4\ub824\uc11c \ubaa9\uc801\uc9c0\ub85c \uac00\ub294 \uc911

@@ -14,7 +14,7 @@ const post = async (b) => JSON.parse(await (await w.fetch(new Request('https://x
 let pass = 0, fail = 0;
 const t = async (n, f) => { try { await f(); pass++; console.log('  ok  ', n); } catch (e) { fail++; console.log('  FAIL', n, '\n      ', String(e.message || e).slice(0, 500)); } };
 (async () => {
-  await t('버전 s30', () => assert.strictEqual(V, 'route-v2-2026-10-16s30'));
+  await t('버전 s31', () => assert.strictEqual(V, 'route-v2-2026-10-16s31'));
   await t('워커의 판정 함수 = 앱 저장소 engine/scene.js (단일 출처 복사본 일치)', () => {
     const p = ['/home/claude/work/app/Subway-app/engine/scene.js', path.join(__dirname, '..', '..', 'Subway-app', 'engine', 'scene.js')].find(f => fs.existsSync(f));
     if (!p) { console.log('       (engine/scene.js 가 없어 건너뜀)'); return; }

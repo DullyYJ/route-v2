@@ -37,7 +37,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-16s30";
+var ENGINE_VERSION = "route-v2-2026-10-16s31";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -10619,6 +10619,10 @@ function sceneDecide(inp, wx) {
   if (!leg) return out;
   var n = leg.n, bb = sceneBounds(nodes, leg.i), first = bb[0], last = bb[1], firstTr = -1, bus = !!n.isBus;
   for (j = 0; j < nodes.length; j++) if (!nodes[j].isOrigin && !nodes[j].isWalk && (nodes[j].isBus || nodes[j].isSub)) { firstTr = j; break; }
+  // (YJ 10:23) 대표 캐릭터는 경로를 확정할 때마다, 그리고 탈것 구간(leg)마다 새로 뽑는다 — 같은 경로라도 구간이 바뀌면 다른 캐릭터가 기다린다
+  var seedL = seedStr + "/L" + first;
+  out.hero = SCENE_CHARS[(sceneHash(seedL) >>> 8) % SCENE_CHARS.length];
+  out.cast = sceneShuffle(SCENE_CHARS, sceneHash(seedL + "/" + Math.floor(nowMs / 6e5)));
   var phase;
   if (leg.i > here) phase = "wait";                                                        // 타러 가는 중(도보·환승 이동)
   else if (leg.i < here) phase = "alight";                                                 // 내려서 목적지로 가는 중
