@@ -37,7 +37,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-16s34";
+var ENGINE_VERSION = "route-v2-2026-10-17s35";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -7897,10 +7897,85 @@ function rideRow(input) {
   return { v: 1, slot: slot, label: label, leg: leg, transfers: Math.max(0, L - 1), cols: slot === 'none' ? 2 : 3,
     anim: { kind: kind, ms: (kind === 'push_in' || kind === 'push_out') ? ROW_ANIM.pushMs : (kind === 'none' ? 0 : ROW_ANIM.slideMs), ease: ROW_ANIM.ease.slice() } };
 }
+// \u2605 2026-10-17 (YJ: "\ub3c4\ucc29 \uc804 \uc21c\uc11c \u2014 \ucd5c\uc885 \uacbd\ub85c\uc758 \ub9c8\uc9c0\ub9c9 \ub300\uc911\uad50\ud1b5 \ud558\ucc28 7\ubd84 \uc804\uc5d0 \ucd94\ucc9c \u00b7 2\uc815\uac70\uc7a5 \uc804 \ud558\uc774\ub77c\uc774\ud2b8 \u00b7 1\uc815\uac70\uc7a5 \uc804 \ub0b4\ub9b4 \uc900\ube44 + \uc751\uc6d0 \u00b7 \ud558\ucc28 \ud310\uc815 3\ubd84 \ub4a4 \uc571 \uc885\ub8cc.
+//   \uae30\uc900\uc740 \ucd5c\uc885 \ubaa9\uc801\uc9c0 \ub3c4\ucc29\uc774 \uc544\ub2c8\ub77c '\ub9c8\uc9c0\ub9c9 \ub300\uc911\uad50\ud1b5\uc744 \ub0b4\ub9ac\ub294 \uc21c\uc11c'. \uacc4\uc0b0\uc740 \uc5d4\uc9c4\uc774, \uc571\uc740 \uadf8\ub9bc\ub9cc"):
+//   \uc785\ub825 { op:'arrive', nowMs, nodes:[{isWalk,isOrigin,isSub,isBus,lineName,name,lat,lng,ms(\ub3c4\ucc29 \uc2dc\uac01 ms|null)}\u2026], idx(\ud604\uc7ac \uc9c4\ud589 \ub178\ub4dc \ubc88\ud638, \ubaa8\ub974\uba74 -1), riding:bool(\uc9c0\uae08 \ucc28\ub7c9 \uc548), hold:bool(\ud658\uc2b9 \uc2b9\ucc28 \ub300\uae30),
+//          alighted:bool(\uc571\uc774 \uac00\uc9c4 \ud558\ucc28\u00b7\ub3c4\ucc29 \ud655\uc778 \uc99d\uac70), alightedAt:ms|null(\uc55e\uc11c \uc5d4\uc9c4\uc774 \uc900 \ud558\ucc28 \ud310\uc815 \uc2dc\uac01), preMin?:7, quitAfterSec?:180, wx?:{rainy,snowy,temp}, tzMin?:540 }
+//   \ucd9c\ub825 { v, ok, alight:{idx,name,lat,lng,ms}, legStart(\ub9c8\uc9c0\ub9c9 \uad6c\uac04\uc744 \ud0c4 \ub178\ub4dc \ubc88\ud638), left(\ub0b4\ub9b4 \uc5ed\uae4c\uc9c0 \ub0a8\uc740 \uc815\uac70\uc7a5 \uc218, \ub9c8\uc9c0\ub9c9 \uad6c\uac04\uc744 \ud0c0\ub294 \uc911\uc77c \ub54c\ub9cc \uc544\ub2c8\uba74 null),
+//          level(0|2|1 \u2014 2=\ub450 \uc815\uac70\uc7a5 \uc804 \u00b7 1=\ud55c \uc815\uac70\uc7a5 \uc804), pre(0|1 \u2014 \uc138 \uc815\uac70\uc7a5 \uc804), reco:{fromMs,untilMs}(\ucd94\ucc9c \ubb38\uad6c\ub97c \ubcf4\uc774\ub294 \uc2dc\uac01 \ucc3d),
+//          getoff:{title,cheer}(\ub0b4\ub9b4 \uc900\ube44 \ubb38\uad6c \u2014 \ub0a0\uc9dc\u00b7\uc2dc\uac04\u00b7\ub0a0\uc528\uc5d0 \ub9de\ucd98 \uc751\uc6d0), alighted:bool, alightedAt, quitAtMs(\ud558\ucc28 \ud310\uc815 + quitAfterSec | null), nextAtMs(\ub2e4\uc74c\uc5d0 \ub2e4\uc2dc \ubb3c\uc744 \uc2dc\uac01) }
+//   \uc571\uc740 now \uac00 reco \ucc3d \uc548\uc778\uc9c0\ub9cc \ube44\uad50\ud558\uace0, \ubc1b\uc740 level\u00b7\ubb38\uad6c\u00b7quitAtMs \ub97c \uadf8\ub300\ub85c \uadf8\ub9b0\ub2e4. \uac12\uc774 \ubaa8\uc790\ub77c\uba74(ok:false) \uadf8\ub9ac\uc9c0 \uc54a\ub294\ub2e4.
+var ARRIVE_DEFAULTS = { preMin: 7, quitAfterSec: 180, recoEndSec: 30, tzMin: 540 };
+var ARR_CHEER = {
+  rain:    ['\ube57\uae38 \ubbf8\ub044\ub7ec\uc6b0\ub2c8 \ucc9c\ucc9c\ud788 \ub0b4\ub824\uc694', '\ube44 \uc624\ub294 \ub0a0, \uc6b0\uc0b0 \ucc59\uae30\uace0 \uc870\uc2ec\ud788 \uac00\uc694'],
+  snow:    ['\ub208\uae38 \ubbf8\ub044\ub7ec\uc6b0\ub2c8 \ucc9c\ucc9c\ud788 \ub0b4\ub824\uc694', '\ub208 \uc624\ub294 \ub0a0, \ubc1c\ubc11 \uc870\uc2ec\ud574\uc694'],
+  cold:    ['\uc300\uc300\ud574\uc694, \ub530\ub73b\ud558\uac8c \ub2e4\ub140\uc694', '\ucd94\uc6b4 \ub0a0, \ubaa9\ub3c4\ub9ac \ub2e8\ub2e8\ud788 \ud574\uc694'],
+  hot:     ['\ub354\uc6b4 \ub0a0, \ubb3c \ud55c \ubaa8\uae08 \ucc59\uaca8\uc694', '\ub354\uc704\uc5d0 \uc9c0\uce58\uc9c0 \uc54a\uac8c \ucc9c\ucc9c\ud788 \uac00\uc694'],
+  friEve:  ['\ud55c \uc8fc \uace0\uc0dd\ud588\uc5b4\uc694, \uc8fc\ub9d0 \uc798 \ubcf4\ub0b4\uc694', '\uae08\uc694\uc77c \ubc24\uc774\uc5d0\uc694, \ud479 \uc26c\uc5b4\uc694'],
+  monMorn: ['\uc6d4\uc694\uc77c\ub3c4 \uac00\ubccd\uac8c \uc2dc\uc791\ud574\uc694', '\uc774\ubc88 \uc8fc\ub3c4 \uc751\uc6d0\ud560\uac8c\uc694'],
+  weekend: ['\uc990\uac70\uc6b4 \uc8fc\ub9d0 \ubcf4\ub0b4\uc694', '\uc26c\ub294 \ub0a0, \uc5ec\uc720\ub86d\uac8c \uc990\uaca8\uc694'],
+  payday:  ['\uc6d4\uae09\ub0a0\uc774\uc5d0\uc694, \uc624\ub298\uc740 \ub098\ub97c \ucc59\uaca8\uc694', '\uc6d4\uae09\ub0a0, \ub9db\uc788\ub294 \uac83 \ud558\ub098\ucbe4 \uad1c\ucc2e\uc544\uc694'],
+  morning: ['\uc624\ub298\ub3c4 \uc88b\uc740 \ud558\ub8e8 \ubcf4\ub0b4\uc694', '\uc544\uce68\ubd80\ud130 \uace0\uc0dd \ub9ce\uc544\uc694, \ud654\uc774\ud305\uc774\uc5d0\uc694', '\uc88b\uc740 \uc77c\uc774 \uae30\ub2e4\ub9ac\ub294 \ud558\ub8e8\uac00 \ub418\uae38\uc694'],
+  midday:  ['\uc810\uc2ec \ub9db\uc788\uac8c \uba39\uace0 \ud798\ub0b4\uc694', '\uc624\ud6c4\ub3c4 \uac70\ub72c\ud788 \ud574\ub0bc \uc218 \uc788\uc5b4\uc694'],
+  afternoon: ['\ub0a8\uc740 \uc624\ud6c4\ub3c4 \ud654\uc774\ud305\uc774\uc5d0\uc694', '\uc870\uae08\ub9cc \ub354, \uc798\ud558\uace0 \uc788\uc5b4\uc694'],
+  evening: ['\uc624\ub298 \ud558\ub8e8\ub3c4 \uc218\uace0 \ub9ce\uc558\uc5b4\uc694', '\ud1f4\uadfc\uae38 \uace0\uc0dd\ud588\uc5b4\uc694, \ud479 \uc26c\uc5b4\uc694'],
+  night:   ['\ub2a6\uc740 \uc2dc\uac04\uae4c\uc9c0 \uace0\uc0dd\ud588\uc5b4\uc694', '\uc624\ub298 \ud558\ub8e8 \uc815\ub9d0 \uc218\uace0\ud588\uc5b4\uc694'],
+  late:    ['\ub2a6\uc740 \ubc24 \uc870\uc2ec\ud788 \ub4e4\uc5b4\uac00\uc694', '\uace0\ub2e8\ud55c \ud558\ub8e8, \ud479 \uc26c\uc5b4\uc694']
+};
+function reArrCheer(nowMs, tzMin, wx) {
+  var m = _reMin(nowMs, tzMin), h = Math.floor(m / 60), d = new Date(nowMs + tzMin * 60000), dow = d.getUTCDay(), dom = d.getUTCDate();
+  var key;
+  if (wx && wx.snowy) key = 'snow';
+  else if (wx && wx.rainy) key = 'rain';
+  else if (wx && isFinite(wx.temp) && wx.temp <= 3) key = 'cold';
+  else if (wx && isFinite(wx.temp) && wx.temp >= 28) key = 'hot';
+  else if (dow === 5 && h >= 17) key = 'friEve';
+  else if (dow === 1 && h >= 5 && h < 11) key = 'monMorn';
+  else if (dow === 0 || dow === 6) key = 'weekend';
+  else if (dom >= 24 && dom <= 26 && h >= 11) key = 'payday';
+  else key = h < 5 ? 'late' : h < 10 ? 'morning' : h < 14 ? 'midday' : h < 17 ? 'afternoon' : h < 21 ? 'evening' : 'night';
+  var L = ARR_CHEER[key], seed = d.getUTCFullYear() * 400 + (d.getUTCMonth() + 1) * 31 + dom + h * 3;
+  return L[Math.abs(seed) % L.length];
+}
+function rideArrive(input) {
+  var nodes = (input && input.nodes) || [], n = nodes.length, i, now = +(input && input.nowMs);
+  if (!isFinite(now)) now = Date.now();
+  var O = _reMerge(ARRIVE_DEFAULTS, input && input.opts);
+  var preMin = isFinite(input && input.preMin) && input.preMin > 0 ? +input.preMin : O.preMin;
+  var quitSec = isFinite(input && input.quitAfterSec) && input.quitAfterSec >= 0 ? +input.quitAfterSec : O.quitAfterSec;
+  var tz = isFinite(input && input.tzMin) ? +input.tzMin : O.tzMin;
+  var ai = -1;
+  for (i = n - 1; i >= 0; i--) { if (_reIsTransit(nodes[i])) { ai = i; break; } }
+  if (ai < 0) return { v: 1, ok: false, reason: 'no_transit' };
+  var an = nodes[ai], ams = (an.ms != null && isFinite(+an.ms)) ? +an.ms : null;
+  if (ams == null) return { v: 1, ok: false, reason: 'no_time', alight: { idx: ai, name: an.name || '' } };
+  var ls = ai;
+  while (ls > 0) { var pv = nodes[ls - 1], cu = nodes[ls]; if (_reIsTransit(pv) && !!pv.isBus === !!cu.isBus && (pv.lineName || '') === (cu.lineName || '')) ls--; else break; }
+  var idx = isFinite(input && input.idx) ? Math.floor(+input.idx) : -1;
+  var riding = !!(input && input.riding === true) && !(input && input.hold === true);
+  var onFinal = riding && idx >= ls && idx <= ai;
+  var left = onFinal ? ai - idx : null;
+  var level = onFinal ? (left === 2 ? 2 : (left <= 1 ? 1 : 0)) : 0;
+  var alighted = !!(input && input.alighted === true) || (idx >= 0 && idx > ai);
+  var prevAt = +(input && input.alightedAt);
+  var alightedAt = alighted ? (isFinite(prevAt) && prevAt > 0 ? prevAt : now) : null;
+  var quitAtMs = alighted ? alightedAt + quitSec * 1000 : null;
+  var fromMs = ams - preMin * 60000, untilMs = ams + O.recoEndSec * 1000;
+  var nxt = null, ts = [fromMs, untilMs, quitAtMs];
+  for (i = 0; i < ts.length; i++) if (ts[i] != null && ts[i] > now && (nxt == null || ts[i] < nxt)) nxt = ts[i];
+  return {
+    v: 1, ok: true, alight: { idx: ai, name: an.name || '', lat: an.lat != null ? an.lat : null, lng: an.lng != null ? an.lng : null, ms: ams },
+    legStart: ls, idx: idx, left: left, level: level, pre: (onFinal && left === 3) ? 1 : 0,
+    reco: { fromMs: fromMs, untilMs: untilMs },
+    getoff: { title: '\ub0b4\ub9b4 \uc900\ube44\ub97c \ud574\uc8fc\uc138\uc694', cheer: reArrCheer(now, tz, input && input.wx) },
+    alighted: alighted, alightedAt: alightedAt, quitAtMs: quitAtMs, nextAtMs: nxt
+  };
+}
 // \uc9c4\uc785: \ub3c4\ucc29\uc2dc\uac01 \uacc4\uc0b0(_rideEtaCore) + (timetableFirst \uc77c \ub54c) \uc9c0\uae08 \uc5f4\ucc28\uac00 \uc5b4\ub290 \uc5ed \uc0ac\uc774 \uc5b4\ub514\ucbe4\uc778\uc9c0(pos)
 function rideEta(input) {
   if (input && input.op === 'labels') return rideLabels(input);
   if (input && input.op === 'row') return rideRow(input);
+  if (input && input.op === 'arrive') return rideArrive(input);
   var r = _rideEtaCore(input);
   try { r.hold = _reHold(input, r); } catch (eH) { r.hold = null; }
   try { if (input && input.timetableFirst === true && input.notDeparted !== true && r && r.etaMs) r.pos = _rePos(input, r); } catch (e) { r.pos = null; }

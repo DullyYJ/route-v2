@@ -37,7 +37,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-16s34";
+var ENGINE_VERSION = "route-v2-2026-10-17s35";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -7897,10 +7897,85 @@ function rideRow(input) {
   return { v: 1, slot: slot, label: label, leg: leg, transfers: Math.max(0, L - 1), cols: slot === 'none' ? 2 : 3,
     anim: { kind: kind, ms: (kind === 'push_in' || kind === 'push_out') ? ROW_ANIM.pushMs : (kind === 'none' ? 0 : ROW_ANIM.slideMs), ease: ROW_ANIM.ease.slice() } };
 }
+// ★ 2026-10-17 (YJ: "도착 전 순서 — 최종 경로의 마지막 대중교통 하차 7분 전에 추천 · 2정거장 전 하이라이트 · 1정거장 전 내릴 준비 + 응원 · 하차 판정 3분 뒤 앱 종료.
+//   기준은 최종 목적지 도착이 아니라 '마지막 대중교통을 내리는 순서'. 계산은 엔진이, 앱은 그림만"):
+//   입력 { op:'arrive', nowMs, nodes:[{isWalk,isOrigin,isSub,isBus,lineName,name,lat,lng,ms(도착 시각 ms|null)}…], idx(현재 진행 노드 번호, 모르면 -1), riding:bool(지금 차량 안), hold:bool(환승 승차 대기),
+//          alighted:bool(앱이 가진 하차·도착 확인 증거), alightedAt:ms|null(앞서 엔진이 준 하차 판정 시각), preMin?:7, quitAfterSec?:180, wx?:{rainy,snowy,temp}, tzMin?:540 }
+//   출력 { v, ok, alight:{idx,name,lat,lng,ms}, legStart(마지막 구간을 탄 노드 번호), left(내릴 역까지 남은 정거장 수, 마지막 구간을 타는 중일 때만 아니면 null),
+//          level(0|2|1 — 2=두 정거장 전 · 1=한 정거장 전), pre(0|1 — 세 정거장 전), reco:{fromMs,untilMs}(추천 문구를 보이는 시각 창),
+//          getoff:{title,cheer}(내릴 준비 문구 — 날짜·시간·날씨에 맞춘 응원), alighted:bool, alightedAt, quitAtMs(하차 판정 + quitAfterSec | null), nextAtMs(다음에 다시 물을 시각) }
+//   앱은 now 가 reco 창 안인지만 비교하고, 받은 level·문구·quitAtMs 를 그대로 그린다. 값이 모자라면(ok:false) 그리지 않는다.
+var ARRIVE_DEFAULTS = { preMin: 7, quitAfterSec: 180, recoEndSec: 30, tzMin: 540 };
+var ARR_CHEER = {
+  rain:    ['빗길 미끄러우니 천천히 내려요', '비 오는 날, 우산 챙기고 조심히 가요'],
+  snow:    ['눈길 미끄러우니 천천히 내려요', '눈 오는 날, 발밑 조심해요'],
+  cold:    ['쌀쌀해요, 따뜻하게 다녀요', '추운 날, 목도리 단단히 해요'],
+  hot:     ['더운 날, 물 한 모금 챙겨요', '더위에 지치지 않게 천천히 가요'],
+  friEve:  ['한 주 고생했어요, 주말 잘 보내요', '금요일 밤이에요, 푹 쉬어요'],
+  monMorn: ['월요일도 가볍게 시작해요', '이번 주도 응원할게요'],
+  weekend: ['즐거운 주말 보내요', '쉬는 날, 여유롭게 즐겨요'],
+  payday:  ['월급날이에요, 오늘은 나를 챙겨요', '월급날, 맛있는 것 하나쯤 괜찮아요'],
+  morning: ['오늘도 좋은 하루 보내요', '아침부터 고생 많아요, 화이팅이에요', '좋은 일이 기다리는 하루가 되길요'],
+  midday:  ['점심 맛있게 먹고 힘내요', '오후도 거뜬히 해낼 수 있어요'],
+  afternoon: ['남은 오후도 화이팅이에요', '조금만 더, 잘하고 있어요'],
+  evening: ['오늘 하루도 수고 많았어요', '퇴근길 고생했어요, 푹 쉬어요'],
+  night:   ['늦은 시간까지 고생했어요', '오늘 하루 정말 수고했어요'],
+  late:    ['늦은 밤 조심히 들어가요', '고단한 하루, 푹 쉬어요']
+};
+function reArrCheer(nowMs, tzMin, wx) {
+  var m = _reMin(nowMs, tzMin), h = Math.floor(m / 60), d = new Date(nowMs + tzMin * 60000), dow = d.getUTCDay(), dom = d.getUTCDate();
+  var key;
+  if (wx && wx.snowy) key = 'snow';
+  else if (wx && wx.rainy) key = 'rain';
+  else if (wx && isFinite(wx.temp) && wx.temp <= 3) key = 'cold';
+  else if (wx && isFinite(wx.temp) && wx.temp >= 28) key = 'hot';
+  else if (dow === 5 && h >= 17) key = 'friEve';
+  else if (dow === 1 && h >= 5 && h < 11) key = 'monMorn';
+  else if (dow === 0 || dow === 6) key = 'weekend';
+  else if (dom >= 24 && dom <= 26 && h >= 11) key = 'payday';
+  else key = h < 5 ? 'late' : h < 10 ? 'morning' : h < 14 ? 'midday' : h < 17 ? 'afternoon' : h < 21 ? 'evening' : 'night';
+  var L = ARR_CHEER[key], seed = d.getUTCFullYear() * 400 + (d.getUTCMonth() + 1) * 31 + dom + h * 3;
+  return L[Math.abs(seed) % L.length];
+}
+function rideArrive(input) {
+  var nodes = (input && input.nodes) || [], n = nodes.length, i, now = +(input && input.nowMs);
+  if (!isFinite(now)) now = Date.now();
+  var O = _reMerge(ARRIVE_DEFAULTS, input && input.opts);
+  var preMin = isFinite(input && input.preMin) && input.preMin > 0 ? +input.preMin : O.preMin;
+  var quitSec = isFinite(input && input.quitAfterSec) && input.quitAfterSec >= 0 ? +input.quitAfterSec : O.quitAfterSec;
+  var tz = isFinite(input && input.tzMin) ? +input.tzMin : O.tzMin;
+  var ai = -1;
+  for (i = n - 1; i >= 0; i--) { if (_reIsTransit(nodes[i])) { ai = i; break; } }
+  if (ai < 0) return { v: 1, ok: false, reason: 'no_transit' };
+  var an = nodes[ai], ams = (an.ms != null && isFinite(+an.ms)) ? +an.ms : null;
+  if (ams == null) return { v: 1, ok: false, reason: 'no_time', alight: { idx: ai, name: an.name || '' } };
+  var ls = ai;
+  while (ls > 0) { var pv = nodes[ls - 1], cu = nodes[ls]; if (_reIsTransit(pv) && !!pv.isBus === !!cu.isBus && (pv.lineName || '') === (cu.lineName || '')) ls--; else break; }
+  var idx = isFinite(input && input.idx) ? Math.floor(+input.idx) : -1;
+  var riding = !!(input && input.riding === true) && !(input && input.hold === true);
+  var onFinal = riding && idx >= ls && idx <= ai;
+  var left = onFinal ? ai - idx : null;
+  var level = onFinal ? (left === 2 ? 2 : (left <= 1 ? 1 : 0)) : 0;
+  var alighted = !!(input && input.alighted === true) || (idx >= 0 && idx > ai);
+  var prevAt = +(input && input.alightedAt);
+  var alightedAt = alighted ? (isFinite(prevAt) && prevAt > 0 ? prevAt : now) : null;
+  var quitAtMs = alighted ? alightedAt + quitSec * 1000 : null;
+  var fromMs = ams - preMin * 60000, untilMs = ams + O.recoEndSec * 1000;
+  var nxt = null, ts = [fromMs, untilMs, quitAtMs];
+  for (i = 0; i < ts.length; i++) if (ts[i] != null && ts[i] > now && (nxt == null || ts[i] < nxt)) nxt = ts[i];
+  return {
+    v: 1, ok: true, alight: { idx: ai, name: an.name || '', lat: an.lat != null ? an.lat : null, lng: an.lng != null ? an.lng : null, ms: ams },
+    legStart: ls, idx: idx, left: left, level: level, pre: (onFinal && left === 3) ? 1 : 0,
+    reco: { fromMs: fromMs, untilMs: untilMs },
+    getoff: { title: '내릴 준비를 해주세요', cheer: reArrCheer(now, tz, input && input.wx) },
+    alighted: alighted, alightedAt: alightedAt, quitAtMs: quitAtMs, nextAtMs: nxt
+  };
+}
 // 진입: 도착시각 계산(_rideEtaCore) + (timetableFirst 일 때) 지금 열차가 어느 역 사이 어디쯤인지(pos)
 function rideEta(input) {
   if (input && input.op === 'labels') return rideLabels(input);
   if (input && input.op === 'row') return rideRow(input);
+  if (input && input.op === 'arrive') return rideArrive(input);
   var r = _rideEtaCore(input);
   try { r.hold = _reHold(input, r); } catch (eH) { r.hold = null; }
   try { if (input && input.timetableFirst === true && input.notDeparted !== true && r && r.etaMs) r.pos = _rePos(input, r); } catch (e) { r.pos = null; }
