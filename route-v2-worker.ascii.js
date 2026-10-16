@@ -37,7 +37,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-16s33";
+var ENGINE_VERSION = "route-v2-2026-10-16s34";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -7868,9 +7868,39 @@ function rideLabels(input) {
   for (i = 0; i < lines.length && i < 400; i++) { n = lines[i]; if (n == null || out.lines[n]) continue; out.lines[n] = reShort(n, max); }
   return out;
 }
+// \u2605 2026-10-16 (YJ: "\uacbd\ub85c \uc120\ud0dd\ud558\uba74 \ud0d1\uc2b9 \ubc84\ud2bc \uc0dd\uc131 \u00b7 \ud658\uc2b9\uc774 \uc788\uc73c\uba74 \ud658\uc2b9 \ubc84\ud2bc\uc774 \uc704\uc5d0\uc11c \ub0b4\ub824\uc624\uba70 \ud0d1\uc2b9\uc744 \ubc00\uc5b4 \ub0b4\ub9ac\uace0 \u00b7 \ub9c8\uc9c0\ub9c9 \ud0d1\uc2b9 \ud655\uc815 \ub550 \ub3c4\ucc29 \ubc84\ud2bc\uc774 \uc544\ub798\uc5d0\uc11c \uc62c\ub77c\uc624\uba70 \ud658\uc2b9\uc744 \ubc00\uc5b4 \uc62c\ub9bc. \uacc4\uc0b0\uc740 \uc5d4\uc9c4\uc774, \uadf8\ub9bc\uc740 \uc571\uc774 \u00b7 \uc560\ub2c8\uba54\uc774\uc158\uc740 \ub124\uc774\ud2f0\ube0c"):
+//   \uacbd\ub85c \uce74\ub4dc \ub9e8 \uc544\ub798 \uc904\uc758 \uc624\ub978\ucabd \uce78(slot)\uc774 \ubb34\uc5c7\uc778\uc9c0\u00b7\uc5b4\ub5bb\uac8c \ubc14\ub00c\ub294\uc9c0\ub294 \uc5d4\uc9c4\uc774 \uc815\ud55c\ub2e4. \uc571\uc740 \uc99d\uac70(\ud655\uc815 \uc5ec\ubd80\u00b7\uad6c\uac04\ubcc4 \ud0d1\uc2b9 \ud655\uc815)\ub9cc \ubcf4\ub0b4\uace0, \ubc1b\uc740 \uce78\u00b7\uc804\ud658 \uc885\ub958\ub97c \ub124\uc774\ud2f0\ube0c\uac00 \uadf8\ub9b0\ub2e4.
+//   \uc785\ub825 { op:'row', locked:bool, legs:[{done:bool}], prev:'none'|'board'|'transfer'|'arrive'|null }
+//   \ucd9c\ub825 { v, slot:'none'|'board'|'transfer'|'arrive', label, leg(\ub2e4\uc74c\uc5d0 \ud0c8 \uad6c\uac04 \ubc88\ud638, \ub3c4\ucc29\uc774\uba74 -1), transfers(\uacbd\ub85c\uc758 \ud658\uc2b9 \ud69f\uc218), cols(2|3 \u2014 \ud55c \uc904\uc758 \uce78 \uc218, \uce78 \ub108\ube44\ub294 \ubaa8\ub450 \uac19\ub2e4),
+//          anim:{ kind:'none'|'push_in'|'push_out'|'slide_down'|'slide_up', ms, ease:[x1,y1,x2,y2] } }
+//   \uce78: \ud655\uc815 \uc804 none(2\uce78) \u2192 \ud655\uc815 \ub4a4 \uccab \uad6c\uac04 \ud0d1\uc2b9 \uc804 board('\ud0d1\uc2b9') \u2192 \uccab \uad6c\uac04\uc744 \ud0d4\uace0 \uc544\uc9c1 \ud0c8 \uad6c\uac04\uc774 \ub0a8\uc558\uc73c\uba74 transfer('\ud658\uc2b9') \u2192 \ub9c8\uc9c0\ub9c9 \uad6c\uac04\uae4c\uc9c0 \ud0d4\uc73c\uba74 arrive('\ub3c4\ucc29').
+//   \uc804\ud658: none\u2192\uc5b4\ub5a4 \uce78(push_in: \uc67c\ucabd \ub450 \ubc84\ud2bc\uc774 \uc904\uace0 \uc624\ub978\ucabd\uc5d0\uc11c \ubc00\uace0 \ub4e4\uc5b4\uc634) \u00b7 \uce78\u2192none(push_out: \ubc18\ub300) \u00b7 board\u2192transfer / arrive\u2192board / arrive\u2192transfer(slide_down: \uc0c8 \uce78\uc774 \uc704\uc5d0\uc11c \ub0b4\ub824\uc624\uba70 \uc61b \uce78\uc744 \uc544\ub798\ub85c \ubc00\uc5b4\ub0c4) \u00b7
+//          transfer\u2192board / transfer\u2192arrive / board\u2192arrive(slide_up: \uc0c8 \uce78\uc774 \uc544\ub798\uc5d0\uc11c \uc62c\ub77c\uc624\uba70 \uc61b \uce78\uc744 \uc704\ub85c \ubc00\uc5b4\ub0c4). \ub418\ub3cc\ub9ac\uae30(\ud0d1\uc2b9 \ub418\ub3cc\ub9bc)\ub294 \uac19\uc740 \uaddc\uce59\uc758 \ubc18\ub300 \ubc29\ud5a5\uc774 \ub41c\ub2e4.
+var ROW_ANIM = { pushMs: 420, slideMs: 380, ease: [0.2, 0, 0, 1] };
+function rideRow(input) {
+  var legs = (input && input.legs) || [], L = legs.length, b = 0, i;
+  for (i = 0; i < L; i++) { if (legs[i] && legs[i].done) b++; else break; }
+  var slot = 'none', label = '', leg = -1;
+  if (input && input.locked === true && L > 0) {
+    if (b >= L) { slot = 'arrive'; label = '\ub3c4\ucc29'; leg = -1; }
+    else if (b === 0) { slot = 'board'; label = '\ud0d1\uc2b9'; leg = 0; }
+    else { slot = 'transfer'; label = '\ud658\uc2b9'; leg = b; }
+  }
+  var prev = (input && input.prev) || 'none', kind = 'none';
+  if (prev !== 'none' && prev !== 'board' && prev !== 'transfer' && prev !== 'arrive') prev = 'none';
+  if (prev !== slot) {
+    if (prev === 'none') kind = 'push_in';
+    else if (slot === 'none') kind = 'push_out';
+    else if ((prev === 'board' && slot === 'transfer') || (prev === 'arrive')) kind = 'slide_down';
+    else kind = 'slide_up';      // transfer\u2192board \u00b7 transfer\u2192arrive \u00b7 board\u2192arrive
+  }
+  return { v: 1, slot: slot, label: label, leg: leg, transfers: Math.max(0, L - 1), cols: slot === 'none' ? 2 : 3,
+    anim: { kind: kind, ms: (kind === 'push_in' || kind === 'push_out') ? ROW_ANIM.pushMs : (kind === 'none' ? 0 : ROW_ANIM.slideMs), ease: ROW_ANIM.ease.slice() } };
+}
 // \uc9c4\uc785: \ub3c4\ucc29\uc2dc\uac01 \uacc4\uc0b0(_rideEtaCore) + (timetableFirst \uc77c \ub54c) \uc9c0\uae08 \uc5f4\ucc28\uac00 \uc5b4\ub290 \uc5ed \uc0ac\uc774 \uc5b4\ub514\ucbe4\uc778\uc9c0(pos)
 function rideEta(input) {
   if (input && input.op === 'labels') return rideLabels(input);
+  if (input && input.op === 'row') return rideRow(input);
   var r = _rideEtaCore(input);
   try { r.hold = _reHold(input, r); } catch (eH) { r.hold = null; }
   try { if (input && input.timetableFirst === true && input.notDeparted !== true && r && r.etaMs) r.pos = _rePos(input, r); } catch (e) { r.pos = null; }
@@ -7921,10 +7951,12 @@ function _reHold(input, r) {
     var P = ps[i], ix = +(P && P.idx), sr = (P && P.src) || 'pf';
     if (!isFinite(ix) || ix < 0 || ix >= nodes.length - 1 || sr === 'board' || sr === 'cell' || sr === 'drift') continue;
     if (r.etaMs[ix] == null) continue;
-    if (!best || ix > best.idx) best = { idx: ix, src: sr };
+    if (!best || ix > best.idx) best = { idx: ix, src: sr, ms: +P.ms };
   }
   if (!best) return null;
-  var at = r.etaMs[best.idx], until = at + dw;
+  // \uc815\ucc28 \uc2dc\uc791 = \uc571\uc774 \uadf8 \ud1b5\uacfc\ub97c \uae30\ub85d\ud55c \uc2dc\uac01(P.ms). \uc601\uc810(gps)\uc740 \uc2e4\uc81c \ud1b5\uacfc \uc2dc\uac01\uc774\uace0, \uc704\uce58 \ucc44\ud0dd(pf)\uc740 \uc2e4\uc81c\ubcf4\ub2e4 5~70\ucd08 \ub2a6\uac8c \ucc0d\ud788\uc9c0\ub9cc '\ub3c4\ucc29\uc744 \uc54c\uc544\ucc48 \ub54c'\ubd80\ud130 \uba48\ucdb0 \ubcf4\uc778 \ub4a4 \uac00\uc57c
+  //   \ub9c8\ucee4\uac00 \ud55c \uc5ed\uc744 \uac74\ub108\ub6f0\uc5b4 \ubcf4\uc774\uc9c0 \uc54a\ub294\ub2e4(YJ \ub85c\uadf8 18:10~18:30: \ucc44\ud0dd \ub54c\ub9c8\ub2e4 \ub9c8\ucee4\uac00 \ub178\ub780\uc0c9(\uc5ed \uc55e 0.85\uc5d0\uc11c \ub300\uae30) \u2192 \uace7\ubc14\ub85c \ub2e4\uc74c \uc5ed \uc774\ub3d9 \u2014 \uc815\ucc28 \uc5c6\uc774 \ub118\uc5b4\uac10).
+  var at = isFinite(best.ms) ? best.ms : r.etaMs[best.idx], until = at + dw;
   if (!(now >= at - 2000 && now < until)) return null;
   return { idx: best.idx, src: best.src, atMs: at, untilMs: until };
 }

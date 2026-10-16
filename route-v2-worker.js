@@ -37,7 +37,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-16s33";
+var ENGINE_VERSION = "route-v2-2026-10-16s34";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -7868,9 +7868,39 @@ function rideLabels(input) {
   for (i = 0; i < lines.length && i < 400; i++) { n = lines[i]; if (n == null || out.lines[n]) continue; out.lines[n] = reShort(n, max); }
   return out;
 }
+// ★ 2026-10-16 (YJ: "경로 선택하면 탑승 버튼 생성 · 환승이 있으면 환승 버튼이 위에서 내려오며 탑승을 밀어 내리고 · 마지막 탑승 확정 땐 도착 버튼이 아래에서 올라오며 환승을 밀어 올림. 계산은 엔진이, 그림은 앱이 · 애니메이션은 네이티브"):
+//   경로 카드 맨 아래 줄의 오른쪽 칸(slot)이 무엇인지·어떻게 바뀌는지는 엔진이 정한다. 앱은 증거(확정 여부·구간별 탑승 확정)만 보내고, 받은 칸·전환 종류를 네이티브가 그린다.
+//   입력 { op:'row', locked:bool, legs:[{done:bool}], prev:'none'|'board'|'transfer'|'arrive'|null }
+//   출력 { v, slot:'none'|'board'|'transfer'|'arrive', label, leg(다음에 탈 구간 번호, 도착이면 -1), transfers(경로의 환승 횟수), cols(2|3 — 한 줄의 칸 수, 칸 너비는 모두 같다),
+//          anim:{ kind:'none'|'push_in'|'push_out'|'slide_down'|'slide_up', ms, ease:[x1,y1,x2,y2] } }
+//   칸: 확정 전 none(2칸) → 확정 뒤 첫 구간 탑승 전 board('탑승') → 첫 구간을 탔고 아직 탈 구간이 남았으면 transfer('환승') → 마지막 구간까지 탔으면 arrive('도착').
+//   전환: none→어떤 칸(push_in: 왼쪽 두 버튼이 줄고 오른쪽에서 밀고 들어옴) · 칸→none(push_out: 반대) · board→transfer / arrive→board / arrive→transfer(slide_down: 새 칸이 위에서 내려오며 옛 칸을 아래로 밀어냄) ·
+//          transfer→board / transfer→arrive / board→arrive(slide_up: 새 칸이 아래에서 올라오며 옛 칸을 위로 밀어냄). 되돌리기(탑승 되돌림)는 같은 규칙의 반대 방향이 된다.
+var ROW_ANIM = { pushMs: 420, slideMs: 380, ease: [0.2, 0, 0, 1] };
+function rideRow(input) {
+  var legs = (input && input.legs) || [], L = legs.length, b = 0, i;
+  for (i = 0; i < L; i++) { if (legs[i] && legs[i].done) b++; else break; }
+  var slot = 'none', label = '', leg = -1;
+  if (input && input.locked === true && L > 0) {
+    if (b >= L) { slot = 'arrive'; label = '도착'; leg = -1; }
+    else if (b === 0) { slot = 'board'; label = '탑승'; leg = 0; }
+    else { slot = 'transfer'; label = '환승'; leg = b; }
+  }
+  var prev = (input && input.prev) || 'none', kind = 'none';
+  if (prev !== 'none' && prev !== 'board' && prev !== 'transfer' && prev !== 'arrive') prev = 'none';
+  if (prev !== slot) {
+    if (prev === 'none') kind = 'push_in';
+    else if (slot === 'none') kind = 'push_out';
+    else if ((prev === 'board' && slot === 'transfer') || (prev === 'arrive')) kind = 'slide_down';
+    else kind = 'slide_up';      // transfer→board · transfer→arrive · board→arrive
+  }
+  return { v: 1, slot: slot, label: label, leg: leg, transfers: Math.max(0, L - 1), cols: slot === 'none' ? 2 : 3,
+    anim: { kind: kind, ms: (kind === 'push_in' || kind === 'push_out') ? ROW_ANIM.pushMs : (kind === 'none' ? 0 : ROW_ANIM.slideMs), ease: ROW_ANIM.ease.slice() } };
+}
 // 진입: 도착시각 계산(_rideEtaCore) + (timetableFirst 일 때) 지금 열차가 어느 역 사이 어디쯤인지(pos)
 function rideEta(input) {
   if (input && input.op === 'labels') return rideLabels(input);
+  if (input && input.op === 'row') return rideRow(input);
   var r = _rideEtaCore(input);
   try { r.hold = _reHold(input, r); } catch (eH) { r.hold = null; }
   try { if (input && input.timetableFirst === true && input.notDeparted !== true && r && r.etaMs) r.pos = _rePos(input, r); } catch (e) { r.pos = null; }
@@ -7921,10 +7951,12 @@ function _reHold(input, r) {
     var P = ps[i], ix = +(P && P.idx), sr = (P && P.src) || 'pf';
     if (!isFinite(ix) || ix < 0 || ix >= nodes.length - 1 || sr === 'board' || sr === 'cell' || sr === 'drift') continue;
     if (r.etaMs[ix] == null) continue;
-    if (!best || ix > best.idx) best = { idx: ix, src: sr };
+    if (!best || ix > best.idx) best = { idx: ix, src: sr, ms: +P.ms };
   }
   if (!best) return null;
-  var at = r.etaMs[best.idx], until = at + dw;
+  // 정차 시작 = 앱이 그 통과를 기록한 시각(P.ms). 영점(gps)은 실제 통과 시각이고, 위치 채택(pf)은 실제보다 5~70초 늦게 찍히지만 '도착을 알아챈 때'부터 멈춰 보인 뒤 가야
+  //   마커가 한 역을 건너뛰어 보이지 않는다(YJ 로그 18:10~18:30: 채택 때마다 마커가 노란색(역 앞 0.85에서 대기) → 곧바로 다음 역 이동 — 정차 없이 넘어감).
+  var at = isFinite(best.ms) ? best.ms : r.etaMs[best.idx], until = at + dw;
   if (!(now >= at - 2000 && now < until)) return null;
   return { idx: best.idx, src: best.src, atMs: at, untilMs: until };
 }
