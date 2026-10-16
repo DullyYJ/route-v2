@@ -37,7 +37,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-16s31";
+var ENGINE_VERSION = "route-v2-2026-10-16s32";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -10549,6 +10549,20 @@ async function handleWidgetSay(request, env, ctx) {
 //     \ud63c\uc7a1\ub3c4 \uce74\ub4dc\uac00 \uc5b4\ub290 \uad6c\uac04(\uc9c0\ud558\ucca0 \uc5ed\u00b7\ubc84\uc2a4 \uc815\ub958\uc7a5 \ubaa9\ub85d)\uc744 \ubcf4\uc5ec\uc904\uc9c0, \uc2dc\uac04\ub300(\uc0c8\ubcbd\u00b7\uc544\uce68\u00b7\uc810\uc2ec\u00b7\uc624\ud6c4\u00b7\uc800\ub141\u00b7\ubc24)\u00b7\uc2e4\uc81c \ub0a0\uc528 \uc885\ub958, \ub300\ud45c \uce90\ub9ad\ud130\u00b7\ub4f1\uc7a5 \uc21c\uc11c, \uc548\ub0b4 \ubb38\uad6c\ub97c \uc804\ubd80 \uc5ec\uae30\uc11c \uc815\ud55c\ub2e4.
 //   \u00b7 \uc571(www/index.html)\uc740 \ubc1b\uc740 \uac12\uc744 \uadf8\ub9ac\uae30\ub9cc \ud55c\ub2e4(\uc0c9\u00b7\ubaa8\uc591\u00b7\uc6c0\uc9c1\uc784\uc740 \uc571\uc758 \uadf8\ub9bc \uaddc\uce59). \ub0a0\uc528\ub294 subway-api \uc6cc\ucee4(/weather)\uc758 \uac12\uc744 \uc4f0\uace0, \ubabb \ubc1b\uc73c\uba74 \ub0a0\uc528\ub97c \uc9c0\uc5b4\ub0b4\uc9c0 \uc54a\ub294\ub2e4(wxKnown:false).
 var SCENE_CHARS = ["dolsom", "lovel", "dudung", "sul", "ppopu", "chaeng"];
+// \u2605 \uce90\ub9ad\ud130 \ud2b9\uc131(YJ 2026-10-16): \uc5b4\ub5a4 \ub3d9\uc791\uc744 \uc5b4\ub5a4 \uc21c\uc11c\ub85c \ud558\ub294\uc9c0 \u00b7 \uc7a1\uc558\ub2e4 \ub193\uc558\uc744 \ub54c \uc5b4\ub5a4 \uc5f0\ucd9c\uc744 \ud558\ub294\uc9c0\ub294 \uc5d4\uc9c4\uc774 \uc815\ud55c\ub2e4. \uc571\uc740 \uc774 \uc774\ub984\ub300\ub85c \uadf8\ub9ac\uae30\ub9cc \ud55c\ub2e4.
+//   land: cotton(\uc19c\uc0ac\ud0d5\ucc98\ub7fc \ubd80\ud480\uc5b4 \uc548\uc804 \ucc29\ub959+\ud558\ud2b8) | pose(\ub450 \ubc1c \ucc29\uc9c0 \uba4b\uc9c4 \ud3ec\uc988+\uc528\uc775 \uc6c3\uc74c) | dig(\ub545\uc18d\uc73c\ub85c \uc228\uc5c8\ub2e4 2\ucd08 \ub4a4 \ub098\uc640 \ud654\ub0c4) | flip(\uacf5\uc911 \uc55e \ud55c \ubc14\ud034 \uc548\uc804 \ucc29\uc9c0)
+//         | fly(\ub0a0\uac1c\ub97c \ud3b4 \ub0a0\uc544\uac00 \ub2e4\ub978 \uacf3\uc5d0 \ucc29\uc9c0) | puddle(\uc6c5\ub369\uc774\uac00 \uc0dd\uae30\uace0 \ucca8\ubc99)
+//   acts: \uae30\ubcf8(walk\u00b7hop\u00b7spin\u00b7rest)\uacfc \uce90\ub9ad\ud130 \uc804\uc6a9 \ub3d9\uc791 \uc774\ub984. \uc571\uc740 \uc21c\uc11c\ub300\ub85c \ud55c \ub3d9\uc791\uc529 \uadf8\ub9b0\ub2e4(\ub05d\ub098\uba74 \ub2e4\uc74c).
+var SCENE_LAND = { dolsom: "cotton", ppopu: "pose", dudung: "dig", lovel: "flip", sul: "fly", chaeng: "puddle" };
+var SCENE_ACTS = {
+  dolsom: ["shake", "tailchase", "loaf", "ball", "mirror"],
+  ppopu: ["dig", "bone", "dance", "slide", "dive"],
+  lovel: ["punch", "box", "stretch", "melt", "pounce"],
+  dudung: ["shades", "flag", "lens", "dust", "vanish"],
+  sul: ["glasses", "stumble", "feather", "binoc", "hover"],
+  chaeng: ["dash", "flop", "hide", "bubbles", "dew"]
+};
+var SCENE_BASE = ["walk", "hop", "spin", "rest"];
 var SCENE_HINT_BUS = "\uc9c0\ud558\ucca0\uc744 \ud0c0\uba74 \ud63c\uc7a1\ub3c4\uac00 \ud45c\uc2dc\ub3fc\uc694";
 var SCENE_SLOT_KO = { dawn: "\uc0c8\ubcbd", morning: "\uc544\uce68", noon: "\uc810\uc2ec", afternoon: "\uc624\ud6c4", evening: "\uc800\ub141", night: "\ubc24" };
 var SCENE_WX_KO = { clear: "\ub9d1\uc74c", cloudy: "\uad6c\ub984", overcast: "\ud750\ub9bc", rain: "\ube44", snow: "\ub208", fog: "\uc548\uac1c" };
@@ -10576,6 +10590,18 @@ function sceneLook(nowMs, tz, wx) {
   var emo = wk === "snow" ? "\u2744\ufe0f" : wk === "rain" ? "\ud83c\udf27\ufe0f" : wk === "overcast" ? "\u2601\ufe0f" : wk === "cloudy" ? "\u26c5" : wk === "fog" ? "\ud83c\udf2b\ufe0f" : slot === "night" ? "\ud83c\udf19" : slot === "dawn" ? "\ud83c\udf05" : slot === "evening" ? "\ud83c\udf07" : "\u2600\ufe0f";
   var known = !!wx;
   return { slot: slot, slotKo: SCENE_SLOT_KO[slot], wk: wk, wxKo: known ? SCENE_WX_KO[wk] : "", wxKnown: known, temp: wx && typeof wx.temp === "number" ? Math.round(wx.temp) : null, season: season, night: slot === "night", lit: slot === "night" || slot === "evening" || slot === "dawn", hidesSun: wk === "overcast" || wk === "rain" || wk === "snow" || wk === "fog", emo: emo };
+}
+// \uce90\ub9ad\ud130\ubcc4 \ub3d9\uc791 \ub300\ubcf8: \uc804\uc6a9 \ub3d9\uc791\uc744 \uc2dc\ub4dc\ub85c \uc11e\uace0 \uc0ac\uc774\uc0ac\uc774 \uae30\ubcf8 \ub3d9\uc791(\uac77\uae30\u00b7\ucf69\ucf69\u00b7\ub3cc\uae30\u00b7\uc26c\uae30)\uc744 \ub07c\uc6b4\ub2e4. \ub099\uc5fd \ub354\ubbf8 \ub2e4\uc774\ube59(dive)\uc740 \uac00\uc744\u00b7\ub208 \uc62c \ub54c\ub9cc.
+function sceneTraits(look, seed, nowMs) {
+  var out = {}, bucket = Math.floor(nowMs / 6e5);
+  SCENE_CHARS.forEach(function (id) {
+    var sp = SCENE_ACTS[id].filter(function (x) { return x !== "dive" || look.season === "autumn" || look.wk === "snow"; });
+    sp = sceneShuffle(sp, sceneHash(seed + "/A" + id + "/" + bucket));
+    var h = sceneHash(seed + "/B" + id), seq = [];
+    sp.forEach(function (x, i) { seq.push(x); seq.push(i % 2 === 0 ? "walk" : SCENE_BASE[(h + i) % SCENE_BASE.length]); });
+    out[id] = { land: SCENE_LAND[id], acts: seq };
+  });
+  return out;
 }
 function sceneIsTr(n) { return !!(n && (n.isSub || n.isBus) && n.name); }
 // \uc9c0\uae08 \uc704\uce58(here)\uc5d0\uc11c '\ud0c0\uace0 \uc788\uac70\ub098 \uace7 \ud0c8' \uad6c\uac04\uc758 \ub178\ub4dc: here \uac00 \ud0c8\uac83\uc774\uba74 \uadf8\uac83, \ub3c4\ubcf4\u00b7\ucd9c\ubc1c\uc774\uba74 \ub2e4\uc74c \ud0c8\uac83, \uc5c6\uc73c\uba74 \ub9c8\uc9c0\ub9c9\uc73c\ub85c \uc9c0\ub09c \ud0c8\uac83
@@ -10610,7 +10636,7 @@ function sceneDecide(inp, wx) {
   var look = sceneLook(nowMs, tz, wx || null);
   var sigBase = nodes.map(function (n) { return (n.isBus ? "b" : n.isSub ? "s" : n.isWalk ? "w" : "o") + (n.lineName || "") + "|" + (n.name || ""); }).join(">");
   var day = Math.floor((nowMs + tz * 6e4) / 864e5), seedStr = String(inp.key || sigBase) + "#" + day;
-  var out = { ok: true, fill: false, mode: null, venue: "street", line: "", nearEnd: false, hint: null, tag: "", look: look, hero: SCENE_CHARS[sceneHash(seedStr) % SCENE_CHARS.length], cast: sceneShuffle(SCENE_CHARS, sceneHash(seedStr + "/" + Math.floor(nowMs / 6e5))), cong: { kind: null, idx: -1, sig: "" } };
+  var out = { ok: true, fill: false, mode: null, venue: "street", line: "", nearEnd: false, hint: null, tag: "", look: look, hero: SCENE_CHARS[sceneHash(seedStr) % SCENE_CHARS.length], cast: sceneShuffle(SCENE_CHARS, sceneHash(seedStr + "/" + Math.floor(nowMs / 6e5))), traits: sceneTraits(look, seedStr, nowMs), cong: { kind: null, idx: -1, sig: "" } };
   var idleTag = look.emo + " " + look.slotKo + (look.wxKnown ? " \u00B7 " + look.wxKo + (look.temp != null ? " " + look.temp + "\u00B0" : "") : "");
   // fill: \uacbd\ub85c\uac00 \uc5c6\uace0(\uacbd\ub85c \uacb0\uacfc\ub3c4 \uc548 \ub098\uc628 \ub54c) \ud648 \ud654\uba74\uc744 \ud55c \ud654\uba74\uc5d0 \uaf49 \ucc44\uc6cc \ubcf4\uc77c \ub54c\ub9cc true. \uacbd\ub85c \uacb0\uacfc\uac00 \ub098\uc624\uae30 \uc2dc\uc791\ud558\uba74(\ud655\uc815 \uc804\uc774\ub77c\ub3c4) false \u2192 \uc571\uc740 \ud3c9\uc18c \ud06c\uae30\ub85c \ub3cc\ub9b0\ub2e4
   if (!locked) { out.mode = "idle"; out.tag = idleTag; out.fill = inp.routeShown !== true; out.hint = SCENE_HINT_BUS; return out; }

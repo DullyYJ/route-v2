@@ -37,7 +37,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-16s31";
+var ENGINE_VERSION = "route-v2-2026-10-16s32";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -10549,6 +10549,20 @@ async function handleWidgetSay(request, env, ctx) {
 //     혼잡도 카드가 어느 구간(지하철 역·버스 정류장 목록)을 보여줄지, 시간대(새벽·아침·점심·오후·저녁·밤)·실제 날씨 종류, 대표 캐릭터·등장 순서, 안내 문구를 전부 여기서 정한다.
 //   · 앱(www/index.html)은 받은 값을 그리기만 한다(색·모양·움직임은 앱의 그림 규칙). 날씨는 subway-api 워커(/weather)의 값을 쓰고, 못 받으면 날씨를 지어내지 않는다(wxKnown:false).
 var SCENE_CHARS = ["dolsom", "lovel", "dudung", "sul", "ppopu", "chaeng"];
+// ★ 캐릭터 특성(YJ 2026-10-16): 어떤 동작을 어떤 순서로 하는지 · 잡았다 놓았을 때 어떤 연출을 하는지는 엔진이 정한다. 앱은 이 이름대로 그리기만 한다.
+//   land: cotton(솜사탕처럼 부풀어 안전 착륙+하트) | pose(두 발 착지 멋진 포즈+씨익 웃음) | dig(땅속으로 숨었다 2초 뒤 나와 화냄) | flip(공중 앞 한 바퀴 안전 착지)
+//         | fly(날개를 펴 날아가 다른 곳에 착지) | puddle(웅덩이가 생기고 첨벙)
+//   acts: 기본(walk·hop·spin·rest)과 캐릭터 전용 동작 이름. 앱은 순서대로 한 동작씩 그린다(끝나면 다음).
+var SCENE_LAND = { dolsom: "cotton", ppopu: "pose", dudung: "dig", lovel: "flip", sul: "fly", chaeng: "puddle" };
+var SCENE_ACTS = {
+  dolsom: ["shake", "tailchase", "loaf", "ball", "mirror"],
+  ppopu: ["dig", "bone", "dance", "slide", "dive"],
+  lovel: ["punch", "box", "stretch", "melt", "pounce"],
+  dudung: ["shades", "flag", "lens", "dust", "vanish"],
+  sul: ["glasses", "stumble", "feather", "binoc", "hover"],
+  chaeng: ["dash", "flop", "hide", "bubbles", "dew"]
+};
+var SCENE_BASE = ["walk", "hop", "spin", "rest"];
 var SCENE_HINT_BUS = "지하철을 타면 혼잡도가 표시돼요";
 var SCENE_SLOT_KO = { dawn: "새벽", morning: "아침", noon: "점심", afternoon: "오후", evening: "저녁", night: "밤" };
 var SCENE_WX_KO = { clear: "맑음", cloudy: "구름", overcast: "흐림", rain: "비", snow: "눈", fog: "안개" };
@@ -10576,6 +10590,18 @@ function sceneLook(nowMs, tz, wx) {
   var emo = wk === "snow" ? "❄️" : wk === "rain" ? "🌧️" : wk === "overcast" ? "☁️" : wk === "cloudy" ? "⛅" : wk === "fog" ? "🌫️" : slot === "night" ? "🌙" : slot === "dawn" ? "🌅" : slot === "evening" ? "🌇" : "☀️";
   var known = !!wx;
   return { slot: slot, slotKo: SCENE_SLOT_KO[slot], wk: wk, wxKo: known ? SCENE_WX_KO[wk] : "", wxKnown: known, temp: wx && typeof wx.temp === "number" ? Math.round(wx.temp) : null, season: season, night: slot === "night", lit: slot === "night" || slot === "evening" || slot === "dawn", hidesSun: wk === "overcast" || wk === "rain" || wk === "snow" || wk === "fog", emo: emo };
+}
+// 캐릭터별 동작 대본: 전용 동작을 시드로 섞고 사이사이 기본 동작(걷기·콩콩·돌기·쉬기)을 끼운다. 낙엽 더미 다이빙(dive)은 가을·눈 올 때만.
+function sceneTraits(look, seed, nowMs) {
+  var out = {}, bucket = Math.floor(nowMs / 6e5);
+  SCENE_CHARS.forEach(function (id) {
+    var sp = SCENE_ACTS[id].filter(function (x) { return x !== "dive" || look.season === "autumn" || look.wk === "snow"; });
+    sp = sceneShuffle(sp, sceneHash(seed + "/A" + id + "/" + bucket));
+    var h = sceneHash(seed + "/B" + id), seq = [];
+    sp.forEach(function (x, i) { seq.push(x); seq.push(i % 2 === 0 ? "walk" : SCENE_BASE[(h + i) % SCENE_BASE.length]); });
+    out[id] = { land: SCENE_LAND[id], acts: seq };
+  });
+  return out;
 }
 function sceneIsTr(n) { return !!(n && (n.isSub || n.isBus) && n.name); }
 // 지금 위치(here)에서 '타고 있거나 곧 탈' 구간의 노드: here 가 탈것이면 그것, 도보·출발이면 다음 탈것, 없으면 마지막으로 지난 탈것
@@ -10610,7 +10636,7 @@ function sceneDecide(inp, wx) {
   var look = sceneLook(nowMs, tz, wx || null);
   var sigBase = nodes.map(function (n) { return (n.isBus ? "b" : n.isSub ? "s" : n.isWalk ? "w" : "o") + (n.lineName || "") + "|" + (n.name || ""); }).join(">");
   var day = Math.floor((nowMs + tz * 6e4) / 864e5), seedStr = String(inp.key || sigBase) + "#" + day;
-  var out = { ok: true, fill: false, mode: null, venue: "street", line: "", nearEnd: false, hint: null, tag: "", look: look, hero: SCENE_CHARS[sceneHash(seedStr) % SCENE_CHARS.length], cast: sceneShuffle(SCENE_CHARS, sceneHash(seedStr + "/" + Math.floor(nowMs / 6e5))), cong: { kind: null, idx: -1, sig: "" } };
+  var out = { ok: true, fill: false, mode: null, venue: "street", line: "", nearEnd: false, hint: null, tag: "", look: look, hero: SCENE_CHARS[sceneHash(seedStr) % SCENE_CHARS.length], cast: sceneShuffle(SCENE_CHARS, sceneHash(seedStr + "/" + Math.floor(nowMs / 6e5))), traits: sceneTraits(look, seedStr, nowMs), cong: { kind: null, idx: -1, sig: "" } };
   var idleTag = look.emo + " " + look.slotKo + (look.wxKnown ? " \u00B7 " + look.wxKo + (look.temp != null ? " " + look.temp + "\u00B0" : "") : "");
   // fill: 경로가 없고(경로 결과도 안 나온 때) 홈 화면을 한 화면에 꽉 채워 보일 때만 true. 경로 결과가 나오기 시작하면(확정 전이라도) false → 앱은 평소 크기로 돌린다
   if (!locked) { out.mode = "idle"; out.tag = idleTag; out.fill = inp.routeShown !== true; out.hint = SCENE_HINT_BUS; return out; }
