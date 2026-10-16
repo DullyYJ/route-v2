@@ -37,7 +37,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-16s32";
+var ENGINE_VERSION = "route-v2-2026-10-16s33";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -7809,7 +7809,10 @@ var RIDE_ETA_DEFAULTS = {
   //   앵커(마지막 통과) 뒤 첫 정차 노드의 예정 시각이 이만큼(초) 지났는데 도착 증거가 없으면 그만큼 늦는 것이다 → 그 노드를 '지금 + overdueExtraMin 분'으로 미루고 뒤를 같은 폭만큼 민다(최대 overdueMaxMin 분).
   //   엔진은 상태가 없어 매번 같은 식으로 다시 계산하므로 누적되지 않는다.
   // 정차 시간(초) — 실측 25초(표본 25,997). 시각표 기준 위치(pos)에서 도착 뒤 이만큼은 역 위에 머문다.
-  stopDwellSec: 25,
+  // ★ 2026-10-16 (YJ: "역에 도착하면 마커가 바로 다음역으로 넘어간다 — GPS 영점을 고려해서 10초 동안 정차(노란색) 후 이동"): 25 → 10초.
+  stopDwellSec: 10,
+  // 영점(GPS 통과)을 받은 역에서 마커가 멈춰 있어야 하는 시간(초). 통과 시각(영점이면 실제 통과 시각) + 이만큼까지 hold 로 알린다 — 시각표 기준 위치(pos)를 못 쓰는 경우에도 앱이 그린다.
+  markerDwellSec: 10,
   // ★ 2026-10-14 (YJ: 인천1호선(실시간 위치 없음) 시험 — 도착 표시가 약 15초 늦다 → 현재보다 10초 일찍 도착으로 판정): 시각표 기준 위치(pos)에서 '중간 경로역'(승차역·최종 목적지 제외)에 닿았다고 보는 시각을
   //   표시 도착 시각보다 이만큼(초) 앞당긴다. 0 이면 끔. 표시하는 도착 시각(etaMs·arr)은 그대로이고 마커·오버레이가 읽는 pos(from/to/t0/t1/segs)만 당겨진다. (영점 창은 ride-track zeroLeadSec 가 같이 일찍 열린다)
   // ★ 2026-10-15 (YJ: 마커가 다음 역에 너무 일찍 올라간다 → 10초를 5초로): 값만 10 → 5.
@@ -7869,6 +7872,7 @@ function rideLabels(input) {
 function rideEta(input) {
   if (input && input.op === 'labels') return rideLabels(input);
   var r = _rideEtaCore(input);
+  try { r.hold = _reHold(input, r); } catch (eH) { r.hold = null; }
   try { if (input && input.timetableFirst === true && input.notDeparted !== true && r && r.etaMs) r.pos = _rePos(input, r); } catch (e) { r.pos = null; }
   return r;
 }
@@ -7904,6 +7908,25 @@ function _rePos(input, r) {
     segs.push({ from: fa, to: fb, a: eff(q), t0: s0, t1: s1 });
   }
   return { from: f, to: t, t0: t0, t1: t1, ratio: Math.round(ratio * 1000) / 1000, moving: ratio > 0 && ratio < 1, floor: fl, segs: segs };
+}
+// ★ 2026-10-16: 정차 표시 — 가장 앞선 통과(영점 gps · 위치 채택 pf · 움직임 move)가 난 역에서 markerDwellSec 동안은 마커를 그 역 위에 세운다.
+//   시각은 엔진이 정한 그 역의 통과 시각(etaMs — gps 는 실제 통과 시각, pf 는 채택 지연을 뺀 값)이다. 앱은 now < untilMs 인 동안 정지(노란색)로 그리기만 한다.
+//   승차 확정(board)·기지국 선행(cell)은 도착이 아니므로 세우지 않는다. 마지막 역(목적지)도 그리지 않는다(도착 처리는 따로).
+function _reHold(input, r) {
+  var O = _reMerge(RIDE_ETA_DEFAULTS, input && input.opts), ps = (input && input.passes) || [], nodes = (input && input.nodes) || [], now = +(input && input.nowMs), i, best = null;
+  if (!isFinite(now)) now = Date.now();
+  var dw = Math.max(0, +O.markerDwellSec || 0) * 1000;
+  if (!dw || !r || !r.etaMs) return null;
+  for (i = 0; i < ps.length; i++) {
+    var P = ps[i], ix = +(P && P.idx), sr = (P && P.src) || 'pf';
+    if (!isFinite(ix) || ix < 0 || ix >= nodes.length - 1 || sr === 'board' || sr === 'cell' || sr === 'drift') continue;
+    if (r.etaMs[ix] == null) continue;
+    if (!best || ix > best.idx) best = { idx: ix, src: sr };
+  }
+  if (!best) return null;
+  var at = r.etaMs[best.idx], until = at + dw;
+  if (!(now >= at - 2000 && now < until)) return null;
+  return { idx: best.idx, src: best.src, atMs: at, untilMs: until };
 }
 function _rideEtaCore(input) {
   input = input || {};

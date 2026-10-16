@@ -37,7 +37,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-16s32";
+var ENGINE_VERSION = "route-v2-2026-10-16s33";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -7809,7 +7809,10 @@ var RIDE_ETA_DEFAULTS = {
   //   \uc575\ucee4(\ub9c8\uc9c0\ub9c9 \ud1b5\uacfc) \ub4a4 \uccab \uc815\ucc28 \ub178\ub4dc\uc758 \uc608\uc815 \uc2dc\uac01\uc774 \uc774\ub9cc\ud07c(\ucd08) \uc9c0\ub0ac\ub294\ub370 \ub3c4\ucc29 \uc99d\uac70\uac00 \uc5c6\uc73c\uba74 \uadf8\ub9cc\ud07c \ub2a6\ub294 \uac83\uc774\ub2e4 \u2192 \uadf8 \ub178\ub4dc\ub97c '\uc9c0\uae08 + overdueExtraMin \ubd84'\uc73c\ub85c \ubbf8\ub8e8\uace0 \ub4a4\ub97c \uac19\uc740 \ud3ed\ub9cc\ud07c \ubbfc\ub2e4(\ucd5c\ub300 overdueMaxMin \ubd84).
   //   \uc5d4\uc9c4\uc740 \uc0c1\ud0dc\uac00 \uc5c6\uc5b4 \ub9e4\ubc88 \uac19\uc740 \uc2dd\uc73c\ub85c \ub2e4\uc2dc \uacc4\uc0b0\ud558\ubbc0\ub85c \ub204\uc801\ub418\uc9c0 \uc54a\ub294\ub2e4.
   // \uc815\ucc28 \uc2dc\uac04(\ucd08) \u2014 \uc2e4\uce21 25\ucd08(\ud45c\ubcf8 25,997). \uc2dc\uac01\ud45c \uae30\uc900 \uc704\uce58(pos)\uc5d0\uc11c \ub3c4\ucc29 \ub4a4 \uc774\ub9cc\ud07c\uc740 \uc5ed \uc704\uc5d0 \uba38\ubb38\ub2e4.
-  stopDwellSec: 25,
+  // \u2605 2026-10-16 (YJ: "\uc5ed\uc5d0 \ub3c4\ucc29\ud558\uba74 \ub9c8\ucee4\uac00 \ubc14\ub85c \ub2e4\uc74c\uc5ed\uc73c\ub85c \ub118\uc5b4\uac04\ub2e4 \u2014 GPS \uc601\uc810\uc744 \uace0\ub824\ud574\uc11c 10\ucd08 \ub3d9\uc548 \uc815\ucc28(\ub178\ub780\uc0c9) \ud6c4 \uc774\ub3d9"): 25 \u2192 10\ucd08.
+  stopDwellSec: 10,
+  // \uc601\uc810(GPS \ud1b5\uacfc)\uc744 \ubc1b\uc740 \uc5ed\uc5d0\uc11c \ub9c8\ucee4\uac00 \uba48\ucdb0 \uc788\uc5b4\uc57c \ud558\ub294 \uc2dc\uac04(\ucd08). \ud1b5\uacfc \uc2dc\uac01(\uc601\uc810\uc774\uba74 \uc2e4\uc81c \ud1b5\uacfc \uc2dc\uac01) + \uc774\ub9cc\ud07c\uae4c\uc9c0 hold \ub85c \uc54c\ub9b0\ub2e4 \u2014 \uc2dc\uac01\ud45c \uae30\uc900 \uc704\uce58(pos)\ub97c \ubabb \uc4f0\ub294 \uacbd\uc6b0\uc5d0\ub3c4 \uc571\uc774 \uadf8\ub9b0\ub2e4.
+  markerDwellSec: 10,
   // \u2605 2026-10-14 (YJ: \uc778\ucc9c1\ud638\uc120(\uc2e4\uc2dc\uac04 \uc704\uce58 \uc5c6\uc74c) \uc2dc\ud5d8 \u2014 \ub3c4\ucc29 \ud45c\uc2dc\uac00 \uc57d 15\ucd08 \ub2a6\ub2e4 \u2192 \ud604\uc7ac\ubcf4\ub2e4 10\ucd08 \uc77c\ucc0d \ub3c4\ucc29\uc73c\ub85c \ud310\uc815): \uc2dc\uac01\ud45c \uae30\uc900 \uc704\uce58(pos)\uc5d0\uc11c '\uc911\uac04 \uacbd\ub85c\uc5ed'(\uc2b9\ucc28\uc5ed\u00b7\ucd5c\uc885 \ubaa9\uc801\uc9c0 \uc81c\uc678)\uc5d0 \ub2ff\uc558\ub2e4\uace0 \ubcf4\ub294 \uc2dc\uac01\uc744
   //   \ud45c\uc2dc \ub3c4\ucc29 \uc2dc\uac01\ubcf4\ub2e4 \uc774\ub9cc\ud07c(\ucd08) \uc55e\ub2f9\uae34\ub2e4. 0 \uc774\uba74 \ub054. \ud45c\uc2dc\ud558\ub294 \ub3c4\ucc29 \uc2dc\uac01(etaMs\u00b7arr)\uc740 \uadf8\ub300\ub85c\uc774\uace0 \ub9c8\ucee4\u00b7\uc624\ubc84\ub808\uc774\uac00 \uc77d\ub294 pos(from/to/t0/t1/segs)\ub9cc \ub2f9\uaca8\uc9c4\ub2e4. (\uc601\uc810 \ucc3d\uc740 ride-track zeroLeadSec \uac00 \uac19\uc774 \uc77c\ucc0d \uc5f4\ub9b0\ub2e4)
   // \u2605 2026-10-15 (YJ: \ub9c8\ucee4\uac00 \ub2e4\uc74c \uc5ed\uc5d0 \ub108\ubb34 \uc77c\ucc0d \uc62c\ub77c\uac04\ub2e4 \u2192 10\ucd08\ub97c 5\ucd08\ub85c): \uac12\ub9cc 10 \u2192 5.
@@ -7869,6 +7872,7 @@ function rideLabels(input) {
 function rideEta(input) {
   if (input && input.op === 'labels') return rideLabels(input);
   var r = _rideEtaCore(input);
+  try { r.hold = _reHold(input, r); } catch (eH) { r.hold = null; }
   try { if (input && input.timetableFirst === true && input.notDeparted !== true && r && r.etaMs) r.pos = _rePos(input, r); } catch (e) { r.pos = null; }
   return r;
 }
@@ -7904,6 +7908,25 @@ function _rePos(input, r) {
     segs.push({ from: fa, to: fb, a: eff(q), t0: s0, t1: s1 });
   }
   return { from: f, to: t, t0: t0, t1: t1, ratio: Math.round(ratio * 1000) / 1000, moving: ratio > 0 && ratio < 1, floor: fl, segs: segs };
+}
+// \u2605 2026-10-16: \uc815\ucc28 \ud45c\uc2dc \u2014 \uac00\uc7a5 \uc55e\uc120 \ud1b5\uacfc(\uc601\uc810 gps \u00b7 \uc704\uce58 \ucc44\ud0dd pf \u00b7 \uc6c0\uc9c1\uc784 move)\uac00 \ub09c \uc5ed\uc5d0\uc11c markerDwellSec \ub3d9\uc548\uc740 \ub9c8\ucee4\ub97c \uadf8 \uc5ed \uc704\uc5d0 \uc138\uc6b4\ub2e4.
+//   \uc2dc\uac01\uc740 \uc5d4\uc9c4\uc774 \uc815\ud55c \uadf8 \uc5ed\uc758 \ud1b5\uacfc \uc2dc\uac01(etaMs \u2014 gps \ub294 \uc2e4\uc81c \ud1b5\uacfc \uc2dc\uac01, pf \ub294 \ucc44\ud0dd \uc9c0\uc5f0\uc744 \ube80 \uac12)\uc774\ub2e4. \uc571\uc740 now < untilMs \uc778 \ub3d9\uc548 \uc815\uc9c0(\ub178\ub780\uc0c9)\ub85c \uadf8\ub9ac\uae30\ub9cc \ud55c\ub2e4.
+//   \uc2b9\ucc28 \ud655\uc815(board)\u00b7\uae30\uc9c0\uad6d \uc120\ud589(cell)\uc740 \ub3c4\ucc29\uc774 \uc544\ub2c8\ubbc0\ub85c \uc138\uc6b0\uc9c0 \uc54a\ub294\ub2e4. \ub9c8\uc9c0\ub9c9 \uc5ed(\ubaa9\uc801\uc9c0)\ub3c4 \uadf8\ub9ac\uc9c0 \uc54a\ub294\ub2e4(\ub3c4\ucc29 \ucc98\ub9ac\ub294 \ub530\ub85c).
+function _reHold(input, r) {
+  var O = _reMerge(RIDE_ETA_DEFAULTS, input && input.opts), ps = (input && input.passes) || [], nodes = (input && input.nodes) || [], now = +(input && input.nowMs), i, best = null;
+  if (!isFinite(now)) now = Date.now();
+  var dw = Math.max(0, +O.markerDwellSec || 0) * 1000;
+  if (!dw || !r || !r.etaMs) return null;
+  for (i = 0; i < ps.length; i++) {
+    var P = ps[i], ix = +(P && P.idx), sr = (P && P.src) || 'pf';
+    if (!isFinite(ix) || ix < 0 || ix >= nodes.length - 1 || sr === 'board' || sr === 'cell' || sr === 'drift') continue;
+    if (r.etaMs[ix] == null) continue;
+    if (!best || ix > best.idx) best = { idx: ix, src: sr };
+  }
+  if (!best) return null;
+  var at = r.etaMs[best.idx], until = at + dw;
+  if (!(now >= at - 2000 && now < until)) return null;
+  return { idx: best.idx, src: best.src, atMs: at, untilMs: until };
 }
 function _rideEtaCore(input) {
   input = input || {};
