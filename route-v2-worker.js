@@ -37,7 +37,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-17s36";
+var ENGINE_VERSION = "route-v2-2026-10-17s37";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -1420,6 +1420,10 @@ function dijkstraRaw(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
       }
       const isW = ek === "walk";
       const isX = ek === "sub-xfer" || ek === "walk";
+      // ★ 2026-10-17 (YJ: 최소환승 탭이 '환승 없음'이라는데 실제로는 구로·금정에서 열차를 두 번 갈아탄다):
+      //   같은 노선 안에서 일반(ride)↔급행(xpress)을 바꿔 타는 것도 환승이다. 예전엔 노선 갈아타기(sub-xfer)만 환승 비용을 물어서
+      //   일반·급행을 번갈아 타는 경로가 공짜로 가장 빠르게 보였다.
+      const trainSwap = (ek === "ride" || ek === "xpress") && (pkA[u] === "ride" || pkA[u] === "xpress") && pkA[u] !== ek && plA[u] === e.line;
       const busXfer = ek === "bus" && pkA[u] === "bus" && plA[u] !== e.line;
       const board = ek === "bus" && (pkA[u] !== "bus" || busXfer);
       let bw = 0;
@@ -1462,7 +1466,7 @@ function dijkstraRaw(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
         ew = XP_LAST_HOP;
         xw = Math.max(0, _xw - (e.bw || XP_BASE_WAIT));
       }
-      const nd = d + (isW ? ew * wpen : ek === "bus" && busW > 1 ? ew * busW : ew) + (isX || busXfer ? xpen : 0) + (busW > 1 ? bw * busW : bw) + xw;
+      const nd = d + (isW ? ew * wpen : ek === "bus" && busW > 1 ? ew * busW : ew) + (isX || busXfer || trainSwap ? xpen : 0) + (busW > 1 ? bw * busW : bw) + xw;
       let ti = e.ti;
       if (ti === void 0) { ti = djId(e.to); e.ti = ti; }
       const to = ti * 2 + (mustS ? ride ? 1 : ust : 0);
@@ -1556,6 +1560,7 @@ function dijkstraRaw(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
         legs.push(cur);
       }
       if (cur._lastK && cur._lastK !== k && cur.stopList.length) {
+        xf++;
         (cur.swaps = cur.swaps || []).push({ at: cur.stopList[cur.stopList.length - 1], idx: cur.stopList.length - 1, to: k === "xpress" ? "express" : "local" });
       }
       cur._lastK = k;

@@ -47,7 +47,7 @@ t('길찾기: 가→나는 일반, 나→라는 급행이면 leg.swaps 에 나·
   const s = mod.buildSubway(B);
   const G = { adj: s.adj, ST: s.ST, LN: s.LN, _baseMs: Date.UTC(2026, 9, 14, 3, 0) };
   const all = new Array(480).fill(1);
-  [[2, 3], [3, 4]].forEach(([a, b]) => (G.adj['S|' + a] = G.adj['S|' + a] || []).push({ to: 'S|' + b, w: 120, kind: 'xpress', line: 'L1', dep: all, depW: all, hp: null, hpW: null, bw: 150 }));
+  [[2, 3], [3, 4]].forEach(([a, b]) => (G.adj['S|' + a] = G.adj['S|' + a] || []).push({ to: 'S|' + b, w: 30, kind: 'xpress', line: 'L1', dep: all, depW: all, hp: null, hpW: null, bw: 150 }));
   const r = mod.dijkstra(G, {}, {}, 37.5, 127.001, 37.5, 127.299, 'minTime', {});
   assert.ok(r, '경로');
   const L = r.legs.find((x) => x.mode === 'subway');
@@ -61,9 +61,28 @@ t('길찾기: 처음부터 끝까지 급행이면 갈아타기가 없다', () =>
   const s = mod.buildSubway(B);
   const G = { adj: s.adj, ST: s.ST, LN: s.LN, _baseMs: Date.UTC(2026, 9, 14, 3, 0) };
   const all = new Array(480).fill(1);
-  [[1, 2], [2, 3], [3, 4]].forEach(([a, b]) => (G.adj['S|' + a] = G.adj['S|' + a] || []).push({ to: 'S|' + b, w: 120, kind: 'xpress', line: 'L1', dep: all, depW: all, hp: null, hpW: null, bw: 150 }));
+  [[1, 2], [2, 3], [3, 4]].forEach(([a, b]) => (G.adj['S|' + a] = G.adj['S|' + a] || []).push({ to: 'S|' + b, w: 30, kind: 'xpress', line: 'L1', dep: all, depW: all, hp: null, hpW: null, bw: 150 }));
   const r = mod.dijkstra(G, {}, {}, 37.5, 127.001, 37.5, 127.299, 'minTime', {});
   const L = r.legs.find((x) => x.mode === 'subway');
   assert.ok(L && !(L.swaps && L.swaps.length), JSON.stringify(L && L.swaps));
+});
+
+// ── 열차 갈아타기도 환승 비용·횟수에 든다 (최소환승 탭이 '환승 없음'이라면서 두 번 갈아타던 문제)
+const mk = () => {
+  const s = mod.buildSubway(B);
+  const G = { adj: s.adj, ST: s.ST, LN: s.LN, _baseMs: Date.UTC(2026, 9, 14, 3, 0) };
+  const all = new Array(480).fill(1);
+  [[2, 3], [3, 4]].forEach(([a, b]) => (G.adj['S|' + a] = G.adj['S|' + a] || []).push({ to: 'S|' + b, w: 30, kind: 'xpress', line: 'L1', dep: all, depW: all, hp: null, hpW: null, bw: 150 }));
+  return G;
+};
+t('최단시간: 급행이 훨씬 빠르면 갈아타고, 그 갈아타기가 transfers 에 센다', () => {
+  const r = mod.dijkstra(mk(), {}, {}, 37.5, 127.001, 37.5, 127.299, 'minTime', {});
+  assert.strictEqual(r.transfers, 1, 'transfers ' + r.transfers);
+});
+t('최소환승: 일반만 타고 가서 환승 0 (갈아타기에 환승 비용이 든다)', () => {
+  const r = mod.dijkstra(mk(), {}, {}, 37.5, 127.001, 37.5, 127.299, 'minTransfer', {});
+  const L = r.legs.find((x) => x.mode === 'subway');
+  assert.strictEqual(r.transfers, 0, 'transfers ' + r.transfers + ' ' + JSON.stringify(L.swaps));
+  assert.ok(!(L.swaps && L.swaps.length));
 });
 console.log(fail ? ('FAIL ' + fail) : 'ALL OK'); process.exit(fail ? 1 : 0);

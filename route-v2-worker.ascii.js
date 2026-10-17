@@ -37,7 +37,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-17s36";
+var ENGINE_VERSION = "route-v2-2026-10-17s37";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -1420,6 +1420,10 @@ function dijkstraRaw(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
       }
       const isW = ek === "walk";
       const isX = ek === "sub-xfer" || ek === "walk";
+      // \u2605 2026-10-17 (YJ: \ucd5c\uc18c\ud658\uc2b9 \ud0ed\uc774 '\ud658\uc2b9 \uc5c6\uc74c'\uc774\ub77c\ub294\ub370 \uc2e4\uc81c\ub85c\ub294 \uad6c\ub85c\u00b7\uae08\uc815\uc5d0\uc11c \uc5f4\ucc28\ub97c \ub450 \ubc88 \uac08\uc544\ud0c4\ub2e4):
+      //   \uac19\uc740 \ub178\uc120 \uc548\uc5d0\uc11c \uc77c\ubc18(ride)\u2194\uae09\ud589(xpress)\uc744 \ubc14\uafd4 \ud0c0\ub294 \uac83\ub3c4 \ud658\uc2b9\uc774\ub2e4. \uc608\uc804\uc5d4 \ub178\uc120 \uac08\uc544\ud0c0\uae30(sub-xfer)\ub9cc \ud658\uc2b9 \ube44\uc6a9\uc744 \ubb3c\uc5b4\uc11c
+      //   \uc77c\ubc18\u00b7\uae09\ud589\uc744 \ubc88\uac08\uc544 \ud0c0\ub294 \uacbd\ub85c\uac00 \uacf5\uc9dc\ub85c \uac00\uc7a5 \ube60\ub974\uac8c \ubcf4\uc600\ub2e4.
+      const trainSwap = (ek === "ride" || ek === "xpress") && (pkA[u] === "ride" || pkA[u] === "xpress") && pkA[u] !== ek && plA[u] === e.line;
       const busXfer = ek === "bus" && pkA[u] === "bus" && plA[u] !== e.line;
       const board = ek === "bus" && (pkA[u] !== "bus" || busXfer);
       let bw = 0;
@@ -1462,7 +1466,7 @@ function dijkstraRaw(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
         ew = XP_LAST_HOP;
         xw = Math.max(0, _xw - (e.bw || XP_BASE_WAIT));
       }
-      const nd = d + (isW ? ew * wpen : ek === "bus" && busW > 1 ? ew * busW : ew) + (isX || busXfer ? xpen : 0) + (busW > 1 ? bw * busW : bw) + xw;
+      const nd = d + (isW ? ew * wpen : ek === "bus" && busW > 1 ? ew * busW : ew) + (isX || busXfer || trainSwap ? xpen : 0) + (busW > 1 ? bw * busW : bw) + xw;
       let ti = e.ti;
       if (ti === void 0) { ti = djId(e.to); e.ti = ti; }
       const to = ti * 2 + (mustS ? ride ? 1 : ust : 0);
@@ -1556,6 +1560,7 @@ function dijkstraRaw(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
         legs.push(cur);
       }
       if (cur._lastK && cur._lastK !== k && cur.stopList.length) {
+        xf++;
         (cur.swaps = cur.swaps || []).push({ at: cur.stopList[cur.stopList.length - 1], idx: cur.stopList.length - 1, to: k === "xpress" ? "express" : "local" });
       }
       cur._lastK = k;
