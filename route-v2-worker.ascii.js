@@ -37,7 +37,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-17s35";
+var ENGINE_VERSION = "route-v2-2026-10-17s36";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -1555,6 +1555,10 @@ function dijkstraRaw(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
         }
         legs.push(cur);
       }
+      if (cur._lastK && cur._lastK !== k && cur.stopList.length) {
+        (cur.swaps = cur.swaps || []).push({ at: cur.stopList[cur.stopList.length - 1], idx: cur.stopList.length - 1, to: k === "xpress" ? "express" : "local" });
+      }
+      cur._lastK = k;
       cur.stopList.push(s.n);
       cur.coordList.push(s.y == null ? null : [s.y, s.x]);
       cur.to = s.n;
@@ -1679,6 +1683,7 @@ function dijkstraRaw(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
       o.coordList = L.coordList;
       o.secList = L.secList || null;
       if (L.hasExpress) o.express = true;
+      if (L.swaps && L.swaps.length) o.swaps = L.swaps;
       if (L.xpWait > 0) o.xpWaitSec = Math.round(L.xpWait);
       if (L.mode === "bus") {
         o.busNo = L.busNo;
@@ -2847,6 +2852,7 @@ function legsToSubPath(legs, r, o) {
         endY: _s1 ? _s1[0] : null,
         passStopList: { stations: _stns },
         xpWaitSec: L.xpWaitSec > 0 ? L.xpWaitSec : null,
+        trainChanges: L.mode === "subway" && L.swaps && L.swaps.length ? L.swaps : null,
         waitSec: L.mode === "bus" ? L.waitSec != null ? L.waitSec : null : null,
         waitReal: L.mode === "bus" ? !!L.waitReal : false,
         waitLive: L.mode === "bus" ? !!L.waitLive : false,
@@ -2945,6 +2951,60 @@ function legsToSubPath(legs, r, o) {
 }
 __name(legsToSubPath, "legsToSubPath");
 __name2(legsToSubPath, "legsToSubPath");
+function buildTransfers(sp) {
+  const out = [];
+  if (!Array.isArray(sp)) return out;
+  const isT = (x) => x && (x.trafficType === 1 || x.trafficType === 2 || x.trafficType === 4);
+  const lineOf = (x) => {
+    const l = x && x.lane && x.lane[0] || {};
+    return x.trafficType === 2 ? l.busNo || l.name || "" : l.name || "";
+  };
+  let prev = -1;
+  for (let i = 0; i < sp.length; i++) {
+    const x = sp[i];
+    if (!isT(x)) continue;
+    if (prev >= 0) {
+      const between = sp.slice(prev + 1, i);
+      const walkMin = between.reduce((a, b) => a + (b.sectionTime || 0), 0);
+      const viaXfer = between.some((b) => b.lane && b.lane[0] && b.lane[0].name === "\uD658\uC2B9");
+      const a = sp[prev];
+      out.push({
+        kind: between.length ? viaXfer ? "line" : "walk" : a.trafficType === 2 && x.trafficType === 2 ? "bus" : "line",
+        at: a.endName || "",
+        boardAt: x.startName || "",
+        fromType: a.trafficType,
+        fromLine: lineOf(a),
+        toType: x.trafficType,
+        toLine: lineOf(x),
+        walkMin,
+        secIdx: prev,
+        xferSecIdx: between.length ? prev + 1 : null
+      });
+    }
+    if (x.trafficType === 1 && Array.isArray(x.trainChanges)) {
+      for (const t of x.trainChanges) {
+        out.push({
+          kind: "train",
+          at: t.at || "",
+          boardAt: t.at || "",
+          fromType: 1,
+          fromLine: lineOf(x),
+          toType: 1,
+          toLine: lineOf(x),
+          service: t.to,
+          walkMin: 0,
+          secIdx: i,
+          stopIdx: t.idx,
+          xferSecIdx: null
+        });
+      }
+    }
+    prev = i;
+  }
+  return out;
+}
+__name(buildTransfers, "buildTransfers");
+__name2(buildTransfers, "buildTransfers");
 function routeToAppPath(r, pathType, o, tab) {
   if (!r) return null;
   const _sub = legsToSubPath(r.legs, r, o);
@@ -2971,6 +3031,7 @@ function routeToAppPath(r, pathType, o, tab) {
       ldOptions: r.options || null,
       ldNoWaitMin: r.noWaitMin != null ? r.noWaitMin : null,
       ldFastRide: r.fastRide || null,
+      transfers: buildTransfers(_sub),
       trip: buildTripInfo(_sub, o)
     },
     subPath: _sub
