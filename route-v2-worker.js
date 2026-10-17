@@ -37,7 +37,7 @@ var WARM_BUSY = null;
 function isoId() {
   return ISO_ID || (ISO_ID = Math.random().toString(36).slice(2, 8));
 }
-var ENGINE_VERSION = "route-v2-2026-10-17s37";
+var ENGINE_VERSION = "route-v2-2026-10-17s38";
 var MARGIN = 0.014;
 var MAX_STOPS = 3e4;
 var CS_DEFAULT = false;
@@ -1564,6 +1564,18 @@ function dijkstraRaw(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
         (cur.swaps = cur.swaps || []).push({ at: cur.stopList[cur.stopList.length - 1], idx: cur.stopList.length - 1, to: k === "xpress" ? "express" : "local" });
       }
       cur._lastK = k;
+      let _mids = null;
+      if (k === "xpress" && prev2 !== void 0 && prev2.charCodeAt(0) === 83 && cur.stopList.length) {
+        _mids = expressVia(G, prev2.slice(2), id, l);
+        if (_mids.length) {
+          for (const m of _mids) {
+            const ms = G.ST[m.id];
+            if (!ms) continue;
+            cur.stopList.push(ms.n);
+            cur.coordList.push(ms.y == null ? null : [ms.y, ms.x]);
+          }
+        } else _mids = null;
+      }
       cur.stopList.push(s.n);
       cur.coordList.push(s.y == null ? null : [s.y, s.x]);
       cur.to = s.n;
@@ -1580,7 +1592,9 @@ function dijkstraRaw(G, busCoord, busNm, sLat, sLng, eLat, eLng, mode, opt) {
         }
         cur.sec += _dw + _xe;
         if (_xe > 0) cur.xpWait = (cur.xpWait || 0) + _xe;
-        cur.secList.push((cur.secList.length ? cur.secList[cur.secList.length - 1] : 0) + _dw + _xe);
+        const _b0 = cur.secList.length ? cur.secList[cur.secList.length - 1] : 0;
+        if (_mids) for (const m of _mids) if (G.ST[m.id]) cur.secList.push(Math.round(_b0 + _xe + _dw * m.frac));
+        cur.secList.push(_b0 + _dw + _xe);
       }
     } else if (k === "bus") {
       const id = n.split("|")[1];
@@ -1916,6 +1930,66 @@ function xpBitsRaw(h) {
 }
 __name(xpBits, "xpBits");
 var XP_LAST_HOP = 0;
+// ★ 2026-10-17 (YJ: 급행 구간에 중간역이 없다): 급행 간선(xpress)은 한 열차가 서는 역들의 '모든 쌍'(A→B, 사이 역 건너뜀)으로 만들어져
+//   길찾기 결과에 A→B 한 칸만 남고 그 열차가 사이에 서는 역이 사라졌다. 같은 노선의 일반 간선 줄(chain)에서 A→B 사이 역 중
+//   '급행 간선이 A→C, C→B 로 모두 있고 시간이 맞아떨어지는'(A→C + C→B 가 A→B 보다 정차 시간만큼만 짧다) 역을 사이에 서는 역으로 되살린다.
+//   시각표 데이터는 그대로고 맞아떨어지는 역만 쓰므로, 근거가 없으면 빈 목록(예전과 같음).
+function expressVia(G, a, b, line) {
+  const adj = G && G.adj;
+  if (!adj || !G.ST || a === b) return [];
+  const cache = G.__xv || (G.__xv = {});
+  const ck = a + ">" + b + ":" + line;
+  if (cache[ck] !== void 0) return cache[ck];
+  let out = [];
+  try {
+    // 바로 이웃한 역 사이는 급행 간선이 아니라 일반 간선(ride)에 시간이 담겨 있다(만들 때 이웃 쌍은 ride 로 간다)
+    const xe = (u, v) => pickEdge(adj["S|" + u], "S|" + v, "xpress", line) || pickEdge(adj["S|" + u], "S|" + v, "ride", line);
+    const eAB = xe(a, b);
+    if (eAB) {
+      const prev = { [a]: null }, q = [a];
+      let found = false;
+      for (let qi = 0; qi < q.length && qi < 120 && !found; qi++) {
+        const u = q[qi], L = adj["S|" + u] || [];
+        for (let i = 0; i < L.length; i++) {
+          const x = L[i];
+          if (x.kind !== "ride" || x.line !== line) continue;
+          const v = x.to.slice(2);
+          if (prev[v] !== void 0) continue;
+          prev[v] = u;
+          if (v === b) { found = true; break; }
+          q.push(v);
+        }
+      }
+      if (found) {
+        const chain = [];
+        for (let c = b; c !== null && c !== void 0; c = prev[c]) chain.push(c);
+        chain.reverse();
+        let cur = a;
+        const stops = [];
+        for (let ci = chain.indexOf(a) + 1; ci < chain.length - 1; ci++) {
+          const c = chain[ci];
+          const e1 = xe(cur, c), e2 = xe(c, b), e0 = xe(cur, b);
+          if (!e1 || !e2 || !e0) continue;
+          const sum = e1.w + e2.w;
+          if (sum > e0.w + 30 || sum < e0.w - 120) continue;
+          stops.push({ id: c, w: e1.w });
+          cur = c;
+        }
+        if (stops.length) {
+          const tot = stops.reduce((m, x) => m + x.w, 0) + (xe(cur, b) ? xe(cur, b).w : 0);
+          let acc = 0;
+          out = stops.map((x) => { acc += x.w; return { id: x.id, frac: Math.min(0.98, Math.max(0.02, acc / (tot || 1))) }; });
+        }
+      }
+    }
+  } catch (e) {
+    out = [];
+  }
+  cache[ck] = out;
+  return out;
+}
+__name(expressVia, "expressVia");
+__name2(expressVia, "expressVia");
 function kricHopStr(m) {
   var o = [], k;
   for (k in m) o.push([+k, m[k]]);

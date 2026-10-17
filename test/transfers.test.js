@@ -85,4 +85,44 @@ t('최소환승: 일반만 타고 가서 환승 0 (갈아타기에 환승 비용
   assert.strictEqual(r.transfers, 0, 'transfers ' + r.transfers + ' ' + JSON.stringify(L.swaps));
   assert.ok(!(L.swaps && L.swaps.length));
 });
+
+// ── 급행 구간의 중간역: 열차가 서는 역을 되살린다
+const ST6 = { 1: { n: '가', l: 'L1', y: 37.5, x: 127.00 }, 2: { n: '나', l: 'L1', y: 37.5, x: 127.05 }, 3: { n: '다', l: 'L1', y: 37.5, x: 127.10 }, 4: { n: '라', l: 'L1', y: 37.5, x: 127.15 }, 5: { n: '마', l: 'L1', y: 37.5, x: 127.20 }, 6: { n: '바', l: 'L1', y: 37.5, x: 127.25 } };
+const seg6 = {}; [[1, 2], [2, 3], [3, 4], [4, 5], [5, 6]].forEach(([a, b]) => { seg6[a + '|' + b] = 600; seg6[b + '|' + a] = 600; });
+const B6 = { stations: ST6, lines: { L1: { n: '1호선', hw: 300 } }, seg: seg6, groups: {} };
+const mk6 = (hopW) => {
+  const s = mod.buildSubway(B6);
+  const G = { adj: s.adj, ST: s.ST, LN: s.LN, _baseMs: Date.UTC(2026, 9, 14, 3, 0) };
+  const all = new Array(480).fill(1);
+  // 급행은 1,3,5,6 에 선다: 도착 400·800·1000, 정차 30초 → 쌍(A→B)마다 (B 도착 − A 출발)
+  const arr = { 1: 0, 3: 400, 5: 800, 6: 1000 }, dep = { 1: 0, 3: 430, 5: 830, 6: 1000 };
+  const st = [1, 3, 5, 6];
+  for (let i = 0; i < st.length; i++) for (let j = i + 1; j < st.length; j++) {
+    const a = st[i], b = st[j];
+    if (b - a === 1) { const L = G.adj['S|' + a]; const e = L.find((x) => x.to === 'S|' + b && x.kind === 'ride'); e.w = arr[b] - dep[a]; e.w2 = e.w; continue; }
+    (G.adj['S|' + a] = G.adj['S|' + a] || []).push({ to: 'S|' + b, w: arr[b] - dep[a], kind: 'xpress', line: 'L1', dep: all, depW: all, hp: null, hpW: null, bw: 150 });
+  }
+  return G;
+};
+t('급행이 1→6 한 칸으로 달려도, 사이에 서는 역(다·마)이 구간에 남는다 (서지 않는 나·라는 없다)', () => {
+  const G = mk6();
+  const r = mod.dijkstra(G, {}, {}, 37.5, 127.001, 37.5, 127.249, 'minTime', {});
+  const L = r.legs.find((x) => x.mode === 'subway');
+  assert.ok(L, '구간');
+  assert.deepStrictEqual(L.stopList, ['가', '다', '마', '바'], JSON.stringify(L.stopList));
+  assert.strictEqual(L.secList.length, L.stopList.length, 'secList 길이');
+  for (let i = 1; i < L.secList.length; i++) assert.ok(L.secList[i] > L.secList[i - 1], '시각이 늘어난다 ' + JSON.stringify(L.secList));
+  const app = mod.routeToAppPath(r, 3, {}, 'fast');
+  const names = app.subPath.find((x) => x.trafficType === 1).passStopList.stations.map((x) => x.stationName);
+  assert.deepStrictEqual(names, ['가', '다', '마', '바']);
+});
+t('근거 없는 역은 만들지 않는다: 급행 쌍이 하나뿐이면 사이 역 없음', () => {
+  const s = mod.buildSubway(B6);
+  const G = { adj: s.adj, ST: s.ST, LN: s.LN, _baseMs: Date.UTC(2026, 9, 14, 3, 0) };
+  const all = new Array(480).fill(1);
+  (G.adj['S|1'] = G.adj['S|1'] || []).push({ to: 'S|6', w: 1000, kind: 'xpress', line: 'L1', dep: all, depW: all, hp: null, hpW: null, bw: 150 });
+  const r = mod.dijkstra(G, {}, {}, 37.5, 127.001, 37.5, 127.249, 'minTime', {});
+  const L = r.legs.find((x) => x.mode === 'subway');
+  assert.deepStrictEqual(L.stopList, ['가', '바'], JSON.stringify(L.stopList));
+});
 console.log(fail ? ('FAIL ' + fail) : 'ALL OK'); process.exit(fail ? 1 : 0);
